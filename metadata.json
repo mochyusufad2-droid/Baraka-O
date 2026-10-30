@@ -1,0 +1,6 @@
+{
+  "name": "BARAKA ADVENTURE",
+  "description": "Digital Orienteering & Amazing Race Platform untuk manajemen event, validasi checkpoint offline-first, dan pemantauan lokasi peserta.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

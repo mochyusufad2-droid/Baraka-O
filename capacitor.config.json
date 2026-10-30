@@ -1,0 +1,23 @@
+{
+  "appId": "com.baraka.adventure",
+  "appName": "BARAKA ADVENTURE",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_compass",
+      "iconColor": "#10B981"
+    },
+    "BackgroundRunner": {
+      "label": "com.baraka.adventure.location.task",
+      "src": "runners/locationRunner.js",
+      "event": "updateLastLocation",
+      "repeat": true,
+      "interval": 5,
+      "autoStart": false
+    }
+  }
+}

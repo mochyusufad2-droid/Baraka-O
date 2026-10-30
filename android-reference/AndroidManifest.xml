@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Konfigurasi Referensi AndroidManifest.xml untuk BARAKA ADVENTURE (Android 10 - Android 14+)
+  Digunakan saat proyek di-generate ke folder native Android menggunakan Capacitor (`npx cap add android`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.baraka.adventure">
+
+    <!-- 1. Izin Jaringan & Penyimpanan Offline -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 2. Izin Kamera untuk Pindai Setup QR, Start QR, Checkpoint QR, dan Finish QR -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- 3. Izin Lokasi Akurat (Saat Aplikasi Dibuka) -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- 4. Izin Lokasi Latar Belakang & Foreground Service (Untuk Pembaruan Posisi Terakhir ~5 Menit Saat Layar Terkunci) -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="true"
+        android:label="BARAKA ADVENTURE"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false">
+
+        <!-- Deklarasi Foreground Service bertipe Location sesuai syarat wajib Android 10 - 14+ -->
+        <service
+            android:name="com.baraka.adventure.LocationForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+    </application>
+</manifest>
