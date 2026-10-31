@@ -6,7 +6,6 @@ import {
   Trophy,
   Plus,
   Trash2,
-  QrCode,
   RefreshCw,
   CheckCircle2,
   Clock,
@@ -17,22 +16,27 @@ import {
   Lock,
   LogOut,
   FileSpreadsheet,
-  Copy,
-  Check,
   Printer,
   Calendar,
   MapPin,
+  Edit3,
+  X,
+  Check,
+  Timer,
 } from 'lucide-react';
 import {
   Course,
   Checkpoint,
   CheckpointReport,
+  GeoPointLocation,
   ParticipantPublic,
   ParticipantSession,
   SessionStatus,
   ValidationMethod,
 } from '../../types';
-import { QrCardModal, BulkQrPrintModal } from './QrPrintModals';
+import { BulkQrPrintModal } from './QrPrintModals';
+import { CourseMapPlanner } from './CourseMapPlanner';
+import { syncCourseToFirestore } from '../../firebase';
 
 interface DashboardApiData {
   serverTime: string;
@@ -69,6 +73,18 @@ function formatTimeAgo(isoString?: string): string {
   return `${diffHour} jam lalu`;
 }
 
+/**
+ * Hanya izinkan karakter angka (0-9) tetapi biarkan string kosong ""
+ * saat dihapus dengan Backspace agar tidak pernah menyisakan angka 0 (mencegah bug 010).
+ */
+function sanitizeDigitsOnly(val: string): string {
+  const digits = val.replace(/[^0-9]/g, '');
+  if (digits.length > 1 && digits.startsWith('0')) {
+    return digits.replace(/^0+/, '') || '0';
+  }
+  return digits;
+}
+
 export default function OrganizerDashboard() {
   const [token, setToken] = useState<string | null>(() =>
     localStorage.getItem(ORG_TOKEN_STORAGE_KEY)
@@ -82,15 +98,12 @@ export default function OrganizerDashboard() {
   const [selectedCourseId, setSelectedCourseId] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [copiedQr, setCopiedQr] = useState<string | null>(null);
-  const [previewQr, setPreviewQr] = useState<{
-    title: string;
-    subtitle: string;
-    payload: string;
-  } | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [bulkPrintCourse, setBulkPrintCourse] = useState<Course | null>(null);
 
-  // Unified Course Creation Form State (1-Step Course Setup)
+  // ==========================================================================
+  // STATE FORM BUAT COURSE BARU (Input angka disimpan sebagai string agar bersih saat dihapus)
+  // ==========================================================================
   const [newCourseName, setNewCourseName] = useState('');
   const [newCourseDescription, setNewCourseDescription] = useState('');
   const [newCourseLocation, setNewCourseLocation] = useState('');
@@ -101,16 +114,42 @@ export default function OrganizerDashboard() {
   const [newCourseValidation, setNewCourseValidation] = useState<ValidationMethod>(
     ValidationMethod.QR_AND_GPS
   );
-  const [newCourseRadius, setNewCourseRadius] = useState<number>(35);
+  const [newCourseRadiusInput, setNewCourseRadiusInput] = useState<string>('35');
   const [newCourseEnforceOrder, setNewCourseEnforceOrder] = useState<boolean>(true);
+  const [newCourseDurationInput, setNewCourseDurationInput] = useState<string>('60');
+  const [newCoursePenaltyEnabled, setNewCoursePenaltyEnabled] = useState<boolean>(true);
+  const [newCoursePenaltyInput, setNewCoursePenaltyInput] = useState<string>('10');
 
-  // Form States for Checkpoint Creation
-  const [cpCode, setCpCode] = useState('');
+  // ==========================================================================
+  // STATE EDIT COURSE AKTIF & KONFIRMASI HAPUS COURSE
+  // ==========================================================================
+  const [isEditingCourse, setIsEditingCourse] = useState<boolean>(false);
+  const [editCourseName, setEditCourseName] = useState('');
+  const [editCourseDescription, setEditCourseDescription] = useState('');
+  const [editCourseLocation, setEditCourseLocation] = useState('');
+  const [editCourseDate, setEditCourseDate] = useState('');
+  const [editCourseScoring, setEditCourseScoring] = useState(true);
+  const [editCourseValidation, setEditCourseValidation] = useState<ValidationMethod>(
+    ValidationMethod.QR_ONLY
+  );
+  const [editCourseRadiusInput, setEditCourseRadiusInput] = useState<string>('35');
+  const [editCourseEnforceOrder, setEditCourseEnforceOrder] = useState<boolean>(true);
+  const [editCourseDurationInput, setEditCourseDurationInput] = useState<string>('');
+  const [editCoursePenaltyEnabled, setEditCoursePenaltyEnabled] = useState<boolean>(false);
+  const [editCoursePenaltyInput, setEditCoursePenaltyInput] = useState<string>('10');
+
+  const [confirmDeleteCourse, setConfirmDeleteCourse] = useState<Course | null>(null);
+
+  // ==========================================================================
+  // STATE FORM TAMBAH / EDIT CHECKPOINT (Input Poin & Radius string bebas angka 0)
+  // ==========================================================================
+  const [editingCheckpointId, setEditingCheckpointId] = useState<string | null>(null);
+  const [cpCode, setCpCode] = useState('CP1');
   const [cpName, setCpName] = useState('');
-  const [cpPoints, setCpPoints] = useState<number>(100);
+  const [cpPointsInput, setCpPointsInput] = useState<string>('100');
   const [cpLat, setCpLat] = useState<string>('-6.8586');
   const [cpLng, setCpLng] = useState<string>('107.6305');
-  const [cpRadius, setCpRadius] = useState<number>(35);
+  const [cpRadiusInput, setCpRadiusInput] = useState<string>('35');
 
   // Form States for Participant Creation by Organizer
   const [partName, setPartName] = useState('');
@@ -124,6 +163,13 @@ export default function OrganizerDashboard() {
   useEffect(() => {
     const interval = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(interval);
+  }, []);
+
+  const showTemporarySuccess = useCallback((msg: string) => {
+    setSuccessMsg(msg);
+    setTimeout(() => {
+      setSuccessMsg((prev) => (prev === msg ? null : prev));
+    }, 3500);
   }, []);
 
   const handleLogout = useCallback(() => {
@@ -197,11 +243,197 @@ export default function OrganizerDashboard() {
     );
   }, [dashboard, selectedCourseId]);
 
-  // Compute Leaderboard rows sorted by Status (FINISHED > ACTIVE > NOT_STARTED), Score DESC, Duration ASC
+  // Saat berganti Course atau jumlah CP bertambah, otomatis isi saran kode pos berikutnya (CP1, CP2, dst.)
+  useEffect(() => {
+    if (!selectedCourse) return;
+    if (!editingCheckpointId) {
+      const nextNum = selectedCourse.checkpoints.length + 1;
+      setCpCode(`CP${nextNum}`);
+      setCpRadiusInput(String(selectedCourse.defaultGpsRadiusMeters || 35));
+    }
+  }, [
+    selectedCourse?.id,
+    selectedCourse?.checkpoints.length,
+    selectedCourse?.defaultGpsRadiusMeters,
+    editingCheckpointId,
+  ]);
+
+  // Buka mode Edit Course dengan menyalin data Course aktif ke state form edit
+  const handleStartEditCourse = (course: Course) => {
+    setEditCourseName(course.name);
+    setEditCourseDescription(course.description || '');
+    setEditCourseLocation(course.locationName || '');
+    setEditCourseDate(course.date || new Date().toISOString().slice(0, 10));
+    setEditCourseScoring(course.scoringEnabled);
+    setEditCourseValidation(course.validationMethod);
+    setEditCourseRadiusInput(String(course.defaultGpsRadiusMeters || 35));
+    setEditCourseEnforceOrder(course.enforceOrder);
+    setEditCourseDurationInput(
+      course.durationMinutes && course.durationMinutes > 0
+        ? String(course.durationMinutes)
+        : ''
+    );
+    setEditCoursePenaltyEnabled(Boolean(course.overtimePenaltyEnabled));
+    setEditCoursePenaltyInput(
+      course.overtimePenaltyPointsPerMinute !== undefined &&
+        course.overtimePenaltyPointsPerMinute > 0
+        ? String(course.overtimePenaltyPointsPerMinute)
+        : '10'
+    );
+    setIsEditingCourse(true);
+  };
+
+  // Simpan perubahan Edit Course Aktif
+  const handleSaveEditCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCourse || !editCourseName.trim() || !token) return;
+    try {
+      const parsedRadius = Math.max(5, Number(editCourseRadiusInput) || 35);
+      const parsedDuration = Math.max(0, Number(editCourseDurationInput) || 0);
+      const parsedPenalty = Math.max(0, Number(editCoursePenaltyInput) || 0);
+
+      const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: editCourseName.trim(),
+          description: editCourseDescription.trim(),
+          locationName: editCourseLocation.trim(),
+          date: editCourseDate,
+          scoringEnabled: editCourseScoring,
+          validationMethod: editCourseValidation,
+          defaultGpsRadiusMeters: parsedRadius,
+          enforceOrder: editCourseEnforceOrder,
+          durationMinutes: parsedDuration,
+          overtimePenaltyEnabled: editCoursePenaltyEnabled,
+          overtimePenaltyPointsPerMinute: parsedPenalty,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui Course.');
+      setIsEditingCourse(false);
+      await fetchDashboard();
+      if (data.course) {
+        syncCourseToFirestore(data.course).catch(() => {});
+      }
+      showTemporarySuccess(`Course "${data.course.name}" berhasil diperbarui!`);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal memperbarui Course'
+      );
+    }
+  };
+
+  // Hapus Course Aktif
+  const handleConfirmDeleteCourse = async () => {
+    if (!confirmDeleteCourse || !token) return;
+    const targetName = confirmDeleteCourse.name;
+    try {
+      const res = await fetch(
+        `/api/organizer/courses/${confirmDeleteCourse.id}`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal menghapus Course.');
+      setConfirmDeleteCourse(null);
+      setIsEditingCourse(false);
+      setEditingCheckpointId(null);
+      await fetchDashboard();
+      showTemporarySuccess(`Course "${targetName}" telah dihapus.`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghapus Course');
+    }
+  };
+
+  // Update Titik Start / Finish dari Peta Interaktif
+  const handleUpdateStartLocation = useCallback(
+    async (loc: GeoPointLocation | null) => {
+      if (!selectedCourse || !token) return;
+      try {
+        const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ startLocation: loc }),
+        });
+        if (!res.ok) throw new Error('Gagal menyimpan titik Start');
+        await fetchDashboard();
+        showTemporarySuccess(
+          loc
+            ? `🔺 Titik Start disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+            : 'Titik Start direset.'
+        );
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : 'Gagal memperbarui titik Start'
+        );
+      }
+    },
+    [selectedCourse, token, fetchDashboard, showTemporarySuccess]
+  );
+
+  const handleUpdateFinishLocation = useCallback(
+    async (loc: GeoPointLocation | null) => {
+      if (!selectedCourse || !token) return;
+      try {
+        const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ finishLocation: loc }),
+        });
+        if (!res.ok) throw new Error('Gagal menyimpan titik Finish');
+        await fetchDashboard();
+        showTemporarySuccess(
+          loc
+            ? `◎ Titik Finish disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+            : 'Titik Finish direset.'
+        );
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : 'Gagal memperbarui titik Finish'
+        );
+      }
+    },
+    [selectedCourse, token, fetchDashboard, showTemporarySuccess]
+  );
+
+  // Pilih Checkpoint untuk Diedit (dari tabel maupun dari klik simbol di peta)
+  const handleSelectCheckpointForEdit = useCallback((cp: Checkpoint) => {
+    setEditingCheckpointId(cp.id);
+    setCpCode(cp.code);
+    setCpName(cp.name || '');
+    setCpPointsInput(String(cp.points));
+    setCpLat(String(cp.latitude));
+    setCpLng(String(cp.longitude));
+    setCpRadiusInput(String(cp.radiusMeters));
+  }, []);
+
+  const handleCancelEditCheckpoint = useCallback(() => {
+    setEditingCheckpointId(null);
+    const nextNum = (selectedCourse?.checkpoints.length || 0) + 1;
+    setCpCode(`CP${nextNum}`);
+    setCpName('');
+    setCpPointsInput('100');
+    setCpRadiusInput(String(selectedCourse?.defaultGpsRadiusMeters || 35));
+  }, [selectedCourse]);
+
+  // Compute Leaderboard rows with live / finished Overtime Penalty calculation
   const leaderboardRows = useMemo(() => {
     if (!dashboard) return [];
     const filteredSessions = dashboard.sessions.filter(
-      (s: ParticipantSession) => !selectedCourse || s.courseId === selectedCourse.id
+      (s: ParticipantSession) =>
+        !selectedCourse || s.courseId === selectedCourse.id
     );
 
     const statusWeight = (status: SessionStatus) => {
@@ -210,7 +442,74 @@ export default function OrganizerDashboard() {
       return 1;
     };
 
-    return [...filteredSessions]
+    const enriched = filteredSessions.map((sess) => {
+      const participant = dashboard.participants.find(
+        (p: ParticipantPublic) => p.id === sess.participantId
+      );
+      const course = dashboard.courses.find(
+        (c: Course) => c.id === sess.courseId
+      );
+      const liveDurationSec =
+        sess.status === SessionStatus.FINISHED
+          ? sess.durationSeconds
+          : sess.status === SessionStatus.ACTIVE && sess.startedAt
+          ? Math.max(0, Math.floor((nowTick - Date.parse(sess.startedAt)) / 1000))
+          : undefined;
+
+      const grossScore =
+        sess.grossScore !== undefined
+          ? sess.grossScore
+          : course?.scoringEnabled
+          ? sess.validatedCheckpointIds.reduce((sum, cpId) => {
+              const cp = course.checkpoints.find((c) => c.id === cpId);
+              return sum + (cp ? Number(cp.points) || 0 : 0);
+            }, 0)
+          : sess.totalScore;
+
+      let overtimeMinutes = sess.overtimeMinutes || 0;
+      let penaltyPoints = sess.penaltyPoints || 0;
+
+      if (
+        course &&
+        course.durationMinutes &&
+        course.durationMinutes > 0 &&
+        liveDurationSec !== undefined &&
+        liveDurationSec > course.durationMinutes * 60
+      ) {
+        const overSec = liveDurationSec - course.durationMinutes * 60;
+        overtimeMinutes = Math.ceil(overSec / 60);
+        if (course.overtimePenaltyEnabled) {
+          penaltyPoints =
+            overtimeMinutes *
+            Math.max(0, Number(course.overtimePenaltyPointsPerMinute) || 0);
+        }
+      }
+
+      const netScore =
+        sess.status === SessionStatus.FINISHED
+          ? sess.totalScore
+          : Math.max(0, grossScore - penaltyPoints);
+
+      return {
+        sessionId: sess.id,
+        bibNumber: participant?.bibNumber || '-',
+        participantName: participant?.name || 'Peserta',
+        teamName: participant?.teamName || '-',
+        courseId: sess.courseId,
+        courseName: course?.name || sess.courseId,
+        status: sess.status,
+        checkpointsCompleted: sess.validatedCheckpointIds.length,
+        totalCheckpoints: course?.checkpoints.length || 0,
+        grossScore,
+        overtimeMinutes,
+        penaltyPoints,
+        totalScore: netScore,
+        durationSeconds: liveDurationSec,
+        lastLocationAt: sess.lastLocation?.measuredAt,
+      };
+    });
+
+    return enriched
       .sort((a, b) => {
         const wDiff = statusWeight(b.status) - statusWeight(a.status);
         if (wDiff !== 0) return wDiff;
@@ -219,47 +518,21 @@ export default function OrganizerDashboard() {
         const bDur = b.durationSeconds ?? Number.MAX_SAFE_INTEGER;
         return aDur - bDur;
       })
-      .map((sess, idx) => {
-        const participant = dashboard.participants.find(
-          (p: ParticipantPublic) => p.id === sess.participantId
-        );
-        const course = dashboard.courses.find((c: Course) => c.id === sess.courseId);
-        const liveDurationSec =
-          sess.status === SessionStatus.FINISHED
-            ? sess.durationSeconds
-            : sess.status === SessionStatus.ACTIVE && sess.startedAt
-            ? Math.max(0, Math.floor((nowTick - Date.parse(sess.startedAt)) / 1000))
-            : undefined;
-
-        return {
-          rank: idx + 1,
-          sessionId: sess.id,
-          bibNumber: participant?.bibNumber || '-',
-          participantName: participant?.name || 'Peserta',
-          teamName: participant?.teamName || '-',
-          courseId: sess.courseId,
-          courseName: course?.name || sess.courseId,
-          status: sess.status,
-          checkpointsCompleted: sess.validatedCheckpointIds.length,
-          totalCheckpoints: course?.checkpoints.length || 0,
-          totalScore: sess.totalScore,
-          durationSeconds: liveDurationSec,
-          lastLocationAt: sess.lastLocation?.measuredAt,
-        };
-      });
+      .map((item, idx) => ({
+        ...item,
+        rank: idx + 1,
+      }));
   }, [dashboard, selectedCourse, nowTick]);
 
-  const handleCopyQr = (qrText: string) => {
-    navigator.clipboard.writeText(qrText);
-    setCopiedQr(qrText);
-    setTimeout(() => setCopiedQr(null), 1800);
-  };
-
-  // Create Unified Course
+  // Create Unified Course (Location optional, clean number strings, duration & penalty)
   const handleCreateCourse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCourseName.trim() || !token) return;
     try {
+      const parsedRadius = Math.max(5, Number(newCourseRadiusInput) || 35);
+      const parsedDuration = Math.max(0, Number(newCourseDurationInput) || 0);
+      const parsedPenalty = Math.max(0, Number(newCoursePenaltyInput) || 0);
+
       const res = await fetch('/api/organizer/courses', {
         method: 'POST',
         headers: {
@@ -267,15 +540,18 @@ export default function OrganizerDashboard() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: newCourseName,
-          description: newCourseDescription,
-          locationName: newCourseLocation || 'Area Lomba Utama',
+          name: newCourseName.trim(),
+          description: newCourseDescription.trim(),
+          locationName: newCourseLocation.trim(),
           date: newCourseDate,
           scoringEnabled: newCourseScoring,
           validationMethod: newCourseValidation,
-          defaultGpsRadiusMeters: newCourseRadius,
+          defaultGpsRadiusMeters: parsedRadius,
           enforceOrder: newCourseEnforceOrder,
           allowParticipantMapVisibility: true,
+          durationMinutes: parsedDuration,
+          overtimePenaltyEnabled: newCoursePenaltyEnabled,
+          overtimePenaltyPointsPerMinute: parsedPenalty,
         }),
       });
       const data = await res.json();
@@ -287,41 +563,97 @@ export default function OrganizerDashboard() {
       await fetchDashboard();
       if (created?.id) {
         setSelectedCourseId(created.id);
+        setIsEditingCourse(false);
+        showTemporarySuccess(`Course "${created.name}" berhasil dibuat!`);
+        syncCourseToFirestore(created).catch(() => {});
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Gagal membuat Course');
     }
   };
 
-  // Add Checkpoint to Course
-  const handleAddCheckpoint = async (e: React.FormEvent) => {
+  // Add or Update Checkpoint in Course (Nama Lokasi Pos opsional, Poin & Radius dari string)
+  const handleSaveCheckpoint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCourse || !cpCode.trim() || !cpName.trim() || !token) return;
-    try {
-      const res = await fetch(
-        `/api/organizer/courses/${selectedCourse.id}/checkpoints`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            code: cpCode,
-            name: cpName,
-            points: cpPoints,
-            latitude: parseFloat(cpLat),
-            longitude: parseFloat(cpLng),
-            radiusMeters: cpRadius,
-          }),
-        }
+    if (!selectedCourse || !cpCode.trim() || !token) return;
+
+    const parsedLat = parseFloat(cpLat);
+    const parsedLng = parseFloat(cpLng);
+    if (Number.isNaN(parsedLat) || Number.isNaN(parsedLng)) {
+      setErrorMsg(
+        'Koordinat Latitude & Longitude wajib berupa angka (atau klik titik di peta).'
       );
-      if (!res.ok) throw new Error('Gagal menambahkan checkpoint');
-      setCpCode('');
-      setCpName('');
-      await fetchDashboard();
+      return;
+    }
+
+    const parsedPoints =
+      cpPointsInput.trim() === '' ? 0 : Math.max(0, Number(cpPointsInput) || 0);
+    const parsedRadius =
+      cpRadiusInput.trim() === ''
+        ? selectedCourse.defaultGpsRadiusMeters || 35
+        : Math.max(5, Number(cpRadiusInput) || 35);
+
+    try {
+      if (editingCheckpointId) {
+        const res = await fetch(
+          `/api/organizer/courses/${selectedCourse.id}/checkpoints/${editingCheckpointId}`,
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              code: cpCode.trim().toUpperCase(),
+              name: cpName.trim(),
+              points: parsedPoints,
+              latitude: parsedLat,
+              longitude: parsedLng,
+              radiusMeters: parsedRadius,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok)
+          throw new Error(data.error || 'Gagal memperbarui checkpoint');
+        setEditingCheckpointId(null);
+        setCpName('');
+        await fetchDashboard();
+        showTemporarySuccess(
+          `Pos ${cpCode.trim().toUpperCase()} berhasil diperbarui!`
+        );
+      } else {
+        const res = await fetch(
+          `/api/organizer/courses/${selectedCourse.id}/checkpoints`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              code: cpCode.trim().toUpperCase(),
+              name: cpName.trim(),
+              points: parsedPoints,
+              latitude: parsedLat,
+              longitude: parsedLng,
+              radiusMeters: parsedRadius,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok)
+          throw new Error(data.error || 'Gagal menambahkan checkpoint');
+        setCpName('');
+        await fetchDashboard();
+        showTemporarySuccess(
+          `Pos ${cpCode.trim().toUpperCase()} berhasil ditambahkan ke ${selectedCourse.name}!`
+        );
+      }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Gagal menambahkan checkpoint');
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal menyimpan checkpoint'
+      );
     }
   };
 
@@ -336,7 +668,11 @@ export default function OrganizerDashboard() {
           headers: { Authorization: `Bearer ${token}` },
         }
       );
+      if (editingCheckpointId === cpId) {
+        setEditingCheckpointId(null);
+      }
       await fetchDashboard();
+      showTemporarySuccess('Checkpoint berhasil dihapus.');
     } catch {
       setErrorMsg('Gagal menghapus checkpoint');
     }
@@ -385,7 +721,7 @@ export default function OrganizerDashboard() {
     }
   };
 
-  // Export CSV Leaderboard
+  // Export CSV Leaderboard (termasuk Poin Kotor, Penalti Terlambat, dan Total Skor Bersih)
   const handleExportCsv = () => {
     const headers = [
       'Rank',
@@ -396,7 +732,10 @@ export default function OrganizerDashboard() {
       'Status',
       'CP Valid',
       'Total CP',
-      'Skor Poin',
+      'Poin Pos (Gross)',
+      'Menit Terlambat',
+      'Penalti Terlambat',
+      'Total Skor Akhir (Net)',
       'Waktu Tempuh',
       'Update Lokasi Terakhir',
     ];
@@ -412,6 +751,9 @@ export default function OrganizerDashboard() {
           r.status,
           r.checkpointsCompleted,
           r.totalCheckpoints,
+          r.grossScore,
+          r.overtimeMinutes,
+          r.penaltyPoints,
           r.totalScore,
           `"${formatElapsedSeconds(r.durationSeconds)}"`,
           `"${r.lastLocationAt || '-'}"`,
@@ -451,9 +793,9 @@ export default function OrganizerDashboard() {
           </div>
 
           <p className="text-xs text-slate-400 leading-relaxed">
-            Masukkan PIN Organizer untuk mengelola Course, mencetak QR Code
-            massal (2–8 QR per halaman), memantau peserta aktif, dan mengunduh
-            hasil lomba.
+            Masukkan PIN Organizer untuk mengelola Course di peta interaktif,
+            mencetak QR Code massal (2–8 QR per halaman), memantau peserta aktif,
+            dan mengunduh hasil lomba.
           </p>
 
           <form onSubmit={handleLogin} className="space-y-4">
@@ -522,12 +864,12 @@ export default function OrganizerDashboard() {
                 PUSAT KENDALI ORGANIZER
               </span>
               <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                COURSE UNIFIED
+                COURSE PLANNER
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Kelola Course, Cetak QR Code Massal (2–8/Hal), Live Monitoring &amp;
-              Leaderboard
+              Peta Interaktif Pos (🔺 ⭕ ◎), Print QR Massal (2–8/Hal), Durasi &amp;
+              Penalti, Live Leaderboard
             </p>
           </div>
         </div>
@@ -538,7 +880,11 @@ export default function OrganizerDashboard() {
               <MapIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <select
                 value={selectedCourse?.id || ''}
-                onChange={(e) => setSelectedCourseId(e.target.value)}
+                onChange={(e) => {
+                  setSelectedCourseId(e.target.value);
+                  setIsEditingCourse(false);
+                  setEditingCheckpointId(null);
+                }}
                 className="bg-transparent text-xs text-slate-200 focus:outline-none font-medium"
               >
                 {dashboard.courses.map((c: Course) => (
@@ -575,7 +921,7 @@ export default function OrganizerDashboard() {
       <div className="flex overflow-x-auto border-b border-slate-800">
         {[
           { id: 'OVERVIEW', label: '1. Overview', icon: LayoutDashboard },
-          { id: 'COURSES', label: '2. Course Management', icon: MapIcon },
+          { id: 'COURSES', label: '2. Course & Peta Pos', icon: MapIcon },
           { id: 'MONITORING', label: '3. Live Monitoring', icon: Radio },
           { id: 'RESULT', label: '4. Result & Leaderboard', icon: Trophy },
         ].map((tab) => {
@@ -602,6 +948,21 @@ export default function OrganizerDashboard() {
         <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
           <span>{errorMsg}</span>
           <button onClick={() => setErrorMsg(null)} className="underline ml-4">
+            Tutup
+          </button>
+        </div>
+      )}
+
+      {successMsg && (
+        <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            {successMsg}
+          </span>
+          <button
+            onClick={() => setSuccessMsg(null)}
+            className="underline ml-4"
+          >
             Tutup
           </button>
         </div>
@@ -685,7 +1046,7 @@ export default function OrganizerDashboard() {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Selected Course Summary Card */}
+            {/* Selected Course Summary Card (Tanpa kotak QR individual — terpusat di Print QR Massal) */}
             <div className="lg:col-span-2 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div>
@@ -697,19 +1058,19 @@ export default function OrganizerDashboard() {
                   </h2>
                 </div>
                 {selectedCourse && (
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => setBulkPrintCourse(selectedCourse)}
-                      className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition"
+                      className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition shadow"
                     >
                       <Printer className="w-3.5 h-3.5" />
-                      Print QR Massal (2–8/Hal)
+                      Print QR Code Massal
                     </button>
                     <button
                       onClick={() => setActiveTab('COURSES')}
-                      className="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+                      className="text-xs px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
                     >
-                      Kelola Course &amp; QR →
+                      Kelola Peta &amp; Course →
                     </button>
                   </div>
                 )}
@@ -717,14 +1078,16 @@ export default function OrganizerDashboard() {
 
               {selectedCourse ? (
                 <div className="space-y-4">
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    {selectedCourse.description}
-                  </p>
+                  {selectedCourse.description && (
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      {selectedCourse.description}
+                    </p>
+                  )}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
                       <div className="text-slate-400">Lokasi Course</div>
                       <div className="font-semibold text-white mt-0.5">
-                        {selectedCourse.locationName}
+                        {selectedCourse.locationName || '-(Opsional)-'}
                       </div>
                     </div>
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
@@ -741,84 +1104,55 @@ export default function OrganizerDashboard() {
                       <div className="font-semibold text-white mt-0.5">
                         {selectedCourse.enforceOrder
                           ? 'Wajib Berurutan'
-                          : 'Bebas (Score Orienteering)'}
+                          : 'Bebas (Score-O)'}
+                      </div>
+                      <div className="text-[11px] text-emerald-400 mt-0.5">
+                        Total Pos: {selectedCourse.checkpoints.length} CP
                       </div>
                     </div>
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                      <div className="text-slate-400">Tanggal Pelaksanaan</div>
-                      <div className="font-mono font-semibold text-emerald-400 mt-0.5">
-                        {selectedCourse.date}
+                      <div className="text-slate-400">Durasi &amp; Penalti</div>
+                      <div className="font-mono font-semibold text-sky-300 mt-0.5">
+                        {selectedCourse.durationMinutes &&
+                        selectedCourse.durationMinutes > 0
+                          ? `${selectedCourse.durationMinutes} Menit`
+                          : 'Tanpa Batas Waktu'}
+                      </div>
+                      <div className="text-[11px] text-rose-300 mt-0.5">
+                        {selectedCourse.durationMinutes &&
+                        selectedCourse.durationMinutes > 0 &&
+                        selectedCourse.overtimePenaltyEnabled
+                          ? `Penalti: -${
+                              selectedCourse.overtimePenaltyPointsPerMinute || 0
+                            } poin/mnt`
+                          : 'Tanpa Penalti Waktu'}
                       </div>
                     </div>
                   </div>
 
-                  {/* Quick QR Codes Preview */}
-                  <div className="p-3.5 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2">
-                    <div className="text-xs font-semibold text-slate-200 flex items-center gap-2">
-                      <QrCode className="w-4 h-4 text-amber-400" />
-                      Kode QR Utama (Setup, Start, Finish) — Course:{' '}
-                      {selectedCourse.name}
+                  {/* Info Pemusatan QR Code Massal */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="text-slate-300">
+                      Seluruh QR Code resmi untuk Course ini (
+                      <strong className="text-white">
+                        SETUP, START, {selectedCourse.checkpoints.length} POS CP,
+                        dan FINISH
+                      </strong>
+                      ) telah disatukan di menu cetak massal.
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                      {[
-                        {
-                          label: '1. Setup Course QR',
-                          code: selectedCourse.setupQrCode,
-                        },
-                        {
-                          label: '2. Start Timer QR',
-                          code: selectedCourse.startQrCode,
-                        },
-                        {
-                          label: '3. Finish Timer QR',
-                          code: selectedCourse.finishQrCode,
-                        },
-                      ].map((item) => (
-                        <div
-                          key={item.label}
-                          className="p-2.5 rounded bg-slate-950 border border-slate-800 flex flex-col justify-between gap-2"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] text-slate-400 font-semibold">
-                              {item.label}
-                            </span>
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() =>
-                                  setPreviewQr({
-                                    title: item.label.toUpperCase(),
-                                    subtitle: `Course: ${selectedCourse.name}`,
-                                    payload: item.code,
-                                  })
-                                }
-                                className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-[10px] font-semibold flex items-center gap-1"
-                              >
-                                <QrCode className="w-3 h-3" /> QR
-                              </button>
-                              <button
-                                onClick={() => handleCopyQr(item.code)}
-                                className="text-slate-400 hover:text-slate-200 p-1"
-                                title="Salin Teks Payload"
-                              >
-                                {copiedQr === item.code ? (
-                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                ) : (
-                                  <Copy className="w-3.5 h-3.5" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                          <code className="text-[11px] font-mono text-emerald-300 break-all">
-                            {item.code}
-                          </code>
-                        </div>
-                      ))}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setBulkPrintCourse(selectedCourse)}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1.5 transition"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Buka Lembar QR Massal
+                    </button>
                   </div>
                 </div>
               ) : (
                 <p className="text-xs text-slate-400">
-                  Silakan buat Course di tab Course Management.
+                  Silakan buat Course di tab Course &amp; Peta Pos.
                 </p>
               )}
             </div>
@@ -936,7 +1270,7 @@ export default function OrganizerDashboard() {
         </div>
       )}
 
-      {/* TAB 2: UNIFIED COURSE MANAGEMENT */}
+      {/* TAB 2: UNIFIED COURSE MANAGEMENT + INTERACTIVE MAP */}
       {activeTab === 'COURSES' && dashboard && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -944,10 +1278,10 @@ export default function OrganizerDashboard() {
             <div className="lg:col-span-5 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
                 <span className="text-[11px] font-mono uppercase text-amber-400">
-                  1-Step Course Setup (Penyatuan Event &amp; Course)
+                  1-Step Course Setup
                 </span>
                 <h3 className="text-sm font-bold text-white">
-                  Buat Course Baru &amp; Aturan Validasi
+                  Buat Course Baru, Durasi &amp; Aturan Penalti
                 </h3>
               </div>
               <form onSubmit={handleCreateCourse} className="space-y-3 text-xs">
@@ -968,12 +1302,11 @@ export default function OrganizerDashboard() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-slate-300 mb-1">
-                      Lokasi Lomba *
+                      Lokasi Lomba (Opsional)
                     </label>
                     <input
                       type="text"
-                      required
-                      placeholder="Tahura Bandung"
+                      placeholder="Boleh dikosongkan"
                       value={newCourseLocation}
                       onChange={(e) => setNewCourseLocation(e.target.value)}
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
@@ -995,11 +1328,11 @@ export default function OrganizerDashboard() {
 
                 <div>
                   <label className="block text-slate-300 mb-1">
-                    Deskripsi / Instruksi Course
+                    Deskripsi / Instruksi Course (Opsional)
                   </label>
                   <input
                     type="text"
-                    placeholder="Lintasan cepat 4 pos kontrol wajib"
+                    placeholder="Lintasan cepat kontrol wajib / bebas"
                     value={newCourseDescription}
                     onChange={(e) => setNewCourseDescription(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
@@ -1009,7 +1342,7 @@ export default function OrganizerDashboard() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-slate-300 mb-1">
-                      Metode Validasi (Oleh Penyelenggara)
+                      Metode Validasi Pos
                     </label>
                     <select
                       value={newCourseValidation}
@@ -1039,16 +1372,78 @@ export default function OrganizerDashboard() {
                       Radius GPS Default (m)
                     </label>
                     <input
-                      type="number"
-                      min={5}
-                      max={500}
-                      value={newCourseRadius}
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="35"
+                      value={newCourseRadiusInput}
                       onChange={(e) =>
-                        setNewCourseRadius(Number(e.target.value))
+                        setNewCourseRadiusInput(
+                          sanitizeDigitsOnly(e.target.value)
+                        )
                       }
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
                     />
                   </div>
+                </div>
+
+                {/* Durasi Course & Opsi Penalti Keterlambatan */}
+                <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
+                    <Timer className="w-3.5 h-3.5" />
+                    <span>Pengaturan Durasi &amp; Penalti Keterlambatan</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-slate-400 text-[11px] mb-1">
+                        Durasi Course / Batas Waktu (Menit)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Kosongkan jika tanpa batas"
+                        value={newCourseDurationInput}
+                        onChange={(e) =>
+                          setNewCourseDurationInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                      />
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={newCoursePenaltyEnabled}
+                          onChange={(e) =>
+                            setNewCoursePenaltyEnabled(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Aktifkan Penalti Terlambat</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {newCoursePenaltyEnabled && (
+                    <div>
+                      <label className="block text-rose-300 text-[11px] mb-1">
+                        Pengurangan Poin tiap Menit Keterlambatan (Poin / Menit)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Contoh: 10"
+                        value={newCoursePenaltyInput}
+                        onChange={(e) =>
+                          setNewCoursePenaltyInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-rose-500/40 text-rose-200 font-mono"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -1092,7 +1487,7 @@ export default function OrganizerDashboard() {
                     Daftar Course Aktif
                   </span>
                   <h3 className="text-sm font-bold text-white">
-                    Pilih Course untuk Kelola Checkpoint &amp; Print QR Code
+                    Pilih Course untuk Edit, Hapus, Kelola Peta Pos &amp; Print QR
                     Massal
                   </h3>
                 </div>
@@ -1101,76 +1496,137 @@ export default function OrganizerDashboard() {
                 </span>
               </div>
 
-              <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
-                {dashboard.courses.map((c: Course) => {
-                  const isSelected = selectedCourse?.id === c.id;
-                  return (
-                    <div
-                      key={c.id}
-                      onClick={() => setSelectedCourseId(c.id)}
-                      className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                        isSelected
-                          ? 'bg-amber-500/10 border-amber-500/50 text-white'
-                          : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/60'
-                      }`}
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm text-white">
-                            {c.name}
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                            {c.checkpoints.length} CP
-                          </span>
+              {dashboard.courses.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-400 border border-dashed border-slate-800 rounded-xl">
+                  Belum ada Course. Silakan buat Course baru melalui formulir di
+                  sebelah kiri.
+                </div>
+              ) : (
+                <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                  {dashboard.courses.map((c: Course) => {
+                    const isSelected = selectedCourse?.id === c.id;
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => {
+                          setSelectedCourseId(c.id);
+                          setIsEditingCourse(false);
+                          setEditingCheckpointId(null);
+                        }}
+                        className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          isSelected
+                            ? 'bg-amber-500/10 border-amber-500/50 text-white'
+                            : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/60'
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-sm text-white">
+                              {c.name}
+                            </span>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                              {c.checkpoints.length} CP
+                            </span>
+                            {c.durationMinutes && c.durationMinutes > 0 ? (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20">
+                                ⏱ {c.durationMinutes}m
+                                {c.overtimePenaltyEnabled &&
+                                c.overtimePenaltyPointsPerMinute
+                                  ? ` (-${c.overtimePenaltyPointsPerMinute}pts/m)`
+                                  : ''}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+                            {c.locationName && (
+                              <span className="flex items-center gap-1">
+                                <MapPin className="w-3 h-3 text-slate-500" />
+                                {c.locationName}
+                              </span>
+                            )}
+                            <span className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-slate-500" />
+                              {c.date}
+                            </span>
+                            <span className="font-mono text-amber-300/90">
+                              Validasi: {c.validationMethod} (
+                              {c.defaultGpsRadiusMeters}m)
+                            </span>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
-                          <span className="flex items-center gap-1">
-                            <MapPin className="w-3 h-3 text-slate-500" />
-                            {c.locationName}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <Calendar className="w-3 h-3 text-slate-500" />
-                            {c.date}
-                          </span>
-                          <span className="font-mono text-amber-300/90">
-                            Validasi: {c.validationMethod} (
-                            {c.defaultGpsRadiusMeters}m)
-                          </span>
-                        </div>
-                      </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setBulkPrintCourse(c);
-                          }}
-                          className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                          Print QR Massal
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedCourseId(c.id);
+                              handleStartEditCourse(c);
+                            }}
+                            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 transition"
+                            title="Edit Course Ini"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDeleteCourse(c);
+                            }}
+                            className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition"
+                            title="Hapus Course Ini"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setBulkPrintCourse(c);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            Print QR Massal
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Bottom Row: Selected Course QR & Checkpoints */}
+          {/* Bottom Row: Selected Course Active Management, Map Planner & Checkpoint Table */}
           {selectedCourse && (
             <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
+              {/* Header Course Aktif + Tombol Edit Course, Hapus Course & Print QR Massal */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
-                      {selectedCourse.locationName} ({selectedCourse.date})
+                      {selectedCourse.locationName
+                        ? `${selectedCourse.locationName} (${selectedCourse.date})`
+                        : selectedCourse.date}
                     </span>
                     <span className="text-xs font-mono text-slate-400">
                       Validasi: {selectedCourse.validationMethod} • Radius
                       Default: {selectedCourse.defaultGpsRadiusMeters}m
+                    </span>
+                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      {selectedCourse.durationMinutes &&
+                      selectedCourse.durationMinutes > 0
+                        ? `Durasi: ${selectedCourse.durationMinutes} Menit${
+                            selectedCourse.overtimePenaltyEnabled
+                              ? ` • Penalti Telat: -${
+                                  selectedCourse.overtimePenaltyPointsPerMinute ||
+                                  0
+                                } pts/mnt`
+                              : ' (Tanpa Penalti)'
+                          }`
+                        : 'Tanpa Batas Durasi'}
                     </span>
                   </div>
                   <h2 className="text-lg font-bold text-white mt-1">
@@ -1178,95 +1634,316 @@ export default function OrganizerDashboard() {
                   </h2>
                 </div>
 
-                {/* Bulk Print QR Button (2 to 8 QR per page) */}
-                <button
-                  onClick={() => setBulkPrintCourse(selectedCourse)}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition"
-                >
-                  <Printer className="w-4 h-4" />
-                  Print QR Code Massal (2 - 8 QR / Halaman)
-                </button>
-              </div>
-
-              {/* Course Control QR Codes (Setup, Start, Finish) */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {[
-                  {
-                    title: 'SETUP QR CODE',
-                    desc: 'Wajib di-scan peserta untuk masuk Course',
-                    code: selectedCourse.setupQrCode,
-                    color: 'text-sky-300 border-sky-500/30 bg-sky-500/5',
-                  },
-                  {
-                    title: 'START QR CODE',
-                    desc: 'Di-scan peserta di garis Start untuk mulai waktu',
-                    code: selectedCourse.startQrCode,
-                    color:
-                      'text-emerald-300 border-emerald-500/30 bg-emerald-500/5',
-                  },
-                  {
-                    title: 'FINISH QR CODE',
-                    desc: 'Di-scan peserta di garis Finish untuk hentikan waktu',
-                    code: selectedCourse.finishQrCode,
-                    color: 'text-amber-300 border-amber-500/30 bg-amber-500/5',
-                  },
-                ].map((qr) => (
-                  <div
-                    key={qr.title}
-                    className={`p-3.5 rounded-xl border ${qr.color} flex flex-col justify-between gap-2`}
+                {/* Action Buttons: Edit Course, Delete Course, and Bulk Print QR */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      isEditingCourse
+                        ? setIsEditingCourse(false)
+                        : handleStartEditCourse(selectedCourse)
+                    }
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold text-xs transition"
                   >
-                    <div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold tracking-wider">
-                          {qr.title}
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            onClick={() =>
-                              setPreviewQr({
-                                title: qr.title,
-                                subtitle: `Course: ${selectedCourse.name}`,
-                                payload: qr.code,
-                              })
-                            }
-                            className="px-2 py-1 rounded bg-slate-900/90 hover:bg-slate-800 text-amber-300 border border-amber-500/40 text-[11px] font-semibold flex items-center gap-1 transition"
-                          >
-                            <QrCode className="w-3 h-3" />
-                            Lihat &amp; Unduh QR
-                          </button>
-                          <button
-                            onClick={() => handleCopyQr(qr.code)}
-                            className="p-1.5 rounded bg-slate-900/80 hover:bg-slate-900 text-slate-200"
-                            title="Salin Teks Payload"
-                          >
-                            {copiedQr === qr.code ? (
-                              <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {qr.desc}
-                      </p>
-                    </div>
-                    <code className="text-xs font-mono bg-slate-950/90 px-2.5 py-1.5 rounded border border-slate-800 break-all">
-                      {qr.code}
-                    </code>
-                  </div>
-                ))}
+                    <Edit3 className="w-3.5 h-3.5" />
+                    {isEditingCourse ? 'Tutup Edit Course' : 'Edit Course'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteCourse(selectedCourse)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold text-xs transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Hapus Course
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setBulkPrintCourse(selectedCourse)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition"
+                  >
+                    <Printer className="w-4 h-4" />
+                    Print QR Code Massal (2 - 8 QR / Halaman)
+                  </button>
+                </div>
               </div>
 
-              {/* Add Checkpoint Form */}
+              {/* Panel Edit Course Aktif (Muncul saat tombol Edit Course ditekan) */}
+              {isEditingCourse && (
+                <form
+                  onSubmit={handleSaveEditCourse}
+                  className="p-4 rounded-xl bg-sky-950/20 border border-sky-500/40 space-y-3.5 text-xs"
+                >
+                  <div className="flex items-center justify-between border-b border-sky-500/20 pb-2">
+                    <div className="font-bold text-sky-300 flex items-center gap-2 text-sm">
+                      <Edit3 className="w-4 h-4" />
+                      Edit / Update Pengaturan Course Aktif ({selectedCourse.name})
+                    </div>
+                    <span className="text-[11px] text-emerald-300 font-mono">
+                      ✓ Kode QR Setup, Start, Finish &amp; CP Tetap Aman (Tidak
+                      Berubah)
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Nama Course *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={editCourseName}
+                        onChange={(e) => setEditCourseName(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Lokasi Lomba (Opsional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Boleh dikosongkan"
+                        value={editCourseLocation}
+                        onChange={(e) => setEditCourseLocation(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Tanggal Lomba *
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={editCourseDate}
+                        onChange={(e) => setEditCourseDate(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Deskripsi Course (Opsional)
+                      </label>
+                      <input
+                        type="text"
+                        value={editCourseDescription}
+                        onChange={(e) =>
+                          setEditCourseDescription(e.target.value)
+                        }
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Metode Validasi Pos
+                      </label>
+                      <select
+                        value={editCourseValidation}
+                        onChange={(e) =>
+                          setEditCourseValidation(
+                            e.target.value as ValidationMethod
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      >
+                        <option value={ValidationMethod.QR_AND_GPS}>
+                          QR + GPS Wajib Keduanya (QR_AND_GPS)
+                        </option>
+                        <option value={ValidationMethod.QR_ONLY}>
+                          QR Code Saja (QR_ONLY)
+                        </option>
+                        <option value={ValidationMethod.GPS_AUTO}>
+                          GPS Radius Saja (GPS_AUTO)
+                        </option>
+                        <option value={ValidationMethod.QR_OR_GPS}>
+                          QR atau GPS Salah Satu (QR_OR_GPS)
+                        </option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Radius GPS Default (m)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="35"
+                        value={editCourseRadiusInput}
+                        onChange={(e) =>
+                          setEditCourseRadiusInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    <div>
+                      <label className="block text-amber-300 mb-1">
+                        Durasi Course / Batas Waktu (Menit)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Kosongkan jika tanpa batas"
+                        value={editCourseDurationInput}
+                        onChange={(e) =>
+                          setEditCourseDurationInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                      />
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={editCoursePenaltyEnabled}
+                          onChange={(e) =>
+                            setEditCoursePenaltyEnabled(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Aktifkan Penalti Keterlambatan</span>
+                      </label>
+                    </div>
+                    <div>
+                      <label className="block text-rose-300 mb-1">
+                        Pengurangan Poin / Menit Terlambat
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        disabled={!editCoursePenaltyEnabled}
+                        placeholder="10"
+                        value={editCoursePenaltyInput}
+                        onChange={(e) =>
+                          setEditCoursePenaltyInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono disabled:opacity-40"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-sky-500/20">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editCourseEnforceOrder}
+                          onChange={(e) =>
+                            setEditCourseEnforceOrder(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Wajib Urut (Point-to-Point)</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editCourseScoring}
+                          onChange={(e) =>
+                            setEditCourseScoring(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Gunakan Sistem Poin</span>
+                      </label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingCourse(false)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold flex items-center gap-1.5 transition"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        Simpan Perubahan Course
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+
+              {/* PETA INTERAKTIF PERANCANG TITIK START (🔺), CHECKPOINT (⭕), DAN FINISH (◎) */}
+              <CourseMapPlanner
+                course={selectedCourse}
+                draftCpCode={cpCode}
+                draftCpName={cpName}
+                draftCpLat={cpLat}
+                draftCpLng={cpLng}
+                draftCpRadiusMeters={
+                  Number(cpRadiusInput) ||
+                  selectedCourse.defaultGpsRadiusMeters ||
+                  35
+                }
+                editingCheckpointId={editingCheckpointId}
+                onPickCpCoordinates={(lat, lng) => {
+                  setCpLat(String(lat));
+                  setCpLng(String(lng));
+                }}
+                onUpdateStartLocation={handleUpdateStartLocation}
+                onUpdateFinishLocation={handleUpdateFinishLocation}
+                onSelectCheckpointForEdit={handleSelectCheckpointForEdit}
+              />
+
+              {/* Form Tambah / Edit Checkpoint (Nama Lokasi Pos Opsional, Poin & Radius Tanpa Sisa 0) */}
               <form
-                onSubmit={handleAddCheckpoint}
-                className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3 text-xs"
+                onSubmit={handleSaveCheckpoint}
+                className={`p-4 rounded-xl border space-y-3 text-xs transition ${
+                  editingCheckpointId
+                    ? 'bg-amber-950/20 border-amber-500/50'
+                    : 'bg-slate-900/70 border-slate-800'
+                }`}
               >
-                <div className="font-semibold text-slate-200 flex items-center gap-2">
-                  <Plus className="w-4 h-4 text-amber-400" />
-                  Tambah Checkpoint (Pos Kontrol) ke {selectedCourse.name}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-semibold text-slate-200 flex items-center gap-2">
+                    {editingCheckpointId ? (
+                      <>
+                        <Edit3 className="w-4 h-4 text-amber-400" />
+                        <span className="text-amber-300 font-bold">
+                          Mode Edit Pos ({cpCode}) — Klik di peta jika ingin
+                          menggeser titik koordinatnya
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4 text-amber-400" />
+                        <span>
+                          Tambah Checkpoint (Pos Kontrol) ke{' '}
+                          {selectedCourse.name}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  {editingCheckpointId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditCheckpoint}
+                      className="text-xs text-slate-300 hover:text-white flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700"
+                    >
+                      <X className="w-3.5 h-3.5" /> Batal Edit Pos
+                    </button>
+                  )}
                 </div>
+
                 <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5">
                   <div>
                     <label className="block text-slate-400 mb-1">
@@ -1283,12 +1960,11 @@ export default function OrganizerDashboard() {
                   </div>
                   <div className="sm:col-span-2">
                     <label className="block text-slate-400 mb-1">
-                      Nama Lokasi Pos *
+                      Nama Lokasi Pos (Opsional)
                     </label>
                     <input
                       type="text"
-                      required
-                      placeholder="Simpang Sungai Batu"
+                      placeholder="Boleh dikosongkan"
                       value={cpName}
                       onChange={(e) => setCpName(e.target.value)}
                       className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white"
@@ -1297,15 +1973,19 @@ export default function OrganizerDashboard() {
                   <div>
                     <label className="block text-slate-400 mb-1">Poin</label>
                     <input
-                      type="number"
-                      value={cpPoints}
-                      onChange={(e) => setCpPoints(Number(e.target.value))}
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="100"
+                      value={cpPointsInput}
+                      onChange={(e) =>
+                        setCpPointsInput(sanitizeDigitsOnly(e.target.value))
+                      }
                       className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
                     />
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">
-                      Latitude
+                      Latitude (Klik Peta)
                     </label>
                     <input
                       type="text"
@@ -1316,7 +1996,7 @@ export default function OrganizerDashboard() {
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">
-                      Longitude
+                      Longitude (Klik Peta)
                     </label>
                     <input
                       type="text"
@@ -1326,103 +2006,125 @@ export default function OrganizerDashboard() {
                     />
                   </div>
                 </div>
-                <div className="flex items-center justify-end gap-2.5">
+
+                <div className="flex flex-wrap items-center justify-end gap-2.5">
                   <span className="text-slate-400 whitespace-nowrap">
                     Radius Validasi GPS (m):
                   </span>
                   <input
-                    type="number"
-                    value={cpRadius}
-                    onChange={(e) => setCpRadius(Number(e.target.value))}
-                    className="w-20 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="35"
+                    value={cpRadiusInput}
+                    onChange={(e) =>
+                      setCpRadiusInput(sanitizeDigitsOnly(e.target.value))
+                    }
+                    className="w-24 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
                   />
                   <button
                     type="submit"
-                    className="px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold whitespace-nowrap transition"
+                    className="px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold whitespace-nowrap transition"
                   >
-                    + Tambah Pos
+                    {editingCheckpointId
+                      ? 'Simpan Perubahan Pos'
+                      : '+ Tambah Pos ke Peta'}
                   </button>
                 </div>
               </form>
 
-              {/* Checkpoint Table */}
+              {/* Tabel Daftar Pos Checkpoint (Tanpa kolom QR Secret Payload — terpusat di Print QR Massal) */}
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
                       <th className="py-2.5 px-3">Urutan</th>
-                      <th className="py-2.5 px-3">Kode &amp; Nama Pos</th>
+                      <th className="py-2.5 px-3">Simbol &amp; Kode Pos</th>
+                      <th className="py-2.5 px-3">Nama Lokasi (Opsional)</th>
                       <th className="py-2.5 px-3">Poin</th>
-                      <th className="py-2.5 px-3">Koordinat GPS (Radius)</th>
-                      <th className="py-2.5 px-3">QR Secret Payload</th>
+                      <th className="py-2.5 px-3">Koordinat GPS &amp; Radius</th>
                       <th className="py-2.5 px-3 text-right">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {selectedCourse.checkpoints.map((cp: Checkpoint) => (
-                      <tr key={cp.id} className="hover:bg-slate-900/40">
-                        <td className="py-2.5 px-3 font-mono text-slate-400">
-                          #{cp.orderIndex}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <span className="font-mono font-bold text-amber-400 mr-2">
-                            {cp.code}
-                          </span>
-                          <span className="font-medium text-white">
-                            {cp.name}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 font-mono text-emerald-400 font-semibold">
-                          {cp.points} pts
-                        </td>
-                        <td className="py-2.5 px-3 font-mono text-slate-300">
-                          {cp.latitude.toFixed(5)}, {cp.longitude.toFixed(5)}{' '}
-                          <span className="text-slate-500">
-                            ({cp.radiusMeters}m)
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={() =>
-                                setPreviewQr({
-                                  title: `${cp.code} — ${cp.name}`,
-                                  subtitle: `Course: ${selectedCourse.name} • Radius: ${cp.radiusMeters}m • Poin: ${cp.points}`,
-                                  payload: cp.qrSecret,
-                                })
-                              }
-                              className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] font-semibold flex items-center gap-1 shrink-0 transition"
-                            >
-                              <QrCode className="w-3 h-3" />
-                              QR
-                            </button>
-                            <code className="font-mono text-[11px] text-sky-300 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                              {cp.qrSecret}
-                            </code>
-                            <button
-                              onClick={() => handleCopyQr(cp.qrSecret)}
-                              className="text-slate-400 hover:text-white"
-                              title="Salin QR Checkpoint"
-                            >
-                              {copiedQr === cp.qrSecret ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                              ) : (
-                                <Copy className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 text-right">
-                          <button
-                            onClick={() => handleDeleteCheckpoint(cp.id)}
-                            className="p-1 text-slate-400 hover:text-rose-400"
-                            title="Hapus Checkpoint"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                    {selectedCourse.checkpoints.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="py-6 text-center text-slate-400"
+                        >
+                          Belum ada pos checkpoint. Klik titik pada peta di atas
+                          lalu tekan <strong>+ Tambah Pos ke Peta</strong>.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      selectedCourse.checkpoints.map((cp: Checkpoint) => {
+                        const isBeingEdited = editingCheckpointId === cp.id;
+                        return (
+                          <tr
+                            key={cp.id}
+                            className={`transition ${
+                              isBeingEdited
+                                ? 'bg-amber-500/10'
+                                : 'hover:bg-slate-900/40'
+                            }`}
+                          >
+                            <td className="py-2.5 px-3 font-mono text-slate-400">
+                              #{cp.orderIndex}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="inline-flex items-center gap-1.5 font-mono font-bold text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/30 px-2 py-0.5 rounded">
+                                <span>⭕</span>
+                                <span>{cp.code}</span>
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              {cp.name ? (
+                                <span className="font-medium text-white">
+                                  {cp.name}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 italic">
+                                  - (Tanpa nama lokasi) -
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-emerald-400 font-semibold">
+                              {cp.points} pts
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-300">
+                              {cp.latitude.toFixed(5)},{' '}
+                              {cp.longitude.toFixed(5)}{' '}
+                              <span className="text-slate-500">
+                                (Radius: {cp.radiusMeters}m)
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectCheckpointForEdit(cp)
+                                  }
+                                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-medium inline-flex items-center gap-1"
+                                  title="Edit Checkpoint"
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteCheckpoint(cp.id)}
+                                  className="p-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                  title="Hapus Checkpoint"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -1484,6 +2186,13 @@ export default function OrganizerDashboard() {
                           )
                         : undefined;
 
+                    const isOvertime = Boolean(
+                      course?.durationMinutes &&
+                        course.durationMinutes > 0 &&
+                        liveElapsedSec !== undefined &&
+                        liveElapsedSec > course.durationMinutes * 60
+                    );
+
                     const isLocationStale =
                       sess.status === SessionStatus.ACTIVE &&
                       (!sess.lastLocation ||
@@ -1516,17 +2225,24 @@ export default function OrganizerDashboard() {
                             </div>
                           </div>
 
-                          <span
-                            className={`text-[11px] font-mono px-2.5 py-1 rounded font-semibold ${
-                              sess.status === SessionStatus.ACTIVE
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : sess.status === SessionStatus.FINISHED
-                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                                : 'bg-slate-800 text-slate-300 border border-slate-700'
-                            }`}
-                          >
-                            {sess.status}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            {isOvertime && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold">
+                                OVERTIME
+                              </span>
+                            )}
+                            <span
+                              className={`text-[11px] font-mono px-2.5 py-1 rounded font-semibold ${
+                                sess.status === SessionStatus.ACTIVE
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : sess.status === SessionStatus.FINISHED
+                                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              {sess.status}
+                            </span>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-3 gap-2 text-xs">
@@ -1534,7 +2250,11 @@ export default function OrganizerDashboard() {
                             <div className="text-slate-400 text-[11px]">
                               Waktu Berjalan
                             </div>
-                            <div className="font-mono font-bold text-sm text-white mt-0.5 flex items-center gap-1">
+                            <div
+                              className={`font-mono font-bold text-sm mt-0.5 flex items-center gap-1 ${
+                                isOvertime ? 'text-rose-400' : 'text-white'
+                              }`}
+                            >
                               <Clock className="w-3.5 h-3.5 text-amber-400" />
                               {formatElapsedSeconds(liveElapsedSec)}
                             </div>
@@ -1550,7 +2270,7 @@ export default function OrganizerDashboard() {
                           </div>
                           <div className="p-2.5 rounded bg-slate-950 border border-slate-800/80">
                             <div className="text-slate-400 text-[11px]">
-                              Total Skor
+                              Skor Bersih
                             </div>
                             <div className="font-mono font-bold text-sm text-amber-400 mt-0.5">
                               {sess.totalScore} pts
@@ -1625,7 +2345,8 @@ export default function OrganizerDashboard() {
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Urutan peringkat: Status (FINISHED prioritas utama) → Skor
-                  tertinggi → Waktu tempuh tercepat.
+                  Akhir Bersih (setelah dikurangi penalti keterlambatan) → Waktu
+                  tempuh tercepat.
                 </p>
               </div>
 
@@ -1648,7 +2369,9 @@ export default function OrganizerDashboard() {
                     <th className="py-3 px-3">Course</th>
                     <th className="py-3 px-3">Status</th>
                     <th className="py-3 px-3">Pos Valid</th>
-                    <th className="py-3 px-3">Total Skor</th>
+                    <th className="py-3 px-3">Poin Pos</th>
+                    <th className="py-3 px-3">Penalti Waktu</th>
+                    <th className="py-3 px-3">Total Skor Akhir</th>
                     <th className="py-3 px-3">Waktu Tempuh</th>
                   </tr>
                 </thead>
@@ -1688,7 +2411,19 @@ export default function OrganizerDashboard() {
                       <td className="py-3 px-3 font-mono text-slate-200">
                         {row.checkpointsCompleted} / {row.totalCheckpoints} CP
                       </td>
-                      <td className="py-3 px-3 font-mono font-bold text-emerald-400">
+                      <td className="py-3 px-3 font-mono text-slate-300">
+                        {row.grossScore} pts
+                      </td>
+                      <td className="py-3 px-3 font-mono">
+                        {row.overtimeMinutes > 0 ? (
+                          <span className="text-rose-400 font-semibold">
+                            -{row.penaltyPoints} pts ({row.overtimeMinutes}m)
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">0</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm">
                         {row.totalScore} pts
                       </td>
                       <td className="py-3 px-3 font-mono font-bold text-white">
@@ -1703,17 +2438,55 @@ export default function OrganizerDashboard() {
         </div>
       )}
 
-      {/* Single QR Code Preview & Download Modal */}
-      {previewQr && (
-        <QrCardModal
-          title={previewQr.title}
-          subtitle={previewQr.subtitle}
-          payload={previewQr.payload}
-          onClose={() => setPreviewQr(null)}
-        />
+      {/* Modal Konfirmasi Hapus Course */}
+      {confirmDeleteCourse && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-500/40 bg-slate-900 p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] font-mono uppercase tracking-wider text-rose-400">
+                  Konfirmasi Hapus Course
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  Hapus Course "{confirmDeleteCourse.name}"?
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Tindakan ini akan menghapus Course{' '}
+              <strong className="text-white">{confirmDeleteCourse.name}</strong>{' '}
+              beserta{' '}
+              <strong className="text-white">
+                {confirmDeleteCourse.checkpoints.length} pos checkpoint
+              </strong>{' '}
+              dan riwayat sesi peserta pada Course ini.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteCourse(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteCourse}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition"
+              >
+                Ya, Hapus Course Sekarang
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Bulk Print QR Modal (2 to 8 QR per page) */}
+      {/* Bulk Print QR Modal (2 to 8 QR per page — Satu-satunya pintu cetak semua QR) */}
       {bulkPrintCourse && (
         <BulkQrPrintModal
           course={bulkPrintCourse}

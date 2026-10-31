@@ -1,13 +1,13 @@
 import crypto from 'crypto';
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import type {
   Checkpoint,
   CheckpointReport,
   Course,
+  GeoPointLocation,
   LastKnownLocation,
   ParticipantPublic,
   ParticipantSession,
@@ -40,7 +40,7 @@ const SyncStatus = {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'baraka-db.json');
 
@@ -137,6 +137,19 @@ function createInitialDatabase(): DatabaseSchema {
       defaultGpsRadiusMeters: 35,
       enforceOrder: true,
       allowParticipantMapVisibility: true,
+      durationMinutes: 60,
+      overtimePenaltyEnabled: true,
+      overtimePenaltyPointsPerMinute: 10,
+      startLocation: {
+        latitude: -6.8595,
+        longitude: 107.6295,
+        name: 'Garis Start Gerbang Tahura',
+      },
+      finishLocation: {
+        latitude: -6.8495,
+        longitude: 107.6412,
+        name: 'Garis Finish Lapangan Utama',
+      },
       setupQrCode: 'BARAKA:SETUP:crs-sprint-01',
       startQrCode: 'BARAKA:START:crs-sprint-01',
       finishQrCode: 'BARAKA:FINISH:crs-sprint-01',
@@ -205,6 +218,19 @@ function createInitialDatabase(): DatabaseSchema {
       defaultGpsRadiusMeters: 50,
       enforceOrder: false,
       allowParticipantMapVisibility: true,
+      durationMinutes: 90,
+      overtimePenaltyEnabled: true,
+      overtimePenaltyPointsPerMinute: 15,
+      startLocation: {
+        latitude: -6.8588,
+        longitude: 107.6302,
+        name: 'Basecamp Start & Finish',
+      },
+      finishLocation: {
+        latitude: -6.8588,
+        longitude: 107.6302,
+        name: 'Basecamp Start & Finish',
+      },
       setupQrCode: 'BARAKA:SETUP:crs-amazing-02',
       startQrCode: 'BARAKA:START:crs-amazing-02',
       finishQrCode: 'BARAKA:FINISH:crs-amazing-02',
@@ -291,6 +317,30 @@ function loadDb(): DatabaseSchema {
       fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
       return initial;
     }
+    const defaults = createInitialDatabase();
+    let mutated = false;
+    parsed.courses.forEach((c) => {
+      const matchDefault = defaults.courses.find((dc) => dc.id === c.id);
+      if (matchDefault) {
+        if (!c.startLocation && matchDefault.startLocation) {
+          c.startLocation = matchDefault.startLocation;
+          mutated = true;
+        }
+        if (!c.finishLocation && matchDefault.finishLocation) {
+          c.finishLocation = matchDefault.finishLocation;
+          mutated = true;
+        }
+        if (c.durationMinutes === undefined && matchDefault.durationMinutes !== undefined) {
+          c.durationMinutes = matchDefault.durationMinutes;
+          c.overtimePenaltyEnabled = matchDefault.overtimePenaltyEnabled;
+          c.overtimePenaltyPointsPerMinute = matchDefault.overtimePenaltyPointsPerMinute;
+          mutated = true;
+        }
+      }
+    });
+    if (mutated) {
+      fs.writeFileSync(DB_FILE, JSON.stringify(parsed, null, 2), 'utf-8');
+    }
     return parsed;
   } catch {
     const initial = createInitialDatabase();
@@ -375,6 +425,41 @@ function isSetupQrPayload(qr?: string, course?: Course): boolean {
     trimmed.startsWith('BARAKA:SETUP:') ||
     (course !== undefined && trimmed === course.setupQrCode)
   );
+}
+
+/**
+ * Menghitung ulang skor kotor (grossScore), menit keterlambatan (overtimeMinutes),
+ * potongan penalti (penaltyPoints), dan skor bersih akhir (totalScore) pada sesi peserta.
+ */
+function recalculateSessionScore(session: ParticipantSession, course: Course): void {
+  const grossScore = course.scoringEnabled
+    ? session.validatedCheckpointIds.reduce((sum, cpId) => {
+        const cp = course.checkpoints.find((c) => c.id === cpId);
+        return sum + (cp ? Number(cp.points) || 0 : 0);
+      }, 0)
+    : 0;
+
+  let overtimeMinutes = 0;
+  let penaltyPoints = 0;
+
+  const durationLimitMin = Number(course.durationMinutes) || 0;
+  if (
+    durationLimitMin > 0 &&
+    session.durationSeconds !== undefined &&
+    session.durationSeconds > durationLimitMin * 60
+  ) {
+    const overtimeSeconds = session.durationSeconds - durationLimitMin * 60;
+    overtimeMinutes = Math.ceil(overtimeSeconds / 60);
+    if (course.overtimePenaltyEnabled) {
+      const rate = Math.max(0, Number(course.overtimePenaltyPointsPerMinute) || 0);
+      penaltyPoints = overtimeMinutes * rate;
+    }
+  }
+
+  session.grossScore = grossScore;
+  session.overtimeMinutes = overtimeMinutes;
+  session.penaltyPoints = penaltyPoints;
+  session.totalScore = Math.max(0, grossScore - penaltyPoints);
 }
 
 function processSingleReport(
@@ -687,7 +772,7 @@ function processSingleReport(
     // Jika sah, langsung perbarui progres dan skor sesi peserta (tanpa menunggu Finish!)
     session.validatedCheckpointIds.push(checkpoint.id);
     const points = course.scoringEnabled ? checkpoint.points : 0;
-    session.totalScore += points;
+    recalculateSessionScore(session, course);
 
     if (
       course.allowParticipantMapVisibility &&
@@ -781,6 +866,7 @@ function processSingleReport(
         );
         session.durationSeconds = diffSec;
       }
+      recalculateSessionScore(session, course);
     }
 
     const acceptedFinish: CheckpointReport = {
@@ -1140,7 +1226,7 @@ async function startServer() {
     });
   });
 
-  // Buat Course Baru (Hasil Penyatuan Event & Course)
+  // Buat Course Baru (Hasil Penyatuan Event & Course — Lokasi Opsional + Durasi & Penalti)
   app.post('/api/organizer/courses', requireOrganizer, (req, res) => {
     const {
       name,
@@ -1152,19 +1238,34 @@ async function startServer() {
       defaultGpsRadiusMeters,
       enforceOrder,
       allowParticipantMapVisibility,
+      durationMinutes,
+      overtimePenaltyEnabled,
+      overtimePenaltyPointsPerMinute,
+      startLocation,
+      finishLocation,
     } = req.body as Partial<Course>;
 
-    if (!name || !name.trim() || !locationName || !locationName.trim() || !date) {
-      res.status(400).json({ error: 'Nama Course, Lokasi, dan Tanggal wajib diisi.' });
+    if (!name || !name.trim() || !date) {
+      res.status(400).json({ error: 'Nama Course dan Tanggal wajib diisi.' });
       return;
     }
 
     const courseId = `crs-${Date.now()}`;
+    const parsedDuration =
+      durationMinutes !== undefined && Number(durationMinutes) > 0
+        ? Math.round(Number(durationMinutes))
+        : 0;
+    const parsedPenaltyRate =
+      overtimePenaltyPointsPerMinute !== undefined &&
+      !Number.isNaN(Number(overtimePenaltyPointsPerMinute))
+        ? Math.max(0, Number(overtimePenaltyPointsPerMinute))
+        : 0;
+
     const newCourse: Course = {
       id: courseId,
       name: name.trim(),
       description: description?.trim() || '',
-      locationName: locationName.trim(),
+      locationName: locationName?.trim() || '',
       date,
       isActive: true,
       scoringEnabled: scoringEnabled !== undefined ? Boolean(scoringEnabled) : true,
@@ -1176,6 +1277,21 @@ async function startServer() {
         allowParticipantMapVisibility !== undefined
           ? Boolean(allowParticipantMapVisibility)
           : true,
+      durationMinutes: parsedDuration,
+      overtimePenaltyEnabled: Boolean(overtimePenaltyEnabled),
+      overtimePenaltyPointsPerMinute: parsedPenaltyRate,
+      startLocation:
+        startLocation &&
+        typeof startLocation.latitude === 'number' &&
+        typeof startLocation.longitude === 'number'
+          ? startLocation
+          : undefined,
+      finishLocation:
+        finishLocation &&
+        typeof finishLocation.latitude === 'number' &&
+        typeof finishLocation.longitude === 'number'
+          ? finishLocation
+          : undefined,
       setupQrCode: `BARAKA:SETUP:${courseId}`,
       startQrCode: `BARAKA:START:${courseId}`,
       finishQrCode: `BARAKA:FINISH:${courseId}`,
@@ -1187,7 +1303,7 @@ async function startServer() {
     res.status(201).json({ course: newCourse });
   });
 
-  // Perbarui Pengaturan Course
+  // Perbarui / Edit Pengaturan Course Aktif (Tanpa mengubah QR Code yang sudah ada)
   app.put('/api/organizer/courses/:courseId', requireOrganizer, (req, res) => {
     const course = db.courses.find((c) => c.id === req.params.courseId);
     if (!course) {
@@ -1205,27 +1321,88 @@ async function startServer() {
       defaultGpsRadiusMeters,
       enforceOrder,
       allowParticipantMapVisibility,
-    } = req.body as Partial<Course>;
+      durationMinutes,
+      overtimePenaltyEnabled,
+      overtimePenaltyPointsPerMinute,
+      startLocation,
+      finishLocation,
+    } = req.body as Partial<Course> & {
+      startLocation?: GeoPointLocation | null;
+      finishLocation?: GeoPointLocation | null;
+    };
 
-    if (name !== undefined) course.name = name.trim();
+    if (name !== undefined && name.trim()) course.name = name.trim();
     if (description !== undefined) course.description = description.trim();
     if (locationName !== undefined) course.locationName = locationName.trim();
-    if (date !== undefined) course.date = date;
+    if (date !== undefined && date) course.date = date;
     if (scoringEnabled !== undefined) course.scoringEnabled = Boolean(scoringEnabled);
     if (validationMethod !== undefined) course.validationMethod = validationMethod;
     if (defaultGpsRadiusMeters !== undefined) {
-      course.defaultGpsRadiusMeters = Number(defaultGpsRadiusMeters) || 35;
+      course.defaultGpsRadiusMeters = Math.max(5, Number(defaultGpsRadiusMeters) || 35);
     }
     if (enforceOrder !== undefined) course.enforceOrder = Boolean(enforceOrder);
     if (allowParticipantMapVisibility !== undefined) {
       course.allowParticipantMapVisibility = Boolean(allowParticipantMapVisibility);
     }
+    if (durationMinutes !== undefined) {
+      course.durationMinutes = Math.max(0, Math.round(Number(durationMinutes) || 0));
+    }
+    if (overtimePenaltyEnabled !== undefined) {
+      course.overtimePenaltyEnabled = Boolean(overtimePenaltyEnabled);
+    }
+    if (overtimePenaltyPointsPerMinute !== undefined) {
+      course.overtimePenaltyPointsPerMinute = Math.max(
+        0,
+        Number(overtimePenaltyPointsPerMinute) || 0
+      );
+    }
+    if (startLocation !== undefined) {
+      course.startLocation =
+        startLocation &&
+        typeof startLocation.latitude === 'number' &&
+        typeof startLocation.longitude === 'number'
+          ? startLocation
+          : undefined;
+    }
+    if (finishLocation !== undefined) {
+      course.finishLocation =
+        finishLocation &&
+        typeof finishLocation.latitude === 'number' &&
+        typeof finishLocation.longitude === 'number'
+          ? finishLocation
+          : undefined;
+    }
+
+    // Hitung ulang skor sesi pada course ini bila aturan durasi/penalti/poin berubah
+    db.sessions
+      .filter((s) => s.courseId === course.id)
+      .forEach((s) => recalculateSessionScore(s, course));
 
     saveDb(db);
     res.json({ course });
   });
 
-  // Tambah Checkpoint ke dalam Course
+  // Hapus Course Aktif beserta sesi & laporannya
+  app.delete('/api/organizer/courses/:courseId', requireOrganizer, (req, res) => {
+    const courseIndex = db.courses.findIndex((c) => c.id === req.params.courseId);
+    if (courseIndex === -1) {
+      res.status(404).json({ error: 'Course tidak ditemukan.' });
+      return;
+    }
+
+    const deletedCourseId = db.courses[courseIndex].id;
+    db.courses.splice(courseIndex, 1);
+    db.sessions = db.sessions.filter((s) => s.courseId !== deletedCourseId);
+    db.reports = db.reports.filter((r) => r.courseId !== deletedCourseId);
+
+    saveDb(db);
+    res.json({
+      deletedCourseId,
+      courses: db.courses,
+    });
+  });
+
+  // Tambah Checkpoint ke dalam Course (Nama Lokasi Pos bersifat Opsional)
   app.post(
     '/api/organizer/courses/:courseId/checkpoints',
     requireOrganizer,
@@ -1238,31 +1415,103 @@ async function startServer() {
 
       const { code, name, latitude, longitude, radiusMeters, points } =
         req.body as Partial<Checkpoint>;
-      if (!code || !name || typeof latitude !== 'number' || typeof longitude !== 'number') {
+      if (
+        !code ||
+        !code.trim() ||
+        typeof latitude !== 'number' ||
+        Number.isNaN(latitude) ||
+        typeof longitude !== 'number' ||
+        Number.isNaN(longitude)
+      ) {
         res.status(400).json({
-          error: 'Kode pos, nama pos, serta koordinat latitude & longitude wajib diisi.',
+          error: 'Kode pos serta koordinat latitude & longitude wajib valid.',
         });
         return;
       }
 
       const nextOrder = course.checkpoints.length + 1;
+      const cleanCode = code.trim().toUpperCase();
       const secretSuffix = crypto.randomBytes(2).toString('hex').toUpperCase();
+      const parsedPoints =
+        points !== undefined && !Number.isNaN(Number(points))
+          ? Math.max(0, Number(points))
+          : 100;
+      const parsedRadius =
+        radiusMeters !== undefined && Number(radiusMeters) > 0
+          ? Number(radiusMeters)
+          : course.defaultGpsRadiusMeters || 35;
+
       const newCp: Checkpoint = {
         id: `cp-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
         courseId: course.id,
-        code: code.trim().toUpperCase(),
-        name: name.trim(),
+        code: cleanCode,
+        name: (name || '').trim(),
         orderIndex: nextOrder,
-        qrSecret: `BARAKA:CP:${course.id}:${code.trim().toUpperCase()}:${secretSuffix}`,
+        qrSecret: `BARAKA:CP:${course.id}:${cleanCode}:${secretSuffix}`,
         latitude,
         longitude,
-        radiusMeters: Number(radiusMeters) || course.defaultGpsRadiusMeters || 35,
-        points: Number(points) || 100,
+        radiusMeters: parsedRadius,
+        points: parsedPoints,
       };
 
       course.checkpoints.push(newCp);
       saveDb(db);
-      res.status(201).json({ checkpoint: newCp });
+      res.status(201).json({ checkpoint: newCp, course });
+    }
+  );
+
+  // Edit / Update Checkpoint yang sudah ada di dalam Course
+  app.put(
+    '/api/organizer/courses/:courseId/checkpoints/:checkpointId',
+    requireOrganizer,
+    (req, res) => {
+      const course = db.courses.find((c) => c.id === req.params.courseId);
+      if (!course) {
+        res.status(404).json({ error: 'Course tidak ditemukan.' });
+        return;
+      }
+
+      const cp = course.checkpoints.find((item) => item.id === req.params.checkpointId);
+      if (!cp) {
+        res.status(404).json({ error: 'Checkpoint tidak ditemukan.' });
+        return;
+      }
+
+      const { code, name, latitude, longitude, radiusMeters, points } =
+        req.body as Partial<Checkpoint>;
+
+      if (code !== undefined && code.trim()) {
+        const nextCode = code.trim().toUpperCase();
+        if (nextCode !== cp.code) {
+          const parts = cp.qrSecret.split(':');
+          const suffix =
+            parts[4] || crypto.randomBytes(2).toString('hex').toUpperCase();
+          cp.code = nextCode;
+          cp.qrSecret = `BARAKA:CP:${course.id}:${nextCode}:${suffix}`;
+        }
+      }
+      if (name !== undefined) {
+        cp.name = name.trim();
+      }
+      if (typeof latitude === 'number' && !Number.isNaN(latitude)) {
+        cp.latitude = latitude;
+      }
+      if (typeof longitude === 'number' && !Number.isNaN(longitude)) {
+        cp.longitude = longitude;
+      }
+      if (radiusMeters !== undefined && Number(radiusMeters) > 0) {
+        cp.radiusMeters = Number(radiusMeters);
+      }
+      if (points !== undefined && !Number.isNaN(Number(points))) {
+        cp.points = Math.max(0, Number(points));
+      }
+
+      db.sessions
+        .filter((s) => s.courseId === course.id)
+        .forEach((s) => recalculateSessionScore(s, course));
+
+      saveDb(db);
+      res.json({ checkpoint: cp, course });
     }
   );
 
@@ -1280,6 +1529,10 @@ async function startServer() {
       course.checkpoints = course.checkpoints
         .filter((cp) => cp.id !== req.params.checkpointId)
         .map((cp, index) => ({ ...cp, orderIndex: index + 1 }));
+
+      db.sessions
+        .filter((s) => s.courseId === course.id)
+        .forEach((s) => recalculateSessionScore(s, course));
 
       saveDb(db);
       res.json({ course });
@@ -1328,6 +1581,7 @@ async function startServer() {
   // --------------------------------------------------------------------------
   if (process.env.NODE_ENV !== 'production') {
     process.env.DISABLE_HMR = 'true';
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',

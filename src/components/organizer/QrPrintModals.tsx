@@ -120,25 +120,34 @@ export function BulkQrPrintModal({
   const [isGeneratingSheet, setIsGeneratingSheet] = useState(false);
 
   const allItems: PrintableQrItem[] = useMemo(() => {
+    const durationNote =
+      course.durationMinutes && course.durationMinutes > 0
+        ? ` • Durasi: ${course.durationMinutes} Menit${
+            course.overtimePenaltyEnabled && course.overtimePenaltyPointsPerMinute
+              ? ` (Penalti -${course.overtimePenaltyPointsPerMinute} pts/mnt)`
+              : ''
+          }`
+        : '';
+
     return [
       {
         id: 'setup',
         badge: 'WAJIB SEBELUM MULAI',
         title: 'SETUP QR CODE',
-        subtitle: `Course: ${course.name}`,
+        subtitle: `Course: ${course.name}${durationNote}`,
         payload: course.setupQrCode,
       },
       {
         id: 'start',
         badge: 'GARIS START',
         title: 'START QR CODE',
-        subtitle: `Course: ${course.name}`,
+        subtitle: `Course: ${course.name}${durationNote}`,
         payload: course.startQrCode,
       },
       ...course.checkpoints.map((cp) => ({
         id: cp.id,
         badge: `CHECKPOINT #${cp.orderIndex}`,
-        title: `${cp.code} — ${cp.name}`,
+        title: cp.name ? `${cp.code} — ${cp.name}` : cp.code,
         subtitle: `Radius GPS: ${cp.radiusMeters}m • Poin: ${cp.points}`,
         payload: cp.qrSecret,
       })),

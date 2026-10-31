@@ -1,0 +1,227 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 0. Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'mochyusuf.ad1@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // 2. Validation Blueprint: Course
+    function isValidCourse(data) {
+      return data.keys().hasAll([
+        'id',
+        'ownerId',
+        'name',
+        'description',
+        'locationName',
+        'date',
+        'validationMethod',
+        'defaultGpsRadiusMeters',
+        'enforceOrder',
+        'scoringEnabled',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'ownerId',
+        'name',
+        'description',
+        'locationName',
+        'date',
+        'validationMethod',
+        'defaultGpsRadiusMeters',
+        'enforceOrder',
+        'scoringEnabled',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      isValidId(data.ownerId) &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.description is string && data.description.size() <= 500 &&
+      data.locationName is string && data.locationName.size() >= 1 && data.locationName.size() <= 150 &&
+      data.date is string && data.date.size() >= 4 && data.date.size() <= 32 &&
+      data.validationMethod is string && data.validationMethod.size() <= 32 &&
+      (data.validationMethod == 'QR_ONLY' || data.validationMethod == 'GPS_AUTO' || data.validationMethod == 'QR_AND_GPS' || data.validationMethod == 'QR_OR_GPS') &&
+      data.defaultGpsRadiusMeters is number && data.defaultGpsRadiusMeters >= 5 && data.defaultGpsRadiusMeters <= 1000 &&
+      data.enforceOrder is bool &&
+      data.scoringEnabled is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 3. Validation Blueprint: ParticipantSessionDoc
+    function isValidSession(data) {
+      return data.keys().hasAll([
+        'id',
+        'courseId',
+        'ownerId',
+        'bibNumber',
+        'participantName',
+        'teamName',
+        'status',
+        'totalScore',
+        'checkpointsCompleted',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'courseId',
+        'ownerId',
+        'bibNumber',
+        'participantName',
+        'teamName',
+        'status',
+        'totalScore',
+        'checkpointsCompleted',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      isValidId(data.courseId) &&
+      isValidId(data.ownerId) &&
+      data.bibNumber is string && data.bibNumber.size() >= 1 && data.bibNumber.size() <= 32 &&
+      data.participantName is string && data.participantName.size() >= 1 && data.participantName.size() <= 100 &&
+      data.teamName is string && data.teamName.size() >= 1 && data.teamName.size() <= 100 &&
+      data.status is string && data.status.size() <= 24 &&
+      (data.status == 'NOT_STARTED' || data.status == 'ACTIVE' || data.status == 'FINISHED') &&
+      data.totalScore is number && data.totalScore >= 0 && data.totalScore <= 1000000 &&
+      data.checkpointsCompleted is number && data.checkpointsCompleted >= 0 && data.checkpointsCompleted <= 500 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 4. Collection: /courses/{courseId}
+    match /courses/{courseId} {
+      allow get: if isVerifiedUser() && isValidId(courseId) && (
+        existing().ownerId == request.auth.uid || isAdmin()
+      );
+
+      allow list: if isVerifiedUser() && (
+        existing().ownerId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isVerifiedUser() &&
+        isValidId(courseId) &&
+        isValidCourse(incoming()) &&
+        incoming().id == courseId &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidId(courseId) &&
+        isValidCourse(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'description',
+              'locationName',
+              'date',
+              'validationMethod',
+              'defaultGpsRadiusMeters',
+              'enforceOrder',
+              'scoringEnabled',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(courseId) && (
+        existing().ownerId == request.auth.uid || isAdmin()
+      );
+
+      // 5. Subcollection: /courses/{courseId}/sessions/{sessionId}
+      match /sessions/{sessionId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(courseId) &&
+          isValidId(sessionId) && (
+            existing().ownerId == request.auth.uid ||
+            isAdmin() ||
+            get(/databases/$(database)/documents/courses/$(courseId)).data.ownerId == request.auth.uid
+          );
+
+        allow list: if isVerifiedUser() && (
+          existing().ownerId == request.auth.uid || isAdmin()
+        );
+
+        allow create: if isVerifiedUser() &&
+          isValidId(courseId) &&
+          isValidId(sessionId) &&
+          isValidSession(incoming()) &&
+          incoming().id == sessionId &&
+          incoming().courseId == courseId &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/courses/$(courseId));
+
+        allow update: if isVerifiedUser() &&
+          isValidId(courseId) &&
+          isValidId(sessionId) &&
+          isValidSession(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().courseId == existing().courseId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() || (
+              existing().ownerId == request.auth.uid &&
+              existing().status != 'FINISHED' &&
+              exists(/databases/$(database)/documents/courses/$(courseId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'status',
+                'totalScore',
+                'checkpointsCompleted',
+                'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(courseId) &&
+          isValidId(sessionId) && (
+            isAdmin() ||
+            get(/databases/$(database)/documents/courses/$(courseId)).data.ownerId == request.auth.uid
+          );
+      }
+    }
+  }
+}

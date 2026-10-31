@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import jsQR from 'jsqr';
 import {
   AlertCircle,
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Compass,
   Download,
@@ -13,9 +16,12 @@ import {
   QrCode,
   RefreshCw,
   ShieldCheck,
+  Volume2,
   Wifi,
   WifiOff,
+  Wrench,
   XCircle,
+  Zap,
 } from 'lucide-react';
 import {
   Checkpoint,
@@ -45,6 +51,7 @@ import {
   sendLastLocationToServer,
 } from '../../services/gpsTracker';
 import { PWAInstallBanner } from '../pwa/PWAInstallBanner';
+import { syncSessionToFirestore } from '../../firebase';
 
 function formatStopwatchSeconds(totalSeconds?: number): string {
   if (totalSeconds === undefined || totalSeconds === null || totalSeconds < 0) {
@@ -61,7 +68,55 @@ function formatStopwatchSeconds(totalSeconds?: number): string {
   ].join(':');
 }
 
-// Data kode QR contoh untuk mempermudah pengujian simulasi kamera di browser
+/**
+ * Umpan balik suara (Beep) & getar instan menggunakan Web Audio API (100% bekerja offline)
+ * agar peserta yang sedang berlari langsung tahu hasil scan tanpa harus membaca teks kecil.
+ */
+function triggerRunnerFeedback(type: 'success' | 'error') {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      if (type === 'success') {
+        navigator.vibrate([120, 40, 120]);
+      } else {
+        navigator.vibrate([250, 80, 250]);
+      }
+    }
+  } catch {
+    // Abaikan jika perangkat tidak mendukung getar
+  }
+
+  try {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioCtx) return;
+
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (type === 'success') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1046.5, ctx.currentTime); // Nada tinggi tegas (C6)
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.16);
+    } else {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(260, ctx.currentTime); // Nada rendah peringatan
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.28);
+    }
+  } catch {
+    // Abaikan jika Web Audio diblokir browser
+  }
+}
+
+// Data kode QR contoh untuk mempermudah pengujian simulasi di laptop
 const DEMO_QR_CODES = {
   SETUP_DEFAULT: 'BARAKA:SETUP:crs-sprint-01',
   START_SPRINT: 'BARAKA:START:crs-sprint-01',
@@ -92,19 +147,19 @@ function SyncBadge({ status }: { status: SyncStatus }) {
     case SyncStatus.PENDING_SYNC:
       return (
         <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-2 py-0.5 text-xs font-medium text-amber-300 border border-amber-500/40">
-          <WifiOff className="h-3 w-3" /> Menunggu Sinkronisasi
+          <WifiOff className="h-3 w-3" /> Menunggu Sinyal
         </span>
       );
     case SyncStatus.SENDING:
       return (
         <span className="inline-flex items-center gap-1 rounded bg-indigo-950/80 px-2 py-0.5 text-xs font-medium text-indigo-300 border border-indigo-500/40">
-          <RefreshCw className="h-3 w-3 animate-spin" /> Sedang Dikirim...
+          <RefreshCw className="h-3 w-3 animate-spin" /> Mengirim...
         </span>
       );
     case SyncStatus.ACCEPTED_SERVER:
       return (
         <span className="inline-flex items-center gap-1 rounded bg-emerald-950/80 px-2 py-0.5 text-xs font-medium text-emerald-300 border border-emerald-500/40">
-          <CheckCircle2 className="h-3 w-3" /> Diterima & Tervalidasi Server
+          <CheckCircle2 className="h-3 w-3" /> Sah di Server
         </span>
       );
     case SyncStatus.REJECTED_SERVER:
@@ -137,7 +192,7 @@ export default function ParticipantView() {
   );
 
   // Mode form autentikasi: 'register' | 'login'
-  const [authTab, setAuthTab] = useState<'register' | 'login'>('register');
+  const [authTab, setAuthTab] = useState<'register' | 'login'>('login');
   const [regName, setRegName] = useState('');
   const [regTeam, setRegTeam] = useState('');
   const [regPhone, setRegPhone] = useState('');
@@ -145,7 +200,7 @@ export default function ParticipantView() {
   const [loginIdentity, setLoginIdentity] = useState('BRK-101');
   const [loginPin, setLoginPin] = useState('1111');
 
-  // Input QR & Checkpoint
+  // Input QR & Checkpoint (untuk mode manual / darurat)
   const [setupQrInput, setSetupQrInput] = useState(DEMO_QR_CODES.SETUP_DEFAULT);
   const [startQrInput, setStartQrInput] = useState('');
   const [finishQrInput, setFinishQrInput] = useState('');
@@ -158,17 +213,32 @@ export default function ParticipantView() {
   } | null>(null);
   const [isReadingGps, setIsReadingGps] = useState(false);
 
+  // Panel lipat untuk mode manual / simulasi agar layar pelari bersih tanpa perlu scroll
+  const [showManualTools, setShowManualTools] = useState(false);
+  const [showHistoryLogs, setShowHistoryLogs] = useState(false);
+
   // Konfirmasi keluar Course (ditempatkan jauh dari tombol Scan)
   const [confirmingLeaveCourse, setConfirmingLeaveCourse] = useState(false);
 
-  // Pelacakan lokasi berkala (~5 menit) berjalan di latar belakang tanpa menampilkan panel teknis di layar peserta
+  // Pelacakan lokasi berkala (~5 menit) berjalan di latar belakang
   const lastPeriodicAttemptMsRef = useRef<number>(0);
 
-  // Kamera QR Scanner
+  // Kamera QR Scanner Full-Screen (Gaya iOrienteering)
   const [cameraActiveFor, setCameraActiveFor] = useState<
-    null | 'SETUP' | 'START' | 'CHECKPOINT' | 'FINISH'
+    null | 'SETUP' | 'START' | 'CHECKPOINT' | 'FINISH' | 'AUTO_RACE'
   >(null);
+  const [flashOn, setFlashOn] = useState(false);
+  const [flashSupported, setFlashSupported] = useState(true);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const isProcessingScanRef = useRef<boolean>(false);
+
+  // Overlay Konfirmasi Instan Ukuran Besar setelah Scan Berhasil/Ditolak (2,5 detik)
+  const [instantScanToast, setInstantScanToast] = useState<{
+    type: 'success' | 'error' | 'warning';
+    title: string;
+    subtitle: string;
+  } | null>(null);
 
   // Daftar laporan lokal & status antrean
   const [localReports, setLocalReports] = useState<CheckpointReport[]>([]);
@@ -180,14 +250,31 @@ export default function ParticipantView() {
 
   const isEffectivelyOnline = browserOnline && !simulatedOffline;
 
-  // Live stopwatch tick (tetap akurat dari waktu Start asli walaupun tab pernah ditutup)
+  // Live stopwatch tick
   const [nowTick, setNowTick] = useState<number>(Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
-  // Pemulihan otomatis dari IndexedDB jika localStorage kosong / terhapus oleh browser HP
+  // Tampilkan toast instan selama 2,6 detik
+  const showRunnerToast = useCallback(
+    (
+      type: 'success' | 'error' | 'warning',
+      title: string,
+      subtitle: string
+    ) => {
+      setInstantScanToast({ type, title, subtitle });
+      window.setTimeout(() => {
+        setInstantScanToast((prev) =>
+          prev && prev.title === title ? null : prev
+        );
+      }, 2600);
+    },
+    []
+  );
+
+  // Pemulihan otomatis dari IndexedDB jika localStorage kosong
   useEffect(() => {
     if (!token && !participant) {
       loadPersistedParticipantStateFromIdbFallback().then((backup) => {
@@ -212,9 +299,20 @@ export default function ParticipantView() {
     });
   }, [token, participant, activeCourse, activeSession, simulatedOffline]);
 
+  // Sinkronisasi sesi ke Cloud Firestore jika tersedia
+  useEffect(() => {
+    if (activeSession && participant) {
+      void syncSessionToFirestore(activeSession, participant);
+    }
+  }, [activeSession, participant]);
+
   // Pilih checkpoint pertama secara default ketika course dimuat
   useEffect(() => {
-    if (activeCourse && activeCourse.checkpoints.length > 0 && !selectedCheckpointId) {
+    if (
+      activeCourse &&
+      activeCourse.checkpoints.length > 0 &&
+      !selectedCheckpointId
+    ) {
       setSelectedCheckpointId(activeCourse.checkpoints[0].id);
     }
   }, [activeCourse, selectedCheckpointId]);
@@ -260,10 +358,10 @@ export default function ParticipantView() {
             type: 'error',
             text: `Sinkronisasi selesai: ${outcome.syncedCount} diterima server, ${outcome.rejectedCount} ditolak server. Periksa alasan pada riwayat laporan.`,
           });
-        } else {
+        } else if (!showSilentIfEmpty) {
           setFeedbackBanner({
             type: 'success',
-            text: `Sinkronisasi berhasil! ${outcome.syncedCount} laporan telah diterima dan divalidasi resmi oleh server.`,
+            text: `Sinkronisasi berhasil! ${outcome.syncedCount} laporan divalidasi server.`,
           });
         }
       } else if (!showSilentIfEmpty) {
@@ -276,16 +374,13 @@ export default function ParticipantView() {
     [activeSession, token, simulatedOffline]
   );
 
-  // ==========================================================================
-  // PELAPORAN POSISI GPS TERAKHIR (~5 MENIT) SECARA OTOMATIS DI LATAR BELAKANG
-  // (Tanpa memperlihatkan panel info teknis di layar peserta sesuai hasil diskusi)
-  // ==========================================================================
-
   const hasLocalStartReport = localReports.some(
-    (r) => r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+    (r) =>
+      r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
   );
   const hasLocalFinishReport = localReports.some(
-    (r) => r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+    (r) =>
+      r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
   );
   const sessionCanRecordCheckpoints =
     activeSession?.status === SessionStatus.ACTIVE || hasLocalStartReport;
@@ -306,23 +401,53 @@ export default function ParticipantView() {
 
       if (!isSetupQr) return false;
 
+      triggerRunnerFeedback('error');
       if (!sessionCanRecordCheckpoints) {
         // KONDISI A: Sudah scan Setup QR (sudah masuk Course), tapi BELUM scan Start QR
-        setFeedbackBanner({
-          type: 'warning',
-          text: 'Anda sudah scan Setup, silakan scan Start.',
-        });
+        const msg = 'Anda sudah scan Setup, silakan scan Start.';
+        setFeedbackBanner({ type: 'warning', text: msg });
+        showRunnerToast('warning', 'SUDAH DI DALAM COURSE', msg);
       } else {
         // KONDISI B: Sudah scan Start QR / sesi sedang berjalan aktif
-        setFeedbackBanner({
-          type: 'error',
-          text: 'Ditolak: Silakan scan Check Point atau Finish.',
-        });
+        const msg = 'Ditolak: Silakan scan Check Point atau Finish.';
+        setFeedbackBanner({ type: 'error', text: msg });
+        showRunnerToast('error', 'SETUP QR DITOLAK', msg);
       }
       return true;
     },
-    [activeCourse, sessionCanRecordCheckpoints]
+    [activeCourse, sessionCanRecordCheckpoints, showRunnerToast]
   );
+
+  // Ambil koordinat GPS secara cepat di latar belakang saat scan pos
+  const getQuickGpsCoordinates = useCallback((): Promise<{
+    latitude: number;
+    longitude: number;
+    accuracy: number;
+  } | null> => {
+    return new Promise((resolve) => {
+      if (gpsCoords) {
+        resolve(gpsCoords);
+        return;
+      }
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const coords = {
+            latitude: Number(pos.coords.latitude.toFixed(6)),
+            longitude: Number(pos.coords.longitude.toFixed(6)),
+            accuracy: Math.round(pos.coords.accuracy),
+          };
+          setGpsCoords(coords);
+          resolve(coords);
+        },
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: 3500, maximumAge: 15000 }
+      );
+    });
+  }, [gpsCoords]);
 
   const triggerSilentPeriodicLocationUpdate = useCallback(async () => {
     if (!token || !participant || !activeSession || !activeCourse) return;
@@ -354,7 +479,7 @@ export default function ParticipantView() {
         }
       },
       () => {
-        // Berjalan hening di latar belakang tanpa mengganggu layar peserta
+        // Hening di latar belakang
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
     );
@@ -413,7 +538,7 @@ export default function ParticipantView() {
     triggerSilentPeriodicLocationUpdate,
   ]);
 
-  // Pantau perubahan koneksi internet (auto-retry saat koneksi kembali pulih)
+  // Pantau perubahan koneksi internet
   useEffect(() => {
     const handleOnline = () => {
       setBrowserOnline(true);
@@ -450,12 +575,22 @@ export default function ParticipantView() {
       triggerSyncQueue(true);
     }, 12000);
     return () => window.clearInterval(timer);
-  }, [isEffectivelyOnline, activeSession, token, localReports, triggerSyncQueue]);
+  }, [
+    isEffectivelyOnline,
+    activeSession,
+    token,
+    localReports,
+    triggerSyncQueue,
+  ]);
 
-  // Sinkronisasi otomatis setiap kali layar HP menyala kembali / tab dibuka kembali
   useEffect(() => {
     const handleVisibilityResume = () => {
-      if (document.visibilityState === 'visible' && isEffectivelyOnline && activeSession && token) {
+      if (
+        document.visibilityState === 'visible' &&
+        isEffectivelyOnline &&
+        activeSession &&
+        token
+      ) {
         triggerSyncQueue(true);
       }
     };
@@ -467,7 +602,7 @@ export default function ParticipantView() {
     };
   }, [isEffectivelyOnline, activeSession, token, triggerSyncQueue]);
 
-  // Pengaman cegah tutup tab tidak sengaja saat sesi sedang berjalan aktif atau masih ada antrean lokal
+  // Pengaman cegah tutup tab tidak sengaja saat sesi sedang berjalan aktif
   useEffect(() => {
     const hasUnsynced = localReports.some(
       (r) =>
@@ -485,17 +620,374 @@ export default function ParticipantView() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isSessionActivelyRunning, localReports]);
 
-  // Kamera Pemindai QR
+  // ==========================================================================
+  // FUNGSI INTI SIMPAN LAPORAN OFFLINE-FIRST & AUTO-PROSES HASIL SCAN KAMERA
+  // ==========================================================================
+
+  const recordAndQueueReport = useCallback(
+    async (params: {
+      checkpointId: string;
+      reportType: 'START' | 'CHECKPOINT' | 'FINISH';
+      validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS';
+      qrPayloadScanned?: string;
+      latitude?: number;
+      longitude?: number;
+      accuracyMeters?: number;
+      displayLabel?: string;
+    }) => {
+      if (!participant || !activeCourse || !activeSession || !token) return;
+
+      const measuredAt = new Date().toISOString();
+      const newReport: CheckpointReport = {
+        reportId: createUniqueReportId(params.reportType.toLowerCase()),
+        courseId: activeCourse.id,
+        sessionId: activeSession.id,
+        participantId: participant.id,
+        checkpointId: params.checkpointId,
+        reportType: params.reportType,
+        validationUsed: params.validationUsed,
+        qrPayloadScanned: params.qrPayloadScanned,
+        latitude: params.latitude,
+        longitude: params.longitude,
+        accuracyMeters: params.accuracyMeters,
+        measuredAt,
+        syncStatus: SyncStatus.SAVED_LOCAL,
+        serverVerified: false,
+      };
+
+      // Simpan ke IndexedDB lokal SEBELUM sinkronisasi server
+      await saveReportsLocally([newReport]);
+      const updatedLocal = await getLocalReportsForSession(activeSession.id);
+      setLocalReports(updatedLocal);
+
+      const timeStr = new Date(measuredAt).toLocaleTimeString('id-ID');
+      const label = params.displayLabel || params.reportType;
+
+      triggerRunnerFeedback('success');
+
+      if (params.reportType === 'START') {
+        showRunnerToast(
+          'success',
+          '🚀 START BERHASIL!',
+          `Waktu lomba dimulai (${timeStr}). Semangat berlari!`
+        );
+      } else if (params.reportType === 'FINISH') {
+        showRunnerToast(
+          'success',
+          '🏁 FINISH TERCATAT!',
+          `Waktu Finish disimpan (${timeStr}). Kerja bagus!`
+        );
+      } else {
+        showRunnerToast(
+          'success',
+          `✅ POS ${label} TERCATAT!`,
+          `Tersimpan pukul ${timeStr}. Lanjut ke pos berikutnya!`
+        );
+      }
+
+      setFeedbackBanner({
+        type: 'success',
+        text: `${label} berhasil disimpan di perangkat (${timeStr}).`,
+      });
+
+      // Sinkronisasi ke server di latar belakang tanpa menahan langkah peserta
+      await triggerSyncQueue(true);
+    },
+    [
+      participant,
+      activeCourse,
+      activeSession,
+      token,
+      showRunnerToast,
+      triggerSyncQueue,
+    ]
+  );
+
+  // Fungsi Load Course langsung dari nilai QR yang dipindai
+  const executeLoadCourseByQr = useCallback(
+    async (qrValue: string) => {
+      if (!token) return;
+      const trimmed = qrValue.trim();
+      if (!trimmed) return;
+
+      setSetupQrInput(trimmed);
+      setFeedbackBanner(null);
+
+      try {
+        const res = await fetch('/api/participant/load-event', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ setupQrCode: trimmed }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          triggerRunnerFeedback('error');
+          const errMsg = data.error || 'Gagal memuat Course dari Setup QR.';
+          setFeedbackBanner({ type: 'error', text: errMsg });
+          showRunnerToast('error', 'SETUP QR TIDAK DIKENALI', errMsg);
+          return;
+        }
+
+        setActiveCourse(data.course);
+        setActiveSession(data.session);
+        setConfirmingLeaveCourse(false);
+        if (data.course.checkpoints.length > 0) {
+          setSelectedCheckpointId(data.course.checkpoints[0].id);
+        }
+        triggerRunnerFeedback('success');
+        showRunnerToast(
+          'success',
+          '🗺️ COURSE DIMUAT!',
+          `${data.course.name} siap. Silakan Scan Start QR saat siap lari.`
+        );
+        setFeedbackBanner({
+          type: 'success',
+          text: `Course "${data.course.name}" berhasil dimuat! Silakan tekan tombol SCAN START QR saat siap memulai.`,
+        });
+      } catch {
+        triggerRunnerFeedback('error');
+        const msg =
+          'Memuat Course membutuhkan koneksi internet awal sebelum turun ke lapangan.';
+        setFeedbackBanner({ type: 'error', text: msg });
+        showRunnerToast('error', 'GAGAL MEMUAT COURSE', msg);
+      }
+    },
+    [token, showRunnerToast]
+  );
+
+  /**
+   * Pemroses Otomatis Hasil Scan Kamera Layar Penuh (1-Tap Runner Flow):
+   * Mengenali otomatis apakah QR yang di-scan adalah Setup, Start, Checkpoint (CP1..CPn), atau Finish,
+   * lalu langsung memproses dan menyimpannya detik itu juga tanpa perlu klik tombol ke-2!
+   */
+  const handleQrCodeDetectedFromCamera = useCallback(
+    async (rawScanned: string) => {
+      const scanned = rawScanned.trim();
+      if (!scanned || isProcessingScanRef.current) return;
+      isProcessingScanRef.current = true;
+
+      // Tutup kamera full-screen seketika agar peserta langsung melihat konfirmasi besar
+      setCameraActiveFor(null);
+      setFlashOn(false);
+
+      try {
+        // KASUS 1: Peserta belum memuat Course (atau sedang di mode SETUP)
+        if (!activeCourse || !activeSession || cameraActiveFor === 'SETUP') {
+          if (activeCourse && activeSession && cameraActiveFor !== 'SETUP') {
+            // Sudah di dalam course
+          } else {
+            await executeLoadCourseByQr(scanned);
+            return;
+          }
+        }
+
+        // KASUS 2: Peserta sudah di dalam Course, cek apakah tidak sengaja scan Setup QR (Kondisi A & B)
+        if (checkAccidentalSetupQrScan(scanned)) {
+          return;
+        }
+
+        const upperScanned = scanned.toUpperCase();
+
+        // KASUS 3: Deteksi apakah ini START QR
+        const isStartQr =
+          upperScanned.startsWith('BARAKA:START:') ||
+          cameraActiveFor === 'START';
+
+        if (isStartQr && !upperScanned.startsWith('BARAKA:CP:') && !upperScanned.startsWith('BARAKA:FINISH:')) {
+          if (sessionCanRecordCheckpoints) {
+            triggerRunnerFeedback('error');
+            const msg = 'Waktu Start Anda sudah berjalan. Silakan scan Pos Checkpoint atau Finish.';
+            setFeedbackBanner({ type: 'warning', text: msg });
+            showRunnerToast('warning', 'SUDAH START', msg);
+            return;
+          }
+          await recordAndQueueReport({
+            checkpointId: 'START',
+            reportType: 'START',
+            validationUsed: 'QR',
+            qrPayloadScanned: scanned,
+            displayLabel: 'START',
+          });
+          return;
+        }
+
+        // KASUS 4: Deteksi apakah ini FINISH QR
+        const isFinishQr =
+          upperScanned.startsWith('BARAKA:FINISH:') ||
+          cameraActiveFor === 'FINISH';
+
+        if (isFinishQr && !upperScanned.startsWith('BARAKA:CP:')) {
+          if (!sessionCanRecordCheckpoints) {
+            triggerRunnerFeedback('error');
+            const msg = 'Anda belum melakukan Scan Start QR! Silakan scan Start QR terlebih dahulu.';
+            setFeedbackBanner({ type: 'error', text: msg });
+            showRunnerToast('error', 'BELUM START!', msg);
+            return;
+          }
+          await recordAndQueueReport({
+            checkpointId: 'FINISH',
+            reportType: 'FINISH',
+            validationUsed: 'QR',
+            qrPayloadScanned: scanned,
+            displayLabel: 'FINISH',
+          });
+          return;
+        }
+
+        // KASUS 5: Deteksi otomatis Pos Checkpoint dari isi QR (format BARAKA:CP:<courseId>:<cpCode>:<secret> atau kode CP)
+        if (!sessionCanRecordCheckpoints) {
+          triggerRunnerFeedback('error');
+          const msg = 'Silakan scan Start QR terlebih dahulu sebelum memindai Pos Checkpoint!';
+          setFeedbackBanner({ type: 'error', text: msg });
+          showRunnerToast('error', 'BELUM SCAN START!', msg);
+          return;
+        }
+
+        let matchedCp: Checkpoint | undefined;
+
+        // Coba ekstrak kode pos dari format BARAKA:CP:<courseId>:<cpCode>:<secret>
+        if (upperScanned.startsWith('BARAKA:CP:')) {
+          const parts = scanned.split(':');
+          // parts[0]=BARAKA, parts[1]=CP, parts[2]=courseId, parts[3]=cpCode
+          const extractedCode = parts[3]?.trim().toUpperCase();
+          if (extractedCode) {
+            matchedCp = activeCourse.checkpoints.find(
+              (c) => c.code.toUpperCase() === extractedCode
+            );
+          }
+        }
+
+        // Jika belum ketemu, cari checkpoint yang kodenya terkandung di dalam string QR
+        if (!matchedCp) {
+          matchedCp = activeCourse.checkpoints.find(
+            (c) =>
+              upperScanned.includes(`:${c.code.toUpperCase()}:`) ||
+              upperScanned.endsWith(`:${c.code.toUpperCase()}`) ||
+              upperScanned === c.code.toUpperCase()
+          );
+        }
+
+        // Fallback ke pos yang sedang dipilih jika format kustom
+        if (!matchedCp && selectedCheckpointId) {
+          matchedCp = activeCourse.checkpoints.find(
+            (c) => c.id === selectedCheckpointId
+          );
+        }
+
+        if (!matchedCp) {
+          triggerRunnerFeedback('error');
+          const msg = `QR Code (${scanned}) tidak cocok dengan pos mana pun pada Course ini.`;
+          setFeedbackBanner({ type: 'error', text: msg });
+          showRunnerToast('error', 'QR POS TIDAK DIKENALI', msg);
+          return;
+        }
+
+        // Jika Course membutuhkan GPS (QR_AND_GPS), ambil GPS otomatis di latar belakang tanpa merepotkan peserta
+        let coordsToUse = gpsCoords;
+        if (
+          activeCourse.validationMethod === ValidationMethod.QR_AND_GPS ||
+          activeCourse.validationMethod === ValidationMethod.GPS_AUTO
+        ) {
+          coordsToUse = await getQuickGpsCoordinates();
+        }
+
+        const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' = coordsToUse
+          ? 'QR_AND_GPS'
+          : 'QR';
+
+        await recordAndQueueReport({
+          checkpointId: matchedCp.id,
+          reportType: 'CHECKPOINT',
+          validationUsed,
+          qrPayloadScanned: scanned,
+          latitude: coordsToUse?.latitude,
+          longitude: coordsToUse?.longitude,
+          accuracyMeters: coordsToUse?.accuracy,
+          displayLabel: matchedCp.name
+            ? `${matchedCp.code} (${matchedCp.name})`
+            : matchedCp.code,
+        });
+
+        // Otomatis arahkan pilihan pos berikutnya
+        const currentIndex = activeCourse.checkpoints.findIndex(
+          (c) => c.id === matchedCp!.id
+        );
+        if (
+          currentIndex >= 0 &&
+          currentIndex + 1 < activeCourse.checkpoints.length
+        ) {
+          setSelectedCheckpointId(
+            activeCourse.checkpoints[currentIndex + 1].id
+          );
+        }
+      } finally {
+        window.setTimeout(() => {
+          isProcessingScanRef.current = false;
+        }, 600);
+      }
+    },
+    [
+      activeCourse,
+      activeSession,
+      cameraActiveFor,
+      checkAccidentalSetupQrScan,
+      executeLoadCourseByQr,
+      getQuickGpsCoordinates,
+      gpsCoords,
+      recordAndQueueReport,
+      selectedCheckpointId,
+      sessionCanRecordCheckpoints,
+      showRunnerToast,
+    ]
+  );
+
+  // ==========================================================================
+  // KAMERA FULL-SCREEN (BARCODE DETECTOR + JSQR UNIVERSAL FALLBACK + TORCH/FLASH)
+  // ==========================================================================
+
+  const toggleCameraFlash = useCallback(async () => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+
+    const nextFlash = !flashOn;
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: nextFlash } as MediaTrackConstraintSet],
+      });
+      setFlashOn(nextFlash);
+    } catch {
+      setFlashSupported(false);
+    }
+  }, [flashOn]);
+
   useEffect(() => {
     let stream: MediaStream | null = null;
     let scanTimer: number | null = null;
+    const offscreenCanvas = document.createElement('canvas');
+    const offscreenCtx = offscreenCanvas.getContext('2d', {
+      willReadFrequently: true,
+    });
 
     async function startCamera() {
       if (!cameraActiveFor) return;
+      setFlashOn(false);
+      setFlashSupported(true);
+
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
         });
+        streamRef.current = stream;
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
@@ -511,43 +1003,77 @@ export default function ParticipantView() {
           }
         ).BarcodeDetector;
 
-        if (BarcodeDetectorClass) {
-          const detector = new BarcodeDetectorClass({ formats: ['qr_code'] });
-          scanTimer = window.setInterval(async () => {
-            if (!videoRef.current) return;
+        const nativeDetector = BarcodeDetectorClass
+          ? new BarcodeDetectorClass({ formats: ['qr_code'] })
+          : null;
+
+        scanTimer = window.setInterval(async () => {
+          const video = videoRef.current;
+          if (!video || video.readyState < 2 || isProcessingScanRef.current) {
+            return;
+          }
+
+          // 1. Coba gunakan Native BarcodeDetector jika tersedia
+          if (nativeDetector) {
             try {
-              const codes = await detector.detect(videoRef.current);
+              const codes = await nativeDetector.detect(video);
               if (codes.length > 0 && codes[0].rawValue) {
-                const scanned = codes[0].rawValue.trim();
-                setCameraActiveFor(null);
-
-                // Jika peserta sudah di dalam Course namun tidak sengaja men-scan Setup QR
-                if (
-                  cameraActiveFor !== 'SETUP' &&
-                  checkAccidentalSetupQrScan(scanned)
-                ) {
-                  return;
-                }
-
-                if (cameraActiveFor === 'SETUP') setSetupQrInput(scanned);
-                if (cameraActiveFor === 'START') setStartQrInput(scanned);
-                if (cameraActiveFor === 'CHECKPOINT') setCheckpointQrInput(scanned);
-                if (cameraActiveFor === 'FINISH') setFinishQrInput(scanned);
-
-                setFeedbackBanner({
-                  type: 'success',
-                  text: `QR Code berhasil terbaca kamera: ${scanned}`,
-                });
+                void handleQrCodeDetectedFromCamera(codes[0].rawValue);
+                return;
               }
             } catch {
-              // Abaikan frame yang gagal dibaca
+              // Lanjut ke fallback jsQR di bawah
             }
-          }, 500);
-        }
+          }
+
+          // 2. Fallback Universal jsQR (Bekerja di semua HP Android & iPhone Safari)
+          if (offscreenCtx && video.videoWidth > 0 && video.videoHeight > 0) {
+            try {
+              const vw = video.videoWidth;
+              const vh = video.videoHeight;
+              const cropSize = Math.min(vw, vh) * 0.75;
+              const sx = (vw - cropSize) / 2;
+              const sy = (vh - cropSize) / 2;
+              const targetDim = 420;
+
+              offscreenCanvas.width = targetDim;
+              offscreenCanvas.height = targetDim;
+              offscreenCtx.drawImage(
+                video,
+                sx,
+                sy,
+                cropSize,
+                cropSize,
+                0,
+                0,
+                targetDim,
+                targetDim
+              );
+
+              const imageData = offscreenCtx.getImageData(
+                0,
+                0,
+                targetDim,
+                targetDim
+              );
+              const decoded = jsQR(
+                imageData.data,
+                imageData.width,
+                imageData.height,
+                { inversionAttempts: 'dontInvert' }
+              );
+              if (decoded && decoded.data) {
+                void handleQrCodeDetectedFromCamera(decoded.data);
+              }
+            } catch {
+              // Abaikan frame gagal
+            }
+          }
+        }, 200);
       } catch {
         setFeedbackBanner({
           type: 'warning',
-          text: 'Kamera tidak dapat diakses pada perangkat ini. Silakan masukkan atau pindai QR Code.',
+          text: 'Kamera tidak dapat diakses. Pastikan izin kamera diberikan atau gunakan menu Input Manual di bawah.',
         });
         setCameraActiveFor(null);
       }
@@ -560,11 +1086,12 @@ export default function ParticipantView() {
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
       }
+      streamRef.current = null;
     };
-  }, [cameraActiveFor, checkAccidentalSetupQrScan]);
+  }, [cameraActiveFor, handleQrCodeDetectedFromCamera]);
 
   // ==========================================================================
-  // HANDLER 1: REGISTRASI (NAMA TIM WAJIB) & LOGIN PESERTA
+  // HANDLER AUTENTIKASI & INPUT MANUAL
   // ==========================================================================
 
   async function handleRegister(e: React.FormEvent) {
@@ -592,14 +1119,18 @@ export default function ParticipantView() {
       });
       const data = await res.json();
       if (!res.ok) {
-        setFeedbackBanner({ type: 'error', text: data.error || 'Registrasi gagal.' });
+        setFeedbackBanner({
+          type: 'error',
+          text: data.error || 'Registrasi gagal.',
+        });
         return;
       }
       setToken(data.token);
       setParticipant(data.participant);
+      triggerRunnerFeedback('success');
       setFeedbackBanner({
         type: 'success',
-        text: `Registrasi berhasil! Nomor Peserta (BIB) Anda adalah ${data.participant.bibNumber} (Tim: ${data.participant.teamName}). Silakan pindai Setup QR dari panitia.`,
+        text: `Registrasi berhasil! Nomor BIB Anda: ${data.participant.bibNumber} (Tim: ${data.participant.teamName}). Silakan tekan tombol SCAN SETUP QR.`,
       });
     } catch {
       setFeedbackBanner({
@@ -628,17 +1159,18 @@ export default function ParticipantView() {
       }
       setToken(data.token);
       setParticipant(data.participant);
+      triggerRunnerFeedback('success');
       if (data.activeCourse && data.latestSession) {
         setActiveCourse(data.activeCourse);
         setActiveSession(data.latestSession);
         setFeedbackBanner({
           type: 'success',
-          text: `Selamat datang kembali, ${data.participant.name} (${data.participant.teamName})! Sesi Course "${data.activeCourse.name}" Anda otomatis dipulihkan.`,
+          text: `Selamat datang kembali, ${data.participant.name} (${data.participant.teamName})! Sesi Course "${data.activeCourse.name}" Anda siap dilanjutkan.`,
         });
       } else {
         setFeedbackBanner({
           type: 'success',
-          text: `Selamat datang kembali, ${data.participant.name} — Tim ${data.participant.teamName} (${data.participant.bibNumber})!`,
+          text: `Login berhasil: ${data.participant.name} — Tim ${data.participant.teamName} (${data.participant.bibNumber}).`,
         });
       }
     } catch {
@@ -659,7 +1191,6 @@ export default function ParticipantView() {
     setFeedbackBanner(null);
   }
 
-  // Keluar dari Course sebelum Finish (setelah dikonfirmasi peserta)
   function handleConfirmLeaveCourse() {
     setActiveCourse(null);
     setActiveSession(null);
@@ -674,99 +1205,9 @@ export default function ParticipantView() {
     });
   }
 
-  // ==========================================================================
-  // HANDLER 2: LOAD COURSE (SCAN SETUP QR — OTOMATIS HILANG SETELAH MASUK COURSE)
-  // ==========================================================================
-
   async function handleLoadCourse(e: React.FormEvent) {
     e.preventDefault();
-    if (!token) return;
-    setFeedbackBanner(null);
-
-    try {
-      const res = await fetch('/api/participant/load-event', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ setupQrCode: setupQrInput }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setFeedbackBanner({
-          type: 'error',
-          text: data.error || 'Gagal memuat Course dari Setup QR.',
-        });
-        return;
-      }
-
-      setActiveCourse(data.course);
-      setActiveSession(data.session);
-      setConfirmingLeaveCourse(false);
-      if (data.course.checkpoints.length > 0) {
-        setSelectedCheckpointId(data.course.checkpoints[0].id);
-      }
-      setFeedbackBanner({
-        type: 'success',
-        text: `Course "${data.course.name}" berhasil dimuat! Silakan pindai Start QR saat Anda siap memulai.`,
-      });
-    } catch {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Memuat Course membutuhkan koneksi internet awal sebelum turun ke lapangan.',
-      });
-    }
-  }
-
-  // ==========================================================================
-  // HANDLER 3: SIMPAN LAPORAN OFFLINE-FIRST (START, CHECKPOINT, FINISH)
-  // ==========================================================================
-
-  async function recordAndQueueReport(params: {
-    checkpointId: string;
-    reportType: 'START' | 'CHECKPOINT' | 'FINISH';
-    validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS';
-    qrPayloadScanned?: string;
-    latitude?: number;
-    longitude?: number;
-    accuracyMeters?: number;
-  }) {
-    if (!participant || !activeCourse || !activeSession || !token) return;
-
-    const measuredAt = new Date().toISOString();
-    const newReport: CheckpointReport = {
-      reportId: createUniqueReportId(params.reportType.toLowerCase()),
-      courseId: activeCourse.id,
-      sessionId: activeSession.id,
-      participantId: participant.id,
-      checkpointId: params.checkpointId,
-      reportType: params.reportType,
-      validationUsed: params.validationUsed,
-      qrPayloadScanned: params.qrPayloadScanned,
-      latitude: params.latitude,
-      longitude: params.longitude,
-      accuracyMeters: params.accuracyMeters,
-      measuredAt,
-      syncStatus: SyncStatus.SAVED_LOCAL,
-      serverVerified: false,
-    };
-
-    // LANGKAH 1 WAJIB: Simpan ke penyimpanan lokal permanen (IndexedDB) SEBELUM kirim ke server
-    await saveReportsLocally([newReport]);
-    const updatedLocal = await getLocalReportsForSession(activeSession.id);
-    setLocalReports(updatedLocal);
-
-    // LANGKAH 2: Berikan konfirmasi bahwa laporan sudah aman tersimpan di perangkat
-    setFeedbackBanner({
-      type: 'success',
-      text: `Laporan ${params.reportType} telah tersimpan aman di perangkat (${new Date(
-        measuredAt
-      ).toLocaleTimeString('id-ID')}). Anda dapat langsung melanjutkan kegiatan!`,
-    });
-
-    // LANGKAH 3: Coba kirim ke server di latar belakang tanpa memblokir peserta
-    await triggerSyncQueue(true);
+    await executeLoadCourseByQr(setupQrInput);
   }
 
   async function handleStartSession(e: React.FormEvent) {
@@ -780,7 +1221,6 @@ export default function ParticipantView() {
       return;
     }
 
-    // Cek Kondisi A: jika tidak sengaja ter-scan Setup QR saat mau Start
     if (checkAccidentalSetupQrScan(trimmed)) {
       setStartQrInput('');
       return;
@@ -791,6 +1231,7 @@ export default function ParticipantView() {
       reportType: 'START',
       validationUsed: 'QR',
       qrPayloadScanned: trimmed,
+      displayLabel: 'START',
     });
     setStartQrInput('');
   }
@@ -801,7 +1242,6 @@ export default function ParticipantView() {
 
     const trimmedQr = checkpointQrInput.trim();
 
-    // Cek Kondisi B: jika sedang sesi aktif namun tidak sengaja ter-scan Setup QR
     if (trimmedQr && checkAccidentalSetupQrScan(trimmedQr)) {
       setCheckpointQrInput('');
       return;
@@ -809,9 +1249,11 @@ export default function ParticipantView() {
 
     const method = activeCourse.validationMethod;
     const needsQr =
-      method === ValidationMethod.QR_ONLY || method === ValidationMethod.QR_AND_GPS;
+      method === ValidationMethod.QR_ONLY ||
+      method === ValidationMethod.QR_AND_GPS;
     const needsGps =
-      method === ValidationMethod.GPS_AUTO || method === ValidationMethod.QR_AND_GPS;
+      method === ValidationMethod.GPS_AUTO ||
+      method === ValidationMethod.QR_AND_GPS;
 
     if (needsQr && !trimmedQr) {
       setFeedbackBanner({
@@ -821,7 +1263,12 @@ export default function ParticipantView() {
       return;
     }
 
-    if (needsGps && !gpsCoords) {
+    let coordsToUse = gpsCoords;
+    if (needsGps && !coordsToUse) {
+      coordsToUse = await getQuickGpsCoordinates();
+    }
+
+    if (needsGps && !coordsToUse) {
       setFeedbackBanner({
         type: 'error',
         text: 'Course ini membutuhkan koordinat GPS peserta. Tekan tombol "Ambil Posisi GPS" terlebih dahulu.',
@@ -829,7 +1276,7 @@ export default function ParticipantView() {
       return;
     }
 
-    if (method === ValidationMethod.QR_OR_GPS && !trimmedQr && !gpsCoords) {
+    if (method === ValidationMethod.QR_OR_GPS && !trimmedQr && !coordsToUse) {
       setFeedbackBanner({
         type: 'error',
         text: 'Silakan pindai QR Checkpoint atau ambil posisi GPS Anda.',
@@ -838,16 +1285,25 @@ export default function ParticipantView() {
     }
 
     const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' =
-      trimmedQr && gpsCoords ? 'QR_AND_GPS' : gpsCoords ? 'GPS' : 'QR';
+      trimmedQr && coordsToUse ? 'QR_AND_GPS' : coordsToUse ? 'GPS' : 'QR';
+
+    const cpObj = activeCourse.checkpoints.find(
+      (c) => c.id === selectedCheckpointId
+    );
 
     await recordAndQueueReport({
       checkpointId: selectedCheckpointId,
       reportType: 'CHECKPOINT',
       validationUsed,
       qrPayloadScanned: trimmedQr || undefined,
-      latitude: gpsCoords?.latitude,
-      longitude: gpsCoords?.longitude,
-      accuracyMeters: gpsCoords?.accuracy,
+      latitude: coordsToUse?.latitude,
+      longitude: coordsToUse?.longitude,
+      accuracyMeters: coordsToUse?.accuracy,
+      displayLabel: cpObj
+        ? cpObj.name
+          ? `${cpObj.code} (${cpObj.name})`
+          : cpObj.code
+        : 'CHECKPOINT',
     });
 
     setCheckpointQrInput('');
@@ -855,7 +1311,10 @@ export default function ParticipantView() {
     const currentIndex = activeCourse.checkpoints.findIndex(
       (c) => c.id === selectedCheckpointId
     );
-    if (currentIndex >= 0 && currentIndex + 1 < activeCourse.checkpoints.length) {
+    if (
+      currentIndex >= 0 &&
+      currentIndex + 1 < activeCourse.checkpoints.length
+    ) {
       setSelectedCheckpointId(activeCourse.checkpoints[currentIndex + 1].id);
     }
   }
@@ -871,7 +1330,6 @@ export default function ParticipantView() {
       return;
     }
 
-    // Cek Kondisi B: jika sedang sesi aktif namun tidak sengaja ter-scan Setup QR
     if (checkAccidentalSetupQrScan(trimmed)) {
       setFinishQrInput('');
       return;
@@ -882,6 +1340,7 @@ export default function ParticipantView() {
       reportType: 'FINISH',
       validationUsed: 'QR',
       qrPayloadScanned: trimmed,
+      displayLabel: 'FINISH',
     });
     setFinishQrInput('');
   }
@@ -959,7 +1418,11 @@ export default function ParticipantView() {
     ctx.fillStyle = '#94a3b8';
     ctx.font = '16px sans-serif';
     ctx.fillText(`Course: ${activeCourse.name}`, 32, 128);
-    ctx.fillText(`Lokasi: ${activeCourse.locationName} (${activeCourse.date})`, 32, 155);
+    ctx.fillText(
+      `Lokasi: ${activeCourse.locationName} (${activeCourse.date})`,
+      32,
+      155
+    );
     ctx.fillText(`ID Sesi: ${activeSession.id}`, 32, 182);
 
     const validatedCount = activeSession.validatedCheckpointIds.length;
@@ -981,7 +1444,11 @@ export default function ParticipantView() {
       32,
       258
     );
-    ctx.fillText(`Total Skor Resmi Server: ${activeSession.totalScore} Poin`, 32, 288);
+    ctx.fillText(
+      `Total Skor Resmi Server: ${activeSession.totalScore} Poin`,
+      32,
+      288
+    );
     ctx.fillText(
       `Status Sesi Server: ${activeSession.status} | Durasi: ${
         activeSession.durationSeconds !== undefined
@@ -1018,11 +1485,27 @@ export default function ParticipantView() {
     (c) => c.id === selectedCheckpointId
   );
 
-  // Hitung waktu tempuh berjalan (Stopwatch) dari waktu Start asli (server atau lokal) agar tidak pernah reset walau tab ditutup
+  // Hitung jumlah pos yang sudah tercatat (baik di perangkat lokal maupun server)
+  const completedCheckpointCount = useMemo(() => {
+    if (!activeCourse || !activeSession) return 0;
+    const combined = new Set<string>(activeSession.validatedCheckpointIds);
+    localReports.forEach((r) => {
+      if (
+        r.reportType === 'CHECKPOINT' &&
+        r.syncStatus !== SyncStatus.REJECTED_SERVER
+      ) {
+        combined.add(r.checkpointId);
+      }
+    });
+    return combined.size;
+  }, [activeCourse, activeSession, localReports]);
+
+  // Hitung waktu tempuh berjalan (Stopwatch)
   const effectiveStartIso = useMemo(() => {
     if (activeSession?.startedAt) return activeSession.startedAt;
     const localStart = localReports.find(
-      (r) => r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+      (r) =>
+        r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
     );
     return localStart?.measuredAt || null;
   }, [activeSession?.startedAt, localReports]);
@@ -1030,7 +1513,8 @@ export default function ParticipantView() {
   const effectiveFinishIso = useMemo(() => {
     if (activeSession?.finishedAt) return activeSession.finishedAt;
     const localFinish = localReports.find(
-      (r) => r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+      (r) =>
+        r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
     );
     return localFinish?.measuredAt || null;
   }, [activeSession?.finishedAt, localReports]);
@@ -1041,57 +1525,288 @@ export default function ParticipantView() {
     }
     if (!effectiveStartIso) return undefined;
     const endMs = effectiveFinishIso ? Date.parse(effectiveFinishIso) : nowTick;
-    return Math.max(0, Math.floor((endMs - Date.parse(effectiveStartIso)) / 1000));
-  }, [activeSession?.durationSeconds, effectiveStartIso, effectiveFinishIso, nowTick]);
+    return Math.max(
+      0,
+      Math.floor((endMs - Date.parse(effectiveStartIso)) / 1000)
+    );
+  }, [
+    activeSession?.durationSeconds,
+    effectiveStartIso,
+    effectiveFinishIso,
+    nowTick,
+  ]);
+
+  // Hitung rincian Poin Kotor, Menit Terlambat (Overtime), Potongan Penalti, dan Skor Bersih
+  const scoreBreakdown = useMemo(() => {
+    if (!activeCourse || !activeSession) {
+      return {
+        grossScore: 0,
+        overtimeMinutes: 0,
+        penaltyPoints: 0,
+        netScore: 0,
+        isOvertime: false,
+      };
+    }
+
+    const grossScore =
+      activeSession.grossScore !== undefined
+        ? activeSession.grossScore
+        : activeCourse.scoringEnabled
+        ? activeSession.validatedCheckpointIds.reduce((sum, id) => {
+            const cp = activeCourse.checkpoints.find((c) => c.id === id);
+            return sum + (cp ? Number(cp.points) || 0 : 0);
+          }, 0)
+        : activeSession.totalScore;
+
+    const limitMin = Number(activeCourse.durationMinutes) || 0;
+    let overtimeMinutes = activeSession.overtimeMinutes || 0;
+    let penaltyPoints = activeSession.penaltyPoints || 0;
+
+    if (
+      limitMin > 0 &&
+      liveStopwatchSeconds !== undefined &&
+      liveStopwatchSeconds > limitMin * 60
+    ) {
+      const overSec = liveStopwatchSeconds - limitMin * 60;
+      overtimeMinutes = Math.ceil(overSec / 60);
+      if (activeCourse.overtimePenaltyEnabled) {
+        penaltyPoints =
+          overtimeMinutes *
+          Math.max(0, Number(activeCourse.overtimePenaltyPointsPerMinute) || 0);
+      }
+    }
+
+    const netScore = Math.max(0, grossScore - penaltyPoints);
+    return {
+      grossScore,
+      overtimeMinutes,
+      penaltyPoints,
+      netScore,
+      isOvertime: overtimeMinutes > 0,
+    };
+  }, [activeCourse, activeSession, liveStopwatchSeconds]);
 
   return (
-    <div className="mx-auto max-w-xl space-y-5 pb-12">
+    <div className="mx-auto max-w-xl space-y-4 pb-12">
+      {/* ====================================================================
+          FULL-SCREEN QR SCANNER OVERLAY (PERSIS DESAIN REFERENSI iOrienteering)
+          Langsung menutup seluruh layar HP tanpa perlu scroll!
+         ==================================================================== */}
+      {cameraActiveFor && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-black select-none">
+          {/* TOP BAR GAYA iOrienteering: Nama Aplikasi di Kiri, FLASH ON & CANCEL di Kanan */}
+          <div className="flex h-14 shrink-0 items-center justify-between bg-[#221c1d] px-4 text-white shadow-md z-20">
+            <div className="text-lg font-normal tracking-wide text-white truncate">
+              BARAKA ADVENTURE
+            </div>
+            <div className="flex items-center gap-5">
+              {flashSupported && (
+                <button
+                  type="button"
+                  onClick={toggleCameraFlash}
+                  className={`text-sm sm:text-base font-medium uppercase tracking-wider transition ${
+                    flashOn ? 'text-lime-400' : 'text-white hover:text-slate-200'
+                  }`}
+                >
+                  {flashOn ? 'FLASH OFF' : 'FLASH ON'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setCameraActiveFor(null);
+                  setFlashOn(false);
+                }}
+                className="text-sm sm:text-base font-medium uppercase tracking-wider text-white hover:text-slate-200"
+              >
+                CANCEL
+              </button>
+            </div>
+          </div>
+
+          {/* AREA KAMERA PENUH DENGAN KOTAK BIDIK PERSEGI BESAR, 4 SIKU HIJAU & GARIS MERAH */}
+          <div className="relative flex-1 overflow-hidden bg-black flex items-center justify-center">
+            <video
+              ref={videoRef}
+              className="absolute inset-0 h-full w-full object-cover"
+              playsInline
+              muted
+            />
+
+            {/* KOTAK BIDIK TENGAH (VIEWFINDER) BESAR DENGAN SHADOW GELAP DI KELILINGNYA */}
+            <div
+              className="relative z-10 h-64 w-64 sm:h-72 sm:w-72 bg-white/10"
+              style={{
+                boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.48)',
+              }}
+            >
+              {/* Siku Kiri Atas (Hijau Terang) */}
+              <div className="pointer-events-none absolute top-0 left-0 h-10 w-10 border-t-4 border-l-4 border-[#84cc16]" />
+              {/* Siku Kanan Atas (Hijau Terang) */}
+              <div className="pointer-events-none absolute top-0 right-0 h-10 w-10 border-t-4 border-r-4 border-[#84cc16]" />
+              {/* Siku Kiri Bawah (Hijau Terang) */}
+              <div className="pointer-events-none absolute bottom-0 left-0 h-10 w-10 border-b-4 border-l-4 border-[#84cc16]" />
+              {/* Siku Kanan Bawah (Hijau Terang) */}
+              <div className="pointer-events-none absolute bottom-0 right-0 h-10 w-10 border-b-4 border-r-4 border-[#84cc16]" />
+
+              {/* Garis Laser Merah Horizontal di Tengah Kotak Bidik */}
+              <div className="pointer-events-none absolute top-1/2 left-0 right-0 -translate-y-1/2 h-[1.5px] bg-red-500/85 shadow-[0_0_6px_rgba(239,68,68,0.9)]" />
+            </div>
+
+            {/* Petunjuk Mode Scan Singkat di Bagian Bawah Layar Kamera */}
+            <div className=" absolute bottom-6 left-4 right-4 z-20 flex flex-col items-center gap-2 text-center">
+              <div className="rounded-full bg-black/70 px-4 py-1.5 text-xs font-semibold text-slate-200 border border-white/15 backdrop-blur-sm">
+                {!activeCourse || cameraActiveFor === 'SETUP'
+                  ? 'Arahkan kotak ke Setup QR Code dari Panitia'
+                  : !sessionCanRecordCheckpoints
+                  ? 'Arahkan kotak ke START QR Code untuk mulai waktu'
+                  : 'Arahkan kotak ke QR Pos Checkpoint atau FINISH QR'}
+              </div>
+
+              {/* Tombol Cepat Simulasi di dalam Kamera (berguna jika diuji lewat Laptop) */}
+              <div className="flex flex-wrap items-center justify-center gap-1.5 mt-1">
+                {!activeCourse || cameraActiveFor === 'SETUP' ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleQrCodeDetectedFromCamera(
+                        DEMO_QR_CODES.SETUP_DEFAULT
+                      )
+                    }
+                    className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-[11px] font-bold text-white shadow"
+                  >
+                    Simulasi Scan Setup QR
+                  </button>
+                ) : !sessionCanRecordCheckpoints ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleQrCodeDetectedFromCamera(
+                        activeCourse.id === 'crs-sprint-01'
+                          ? DEMO_QR_CODES.START_SPRINT
+                          : activeCourse.id === 'crs-amazing-02'
+                          ? DEMO_QR_CODES.START_AMAZING
+                          : `BARAKA:START:${activeCourse.id}`
+                      )
+                    }
+                    className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-[11px] font-bold text-white shadow"
+                  >
+                    Simulasi Scan Start QR
+                  </button>
+                ) : (
+                  <>
+                    {activeCourse.checkpoints.map((cp) => {
+                      const codeMap =
+                        activeCourse.id === 'crs-sprint-01'
+                          ? DEMO_QR_CODES.CP_SPRINT
+                          : DEMO_QR_CODES.CP_AMAZING;
+                      const secret =
+                        codeMap[cp.code] ||
+                        `BARAKA:CP:${activeCourse.id}:${cp.code}`;
+                      return (
+                        <button
+                          key={cp.id}
+                          type="button"
+                          onClick={() =>
+                            void handleQrCodeDetectedFromCamera(secret)
+                          }
+                          className="rounded-lg bg-slate-900/90 border border-lime-400/50 px-2.5 py-1 text-[11px] font-bold text-lime-300"
+                        >
+                          Simulasi {cp.code}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleQrCodeDetectedFromCamera(
+                          activeCourse.id === 'crs-sprint-01'
+                            ? DEMO_QR_CODES.FINISH_SPRINT
+                            : activeCourse.id === 'crs-amazing-02'
+                            ? DEMO_QR_CODES.FINISH_AMAZING
+                            : `BARAKA:FINISH:${activeCourse.id}`
+                        )
+                      }
+                      className="rounded-lg bg-sky-600/90 px-2.5 py-1 text-[11px] font-bold text-white"
+                    >
+                      Simulasi Finish
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          KONFIRMASI INSTAN UKURAN BESAR SETELAH SCAN (MUDAH DILIRIK PELARI)
+         ==================================================================== */}
+      {instantScanToast && (
+        <div className="fixed inset-x-4 top-16 z-40 mx-auto max-w-md animate-bounce">
+          <div
+            className={`rounded-2xl border-2 p-4 shadow-2xl backdrop-blur-md ${
+              instantScanToast.type === 'success'
+                ? 'border-lime-400 bg-emerald-950/95 text-white'
+                : instantScanToast.type === 'warning'
+                ? 'border-amber-400 bg-amber-950/95 text-white'
+                : 'border-rose-400 bg-rose-950/95 text-white'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-lg font-extrabold tracking-wide">
+                {instantScanToast.title}
+              </div>
+              <Volume2 className="h-5 w-5 shrink-0 opacity-80" />
+            </div>
+            <div className="mt-1 text-xs sm:text-sm font-medium opacity-95">
+              {instantScanToast.subtitle}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* BANNER PENGAMAN OFFLINE BROWSER & OPSI PASANG IKON DI LAYAR HP */}
       <PWAInstallBanner />
 
-      {/* BAR STATUS JARINGAN & SIMULASI OFFLINE */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-3.5 shadow-lg">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
+      {/* BAR STATUS JARINGAN RINGKAS */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/90 px-3.5 py-2.5 shadow">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
             {isEffectivelyOnline ? (
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                <Wifi className="h-4 w-4" />
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                <Wifi className="h-3.5 w-3.5" />
               </span>
             ) : (
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                <WifiOff className="h-4 w-4" />
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                <WifiOff className="h-3.5 w-3.5" />
               </span>
             )}
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-slate-100">
-                  {isEffectivelyOnline ? 'Terhubung (Online)' : 'Mode Offline Aktif'}
+                <span className="text-xs font-bold text-slate-100">
+                  {isEffectivelyOnline ? 'Online' : 'Mode Offline (Tetap Aman)'}
                 </span>
                 {pendingSyncCount > 0 && (
-                  <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300 border border-amber-500/30">
-                    {pendingSyncCount} Antrean Lokal
+                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-amber-300 border border-amber-500/30">
+                    {pendingSyncCount} Antrean
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-400">
-                {isEffectivelyOnline
-                  ? 'Laporan pos otomatis dikirim & divalidasi server.'
-                  : 'Tanpa sinyal: Laporan disimpan permanen di perangkat (IndexedDB).'}
-              </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => setSimulatedOffline((prev) => !prev)}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition border ${
+              className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition border ${
                 simulatedOffline
-                  ? 'bg-amber-500 text-slate-950 border-amber-400 hover:bg-amber-400'
+                  ? 'bg-amber-500 text-slate-950 border-amber-400'
                   : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
               }`}
             >
-              {simulatedOffline ? 'Matikan Simulasi Offline' : 'Uji Simulasi Offline'}
+              {simulatedOffline ? 'Offline: ON' : 'Simulasi Offline'}
             </button>
 
             {activeSession && (
@@ -1099,9 +1814,11 @@ export default function ParticipantView() {
                 type="button"
                 onClick={() => triggerSyncQueue(false)}
                 disabled={isSyncing}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <RefreshCw
+                  className={`h-3 w-3 ${isSyncing ? 'animate-spin' : ''}`}
+                />
                 Sync
               </button>
             )}
@@ -1112,7 +1829,7 @@ export default function ParticipantView() {
       {/* BANNER NOTIFIKASI STATUS / ERROR */}
       {feedbackBanner && (
         <div
-          className={`flex items-start gap-3 rounded-xl border p-3.5 text-sm ${
+          className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs sm:text-sm ${
             feedbackBanner.type === 'success'
               ? 'border-emerald-500/40 bg-emerald-950/60 text-emerald-200'
               : feedbackBanner.type === 'warning'
@@ -1132,30 +1849,6 @@ export default function ParticipantView() {
         </div>
       )}
 
-      {/* MODAL PEMINDAI KAMERA QR JIKA DIAKTIFKAN */}
-      {cameraActiveFor && (
-        <div className="rounded-xl border border-emerald-500/40 bg-slate-900 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-emerald-300">
-              Arahkan Kamera ke QR Code ({cameraActiveFor})
-            </span>
-            <button
-              type="button"
-              onClick={() => setCameraActiveFor(null)}
-              className="rounded-lg bg-slate-800 px-2.5 py-1 text-xs text-slate-300"
-            >
-              Tutup Kamera
-            </button>
-          </div>
-          <video
-            ref={videoRef}
-            className="h-56 w-full rounded-lg bg-black object-cover"
-            playsInline
-            muted
-          />
-        </div>
-      )}
-
       {/* ====================================================================
           LANGKAH 1: REGISTRASI (NAMA TIM WAJIB) ATAU LOGIN PESERTA
          ==================================================================== */}
@@ -1167,21 +1860,10 @@ export default function ParticipantView() {
                 Langkah 1 — Identitas Peserta
               </span>
               <h2 className="text-lg font-bold text-white">
-                Registrasi / Masuk Peserta
+                Masuk / Daftar Peserta
               </h2>
             </div>
             <div className="flex rounded-lg bg-slate-950 p-1 border border-slate-800">
-              <button
-                type="button"
-                onClick={() => setAuthTab('register')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-                  authTab === 'register'
-                    ? 'bg-emerald-600 text-white'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Register Baru
-              </button>
               <button
                 type="button"
                 onClick={() => setAuthTab('login')}
@@ -1193,6 +1875,17 @@ export default function ParticipantView() {
               >
                 Sudah Punya BIB
               </button>
+              <button
+                type="button"
+                onClick={() => setAuthTab('register')}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                  authTab === 'register'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Daftar Baru
+              </button>
             </div>
           </div>
 
@@ -1200,7 +1893,8 @@ export default function ParticipantView() {
             <form onSubmit={handleRegister} className="space-y-3">
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Nama Peserta / Ketua Tim <span className="text-rose-400">*</span>
+                  Nama Peserta / Ketua Tim{' '}
+                  <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="text"
@@ -1240,7 +1934,7 @@ export default function ParticipantView() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Buat PIN Keamanan (Minimal 4 digit — Disimpan Terenkripsi/Hash){' '}
+                  Buat PIN Keamanan (Minimal 4 digit){' '}
                   <span className="text-rose-400">*</span>
                 </label>
                 <input
@@ -1255,9 +1949,9 @@ export default function ParticipantView() {
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 transition"
+                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition"
               >
-                Daftar & Lanjut ke Scan Setup QR
+                Daftar &amp; Lanjut Scan Setup QR
               </button>
             </form>
           ) : (
@@ -1293,7 +1987,7 @@ export default function ParticipantView() {
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 transition"
+                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition"
               >
                 Masuk Peserta
               </button>
@@ -1303,13 +1997,15 @@ export default function ParticipantView() {
       ) : (
         <>
           {/* HEADER PROFIL PESERTA AKTIF */}
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3">
+          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
+              <div className="flex h-9 w-12 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-bold">
                 {participant.bibNumber}
               </div>
               <div>
-                <div className="text-sm font-bold text-white">{participant.name}</div>
+                <div className="text-sm font-bold text-white leading-tight">
+                  {participant.name}
+                </div>
                 <div className="text-xs text-emerald-400 font-medium">
                   Tim: {participant.teamName}
                 </div>
@@ -1318,7 +2014,7 @@ export default function ParticipantView() {
             <button
               type="button"
               onClick={handleLogout}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
             >
               <LogOut className="h-3.5 w-3.5" /> Ganti Akun
             </button>
@@ -1326,128 +2022,251 @@ export default function ParticipantView() {
 
           {/* ==================================================================
               LANGKAH 2: LOAD COURSE (HANYA MUNCUL JIKA BELUM MASUK KE COURSE!)
-              Begitu peserta berhasil Load Course, menu ini langsung hilang.
-              Pilihan setup hanya diatur oleh Penyelenggara saat membuat Course.
+              Dilengkapi Tombol Besar Scan Kamera Layar Penuh
              ================================================================== */}
           {!activeCourse || !activeSession ? (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-4">
-              <div>
+            <div className="rounded-xl border border-emerald-500/40 bg-slate-900/90 p-5 space-y-4">
+              <div className="text-center space-y-1">
                 <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
                   Langkah 2 — Masuk ke Course
                 </span>
-                <h3 className="text-base font-bold text-white">
-                  Pindai Setup QR Code dari Panitia
+                <h3 className="text-lg font-extrabold text-white">
+                  Scan Setup QR dari Panitia
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Seluruh aturan Course telah dikonfigurasi oleh Penyelenggara. Pindai Setup QR untuk memuat Course Anda.
+                <p className="text-xs text-slate-400">
+                  Tekan tombol di bawah untuk membuka kamera layar penuh, lalu arahkan ke Setup QR Code.
                 </p>
               </div>
 
-              <form onSubmit={handleLoadCourse} className="space-y-3">
+              {/* TOMBOL UTAMA BESAR: BUKA KAMERA LAYAR PENUH */}
+              <button
+                type="button"
+                onClick={() => setCameraActiveFor('SETUP')}
+                className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] py-6 px-4 text-white shadow-lg shadow-emerald-950/60 transition cursor-pointer"
+              >
+                <Camera className="h-10 w-10" />
+                <span className="text-lg font-extrabold tracking-wide uppercase">
+                  SCAN SETUP QR (LAYAR PENUH)
+                </span>
+                <span className="text-xs text-emerald-100 font-medium">
+                  Otomatis memuat Course begitu QR terbaca kamera
+                </span>
+              </button>
+
+              {/* OPSI INPUT MANUAL SETUP QR JIKA DIBUTUHKAN */}
+              <form
+                onSubmit={handleLoadCourse}
+                className="pt-2 border-t border-slate-800 space-y-2"
+              >
+                <label className="block text-[11px] text-slate-400">
+                  Atau muat dengan kode Setup QR (untuk uji coba di laptop):
+                </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
                     value={setupQrInput}
                     onChange={(e) => setSetupQrInput(e.target.value)}
-                    placeholder="Pindai Setup QR Code dari panitia..."
+                    placeholder="BARAKA:SETUP:..."
                     className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:border-emerald-500 focus:outline-none"
                   />
                   <button
-                    type="button"
-                    onClick={() => setCameraActiveFor('SETUP')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                    type="submit"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-3.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-slate-700"
                   >
-                    <Camera className="h-4 w-4" /> Scan Kamera
+                    <QrCode className="h-4 w-4" /> Muat
                   </button>
                 </div>
-
-                <button
-                  type="submit"
-                  className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 transition"
-                >
-                  <QrCode className="h-4 w-4" /> Muat Course (Scan Setup QR)
-                </button>
               </form>
             </div>
           ) : (
             /* ==================================================================
-               INFORMASI COURSE & SESI AKTIF (TAMPIL SETELAH SETUP QR DIPINDAI)
+               TAMPILAN UTAMA PELARI (ANTI-RIBET, TANPA PERLU SCROLL UNTUK SCAN!)
                ================================================================== */
             <>
-              {/* RINGKASAN STATUS SESI & PROGRES */}
-              <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-4">
-                <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-800 pb-3">
-                  <div>
-                    <div className="text-xs font-medium text-emerald-400">
-                      {activeCourse.locationName} • {activeCourse.date}
+              {/* KARTU UTAMA PELARI: STOPWATCH BESAR + TOMBOL RAKSASA 1-TAP SCAN QR */}
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/95 p-4 sm:p-5 space-y-4 shadow-xl">
+                <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                  <div className="truncate">
+                    <div className="text-[11px] font-medium text-emerald-400 truncate">
+                      {activeCourse.locationName
+                        ? `${activeCourse.locationName} • `
+                        : ''}
+                      {activeCourse.enforceOrder
+                        ? 'Wajib Berurutan'
+                        : 'Acak / Score'}
+                      {activeCourse.durationMinutes &&
+                      activeCourse.durationMinutes > 0
+                        ? ` • Batas: ${activeCourse.durationMinutes} Menit`
+                        : ''}
                     </div>
-                    <h3 className="text-base font-bold text-white">
+                    <h3 className="text-sm sm:text-base font-bold text-white truncate">
                       {activeCourse.name}
                     </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Metode Validasi:{' '}
-                      <strong className="text-slate-200">
-                        {activeCourse.validationMethod}
-                      </strong>{' '}
-                      | Urutan Pos:{' '}
-                      <strong className="text-slate-200">
-                        {activeCourse.enforceOrder ? 'Wajib Berurutan' : 'Bebas (Score)'}
-                      </strong>
-                    </p>
                   </div>
-                  <div className="text-right">
-                    <span className="text-xs text-slate-400 block">Status Resmi Server</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {scoreBreakdown.isOvertime && (
+                      <span className="rounded-md px-2 py-1 text-[10px] font-mono font-extrabold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
+                        OVERTIME +{scoreBreakdown.overtimeMinutes}M
+                      </span>
+                    )}
                     <span
-                      className={`inline-block mt-0.5 rounded px-2.5 py-0.5 text-xs font-bold ${
-                        activeSession.status === SessionStatus.ACTIVE
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : activeSession.status === SessionStatus.FINISHED
+                      className={`rounded-md px-2.5 py-1 text-xs font-extrabold ${
+                        sessionMarkedFinishedLocallyOrServer
                           ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                          : 'bg-slate-800 text-slate-300'
+                          : sessionCanRecordCheckpoints
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                       }`}
                     >
-                      {activeSession.status}
+                      {sessionMarkedFinishedLocallyOrServer
+                        ? 'FINISHED'
+                        : sessionCanRecordCheckpoints
+                        ? 'SEDANG LARI'
+                        : 'SIAP START'}
                     </span>
                   </div>
                 </div>
 
-                {/* INDIKATOR PROGRES RESMI SERVER VS LOKAL PERANGKAT + STOPWATCH ANTI-RESET */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
-                  <div className="rounded-lg border border-slate-800 bg-slate-950 p-2.5">
-                    <div className="text-xs text-slate-400">Waktu Lomba</div>
-                    <div className="text-base sm:text-lg font-mono font-bold text-amber-400">
+                {/* PANEL ANGKA KONTRAS TINGGI UNTUK PELARI */}
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div
+                    className={`col-span-3 sm:col-span-1 rounded-xl border py-3 px-2 ${
+                      scoreBreakdown.isOvertime
+                        ? 'border-rose-500/50 bg-rose-950/30'
+                        : 'border-slate-800 bg-slate-950'
+                    }`}
+                  >
+                    <div className="text-[11px] uppercase tracking-wider text-slate-400">
+                      Waktu Lomba
+                      {activeCourse.durationMinutes &&
+                      activeCourse.durationMinutes > 0
+                        ? ` (Maks ${activeCourse.durationMinutes}m)`
+                        : ''}
+                    </div>
+                    <div
+                      className={`text-2xl sm:text-xl font-mono font-extrabold mt-0.5 ${
+                        scoreBreakdown.isOvertime
+                          ? 'text-rose-400'
+                          : 'text-amber-400'
+                      }`}
+                    >
                       {effectiveStartIso
                         ? formatStopwatchSeconds(liveStopwatchSeconds)
-                        : 'Belum Start'}
+                        : '00:00:00'}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-slate-800 bg-slate-950 p-2.5">
-                    <div className="text-xs text-slate-400">Valid Server</div>
-                    <div className="text-lg font-bold text-emerald-400">
-                      {activeSession.validatedCheckpointIds.length} /{' '}
+                  <div className="col-span-2 sm:col-span-1 rounded-xl border border-slate-800 bg-slate-950 py-3 px-2">
+                    <div className="text-[11px] uppercase tracking-wider text-slate-400">
+                      Pos Tercapai
+                    </div>
+                    <div className="text-xl font-extrabold text-emerald-400 mt-0.5">
+                      {completedCheckpointCount} /{' '}
                       {activeCourse.checkpoints.length}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-slate-800 bg-slate-950 p-2.5">
-                    <div className="text-xs text-slate-400">Antrean Lokal</div>
-                    <div className="text-lg font-bold text-amber-400">
-                      {pendingSyncCount}
+                  <div className="col-span-1 rounded-xl border border-slate-800 bg-slate-950 py-3 px-2">
+                    <div className="text-[11px] uppercase tracking-wider text-slate-400">
+                      Skor Akhir
                     </div>
-                  </div>
-                  <div className="rounded-lg border border-slate-800 bg-slate-950 p-2.5">
-                    <div className="text-xs text-slate-400">Skor Resmi</div>
-                    <div className="text-lg font-bold text-white">
-                      {activeSession.totalScore}
+                    <div className="text-xl font-extrabold text-white mt-0.5">
+                      {scoreBreakdown.netScore}
                     </div>
+                    {scoreBreakdown.penaltyPoints > 0 && (
+                      <div className="text-[10px] font-mono text-rose-400">
+                        (-{scoreBreakdown.penaltyPoints} penalti)
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* DAFTAR POS CHECKPOINT & STATUSNYA */}
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                    Daftar Pos Checkpoint
+                {/* ============================================================
+                    TOMBOL SCAN UTAMA RAKSASA (TEPAT DI ATAS, TANPA PERLU SCROLL!)
+                   ============================================================ */}
+                {!sessionCanRecordCheckpoints ? (
+                  <button
+                    type="button"
+                    onClick={() => setCameraActiveFor('START')}
+                    className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-6 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer"
+                  >
+                    <Play className="h-10 w-10 fill-current" />
+                    <span className="text-xl font-extrabold tracking-wide uppercase">
+                      SCAN START QR
+                    </span>
+                    <span className="text-xs text-emerald-100 font-medium">
+                      Buka kamera layar penuh &amp; otomatis mulai waktu lomba
+                    </span>
+                  </button>
+                ) : !sessionMarkedFinishedLocallyOrServer ? (
+                  <button
+                    type="button"
+                    onClick={() => setCameraActiveFor('AUTO_RACE')}
+                    className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-7 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer border-2 border-lime-400/50"
+                  >
+                    <Camera className="h-11 w-11" />
+                    <span className="text-xl sm:text-2xl font-extrabold tracking-wide uppercase">
+                      SCAN QR POS / FINISH
+                    </span>
+                    <span className="text-xs text-emerald-100 font-medium">
+                      Kamera layar penuh • Otomatis kenali CP1–CP
+                      {activeCourse.checkpoints.length} atau Finish
+                    </span>
+                  </button>
+                ) : (
+                  <div className="rounded-xl border border-sky-500/40 bg-sky-950/30 p-4 text-center space-y-3">
+                    <div className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-sky-500/20 text-sky-300">
+                      <Flag className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-base font-extrabold text-white">
+                        Selamat! Anda Telah Menyelesaikan Lomba
+                      </h4>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        Total Waktu:{' '}
+                        <strong className="font-mono text-amber-300">
+                          {formatStopwatchSeconds(liveStopwatchSeconds)}
+                        </strong>{' '}
+                        • Pos Tercapai:{' '}
+                        <strong>
+                          {completedCheckpointCount}/
+                          {activeCourse.checkpoints.length}
+                        </strong>
+                      </p>
+                      {scoreBreakdown.penaltyPoints > 0 && (
+                        <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-2 rounded-lg bg-slate-950/90 border border-rose-500/40 px-3 py-1.5 text-xs font-mono">
+                          <span className="text-slate-300">
+                            Poin Pos: <strong>{scoreBreakdown.grossScore}</strong>
+                          </span>
+                          <span className="text-rose-400">
+                            • Penalti Telat ({scoreBreakdown.overtimeMinutes}m):{' '}
+                            <strong>-{scoreBreakdown.penaltyPoints}</strong>
+                          </span>
+                          <span className="text-emerald-300">
+                            • Skor Akhir: <strong>{scoreBreakdown.netScore}</strong>
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleDownloadProofCard}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 hover:bg-sky-500 py-3 text-xs sm:text-sm font-bold text-white transition"
+                    >
+                      <Download className="h-4 w-4" /> Unduh Kartu Bukti Hasil (PNG)
+                    </button>
                   </div>
-                  <div className="grid grid-cols-1 gap-2">
+                )}
+
+                {/* DAFTAR RINGKAS POS CHECKPOINT */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Daftar Pos Checkpoint
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Hijau = Sudah Tercatat
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5">
                     {activeCourse.checkpoints.map((cp) => {
                       const isServerValidated =
                         activeSession.validatedCheckpointIds.includes(cp.id);
@@ -1455,38 +2274,60 @@ export default function ParticipantView() {
                         .reverse()
                         .find(
                           (r) =>
-                            r.reportType === 'CHECKPOINT' && r.checkpointId === cp.id
+                            r.reportType === 'CHECKPOINT' &&
+                            r.checkpointId === cp.id &&
+                            r.syncStatus !== SyncStatus.REJECTED_SERVER
                         );
+                      const isDone = isServerValidated || Boolean(localCpReport);
 
                       return (
                         <div
                           key={cp.id}
-                          className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
-                            isServerValidated
-                              ? 'border-emerald-500/40 bg-emerald-950/30'
-                              : localCpReport
-                              ? 'border-amber-500/40 bg-amber-950/20'
-                              : 'border-slate-800 bg-slate-950'
+                          className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-xs transition ${
+                            isDone
+                              ? 'border-emerald-500/50 bg-emerald-950/35'
+                              : 'border-slate-800 bg-slate-950/90'
                           }`}
                         >
-                          <div>
-                            <span className="font-bold text-white">
-                              #{cp.orderIndex} {cp.code}
-                            </span>{' '}
-                            — <span className="text-slate-300">{cp.name}</span>
-                            <div className="text-[11px] text-slate-400">
-                              Radius GPS: {cp.radiusMeters}m | Poin: {cp.points}
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${
+                                isDone
+                                  ? 'bg-emerald-500 text-slate-950'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {isDone ? '✓' : cp.orderIndex}
+                            </span>
+                            <div>
+                              <span className="font-bold text-white">
+                                {cp.code}
+                              </span>
+                              {cp.name ? (
+                                <>
+                                  {' '}
+                                  —{' '}
+                                  <span className="text-slate-300">
+                                    {cp.name}
+                                  </span>
+                                </>
+                              ) : null}
+                              <div className="text-[11px] text-slate-400">
+                                {cp.points} Poin
+                              </div>
                             </div>
                           </div>
                           <div>
                             {isServerValidated ? (
                               <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
-                                <ShieldCheck className="h-3.5 w-3.5" /> Sah di Server
+                                <ShieldCheck className="h-3.5 w-3.5" /> Sah
                               </span>
                             ) : localCpReport ? (
                               <SyncBadge status={localCpReport.syncStatus} />
                             ) : (
-                              <span className="text-slate-500">Belum Dikunjungi</span>
+                              <span className="text-[11px] text-slate-500">
+                                Belum
+                              </span>
                             )}
                           </div>
                         </div>
@@ -1497,346 +2338,310 @@ export default function ParticipantView() {
               </div>
 
               {/* ==============================================================
-                  LANGKAH 3: PINDAI START QR CODE (KONDISI A: BELUM START)
+                  TOMBOL UNDUH BUKTI CADANGAN (SELALU MUDAH DIAKSES)
                  ============================================================== */}
-              {!sessionCanRecordCheckpoints && (
-                <div className="rounded-xl border border-emerald-500/40 bg-slate-900/90 p-5 space-y-3">
-                  <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                      Langkah 3 — Mulai Sesi
-                    </span>
-                    <h3 className="text-base font-bold text-white">
-                      Pindai Start QR Code
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      Hanya pindai Start QR saat Anda benar-benar siap memulai perhitungan waktu sesi.
-                    </p>
-                  </div>
-
-                  <form onSubmit={handleStartSession} className="space-y-3">
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={startQrInput}
-                        onChange={(e) => setStartQrInput(e.target.value)}
-                        placeholder="Pindai Start QR Code..."
-                        className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setCameraActiveFor('START')}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200"
-                      >
-                        <Camera className="h-4 w-4" /> Kamera
-                      </button>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setStartQrInput(
-                            activeCourse.id === 'crs-sprint-01'
-                              ? DEMO_QR_CODES.START_SPRINT
-                              : activeCourse.id === 'crs-amazing-02'
-                              ? DEMO_QR_CODES.START_AMAZING
-                              : `BARAKA:START:${activeCourse.id}`
-                          )
-                        }
-                        className="rounded border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-slate-300 hover:border-emerald-500/50"
-                      >
-                        Simulasi Scan Start QR
-                      </button>
-                    </div>
-
-                    <button
-                      type="submit"
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 py-3 text-sm font-semibold text-white hover:bg-emerald-500"
-                    >
-                      <Play className="h-4 w-4" /> Scan Start QR & Mulai Sesi
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* ==============================================================
-                  LANGKAH 4: LAPOR CHECKPOINT (OFFLINE-FIRST, KONDISI B)
-                 ============================================================== */}
-              {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && (
-                <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-4">
-                  <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                      Langkah 4 — Kunjungi & Laporkan Pos (Offline-First)
-                    </span>
-                    <h3 className="text-base font-bold text-white">
-                      Scan Check Point
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      Laporan disimpan permanen di perangkat sebelum dikirim. Anda dapat langsung lanjut ke pos berikutnya tanpa menunggu sinyal.
-                    </p>
-                  </div>
-
-                  <form onSubmit={handleReportCheckpoint} className="space-y-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">
-                        Pilih Pos Checkpoint yang Dikunjungi
-                      </label>
-                      <select
-                        value={selectedCheckpointId}
-                        onChange={(e) => setSelectedCheckpointId(e.target.value)}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"
-                      >
-                        {activeCourse.checkpoints.map((cp) => (
-                          <option key={cp.id} value={cp.id}>
-                            Pos #{cp.orderIndex} — {cp.code}: {cp.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* INPUT QR CHECKPOINT */}
-                    {activeCourse.validationMethod !== ValidationMethod.GPS_AUTO && (
-                      <div className="space-y-1.5">
-                        <label className="block text-xs font-medium text-slate-300">
-                          QR Code Checkpoint ({selectedCheckpoint?.code})
-                        </label>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={checkpointQrInput}
-                            onChange={(e) => setCheckpointQrInput(e.target.value)}
-                            placeholder="Pindai QR Checkpoint..."
-                            className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setCameraActiveFor('CHECKPOINT')}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200"
-                          >
-                            <Camera className="h-4 w-4" /> Kamera
-                          </button>
-                        </div>
-                        {selectedCheckpoint && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const codeMap =
-                                activeCourse.id === 'crs-sprint-01'
-                                  ? DEMO_QR_CODES.CP_SPRINT
-                                  : DEMO_QR_CODES.CP_AMAZING;
-                              const demoSecret =
-                                codeMap[selectedCheckpoint.code] ||
-                                `BARAKA:CP:${activeCourse.id}:${selectedCheckpoint.code}`;
-                              setCheckpointQrInput(demoSecret);
-                            }}
-                            className="rounded border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-slate-300 hover:border-emerald-500/50"
-                          >
-                            Simulasi Scan QR {selectedCheckpoint.code}
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    {/* INPUT KOORDINAT GPS */}
-                    {activeCourse.validationMethod !== ValidationMethod.QR_ONLY && (
-                      <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                            <MapPin className="h-3.5 w-3.5 text-emerald-400" />
-                            Validasi Koordinat GPS (Radius Maks:{' '}
-                            {selectedCheckpoint?.radiusMeters}m)
-                          </span>
-                          {gpsCoords && (
-                            <span className="text-[11px] font-mono text-emerald-400">
-                              {gpsCoords.latitude.toFixed(5)},{' '}
-                              {gpsCoords.longitude.toFixed(5)} (±{gpsCoords.accuracy}m)
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleReadDeviceGps()}
-                            disabled={isReadingGps}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
-                          >
-                            <Compass className="h-3.5 w-3.5" />
-                            {isReadingGps ? 'Membaca GPS...' : 'Ambil Posisi GPS HP'}
-                          </button>
-                          {selectedCheckpoint && (
-                            <button
-                              type="button"
-                              onClick={() => handleReadDeviceGps(selectedCheckpoint)}
-                              className="rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-900/50"
-                            >
-                              Simulasi GPS Tepat di {selectedCheckpoint.code}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    <button
-                      type="submit"
-                      className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-semibold text-white hover:bg-emerald-500 transition"
-                    >
-                      Simpan & Laporkan {selectedCheckpoint?.code || 'Checkpoint'}
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* ==============================================================
-                  LANGKAH 5: PINDAI FINISH QR CODE
-                 ============================================================== */}
-              {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && (
-                <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-3">
-                  <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-sky-400">
-                      Langkah 5 — Selesaikan Kegiatan
-                    </span>
-                    <h3 className="text-base font-bold text-white">
-                      Pindai Finish QR Code
-                    </h3>
-                  </div>
-
-                  <form onSubmit={handleFinishSession} className="space-y-3">
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={finishQrInput}
-                        onChange={(e) => setFinishQrInput(e.target.value)}
-                        placeholder="Pindai Finish QR Code..."
-                        className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setCameraActiveFor('FINISH')}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200"
-                      >
-                        <Camera className="h-4 w-4" /> Kamera
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setFinishQrInput(
-                          activeCourse.id === 'crs-sprint-01'
-                            ? DEMO_QR_CODES.FINISH_SPRINT
-                            : activeCourse.id === 'crs-amazing-02'
-                            ? DEMO_QR_CODES.FINISH_AMAZING
-                            : `BARAKA:FINISH:${activeCourse.id}`
-                        )
-                      }
-                      className="rounded border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-slate-300 hover:border-sky-500/50"
-                    >
-                      Simulasi Scan Finish QR
-                    </button>
-
-                    <button
-                      type="submit"
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 py-3 text-sm font-semibold text-white hover:bg-sky-500"
-                    >
-                      <Flag className="h-4 w-4" /> Scan Finish QR & Selesaikan Sesi
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* ==============================================================
-                  LANGKAH 6: BUKTI CADANGAN HASIL PESERTA
-                 ============================================================== */}
-              <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                      Langkah 6 — Bukti Cadangan
-                    </span>
-                    <h3 className="text-base font-bold text-white">
-                      Simpan Bukti Hasil Peserta
-                    </h3>
+              {!sessionMarkedFinishedLocallyOrServer && (
+                <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-3">
+                  <div className="text-xs text-slate-300">
+                    Butuh simpan bukti cadangan ke galeri HP?
                   </div>
                   <button
                     type="button"
                     onClick={handleDownloadProofCard}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-slate-700"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-slate-700"
                   >
-                    <Download className="h-4 w-4" /> Unduh Gambar Bukti (PNG)
+                    <Download className="h-3.5 w-3.5" /> Unduh PNG
                   </button>
                 </div>
-                <p className="text-xs text-slate-400">
-                  Anda dapat mengunduh kartu bukti hasil (PNG) atau melakukan screenshot layar ini sebagai bukti cadangan kepada panitia di garis Finish.
-                </p>
+              )}
+
+              {/* ==============================================================
+                  MENU LIPAT: MODE DARURAT / INPUT MANUAL & SIMULASI
+                  (Disembunyikan secara default agar layar pelari pendek & bersih)
+                 ============================================================== */}
+              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowManualTools((prev) => !prev)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
+                >
+                  <span className="flex items-center gap-2">
+                    <Wrench className="h-3.5 w-3.5 text-slate-400" />
+                    Mode Bantuan / Input Kode Manual &amp; Simulasi
+                  </span>
+                  {showManualTools ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </button>
+
+                {showManualTools && (
+                  <div className="border-t border-slate-800 p-4 space-y-5 bg-slate-950/50">
+                    {/* Input Manual Start QR */}
+                    {!sessionCanRecordCheckpoints && (
+                      <form onSubmit={handleStartSession} className="space-y-2">
+                        <label className="block text-xs font-bold text-emerald-400">
+                          Input Manual Start QR:
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={startQrInput}
+                            onChange={(e) => setStartQrInput(e.target.value)}
+                            placeholder="BARAKA:START:..."
+                            className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
+                          />
+                          <button
+                            type="submit"
+                            className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white"
+                          >
+                            Mulai
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setStartQrInput(
+                              activeCourse.id === 'crs-sprint-01'
+                                ? DEMO_QR_CODES.START_SPRINT
+                                : activeCourse.id === 'crs-amazing-02'
+                                ? DEMO_QR_CODES.START_AMAZING
+                                : `BARAKA:START:${activeCourse.id}`
+                            )
+                          }
+                          className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
+                        >
+                          Isi Contoh Start QR
+                        </button>
+                      </form>
+                    )}
+
+                    {/* Input Manual Checkpoint */}
+                    {sessionCanRecordCheckpoints &&
+                      !sessionMarkedFinishedLocallyOrServer && (
+                        <form
+                          onSubmit={handleReportCheckpoint}
+                          className="space-y-3"
+                        >
+                          <div className="text-xs font-bold text-emerald-400">
+                            Input Manual Pos Checkpoint:
+                          </div>
+                          <div>
+                            <select
+                              value={selectedCheckpointId}
+                              onChange={(e) =>
+                                setSelectedCheckpointId(e.target.value)
+                              }
+                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
+                            >
+                              {activeCourse.checkpoints.map((cp) => (
+                                <option key={cp.id} value={cp.id}>
+                                  Pos #{cp.orderIndex} — {cp.code}: {cp.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {activeCourse.validationMethod !==
+                            ValidationMethod.GPS_AUTO && (
+                            <div className="space-y-1.5">
+                              <div className="flex gap-2">
+                                <input
+                                  type="text"
+                                  value={checkpointQrInput}
+                                  onChange={(e) =>
+                                    setCheckpointQrInput(e.target.value)
+                                  }
+                                  placeholder={`Kode QR ${
+                                    selectedCheckpoint?.code || ''
+                                  }...`}
+                                  className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
+                                />
+                                <button
+                                  type="submit"
+                                  className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white"
+                                >
+                                  Simpan Pos
+                                </button>
+                              </div>
+                              {selectedCheckpoint && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const codeMap =
+                                      activeCourse.id === 'crs-sprint-01'
+                                        ? DEMO_QR_CODES.CP_SPRINT
+                                        : DEMO_QR_CODES.CP_AMAZING;
+                                    const demoSecret =
+                                      codeMap[selectedCheckpoint.code] ||
+                                      `BARAKA:CP:${activeCourse.id}:${selectedCheckpoint.code}`;
+                                    setCheckpointQrInput(demoSecret);
+                                  }}
+                                  className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
+                                >
+                                  Isi Contoh QR {selectedCheckpoint.code}
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {activeCourse.validationMethod !==
+                            ValidationMethod.QR_ONLY && (
+                            <div className="rounded-lg border border-slate-800 bg-slate-900 p-2.5 space-y-2">
+                              <div className="flex items-center justify-between text-[11px] text-slate-300">
+                                <span className="flex items-center gap-1">
+                                  <MapPin className="h-3.5 w-3.5 text-emerald-400" />
+                                  GPS (Radius: {selectedCheckpoint?.radiusMeters}
+                                  m)
+                                </span>
+                                {gpsCoords && (
+                                  <span className="font-mono text-emerald-400">
+                                    {gpsCoords.latitude.toFixed(4)},{' '}
+                                    {gpsCoords.longitude.toFixed(4)}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleReadDeviceGps()}
+                                  disabled={isReadingGps}
+                                  className="inline-flex items-center gap-1 rounded bg-slate-800 px-2.5 py-1 text-[11px] text-white"
+                                >
+                                  <Compass className="h-3 w-3" />
+                                  {isReadingGps ? 'Membaca...' : 'Ambil GPS HP'}
+                                </button>
+                                {selectedCheckpoint && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleReadDeviceGps(selectedCheckpoint)
+                                    }
+                                    className="rounded border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 text-[11px] text-emerald-300"
+                                  >
+                                    Simulasi GPS di {selectedCheckpoint.code}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </form>
+                      )}
+
+                    {/* Input Manual Finish QR */}
+                    {sessionCanRecordCheckpoints &&
+                      !sessionMarkedFinishedLocallyOrServer && (
+                        <form
+                          onSubmit={handleFinishSession}
+                          className="space-y-2 pt-3 border-t border-slate-800"
+                        >
+                          <label className="block text-xs font-bold text-sky-400">
+                            Input Manual Finish QR:
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={finishQrInput}
+                              onChange={(e) => setFinishQrInput(e.target.value)}
+                              placeholder="BARAKA:FINISH:..."
+                              className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
+                            />
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-bold text-white"
+                            >
+                              Finish
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setFinishQrInput(
+                                activeCourse.id === 'crs-sprint-01'
+                                  ? DEMO_QR_CODES.FINISH_SPRINT
+                                  : activeCourse.id === 'crs-amazing-02'
+                                  ? DEMO_QR_CODES.FINISH_AMAZING
+                                  : `BARAKA:FINISH:${activeCourse.id}`
+                              )
+                            }
+                            className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
+                          >
+                            Isi Contoh Finish QR
+                          </button>
+                        </form>
+                      )}
+                  </div>
+                )}
               </div>
 
               {/* ==============================================================
-                  LOG ANTREAN LAPORAN OFFLINE-FIRST (5 STATUS SINKRONISASI JELAS)
+                  MENU LIPAT: RIWAYAT ANTREAN LAPORAN PERANGKAT (INDEXEDDB)
                  ============================================================== */}
-              <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">
-                      Riwayat & Antrean Laporan Perangkat (IndexedDB)
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      Tetap tersimpan meskipun aplikasi ditutup atau perangkat direstart.
-                    </p>
-                  </div>
-                  <span className="text-xs font-mono text-slate-400">
-                    Total: {localReports.length} laporan
+              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowHistoryLogs((prev) => !prev)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
+                >
+                  <span className="flex items-center gap-2">
+                    <Zap className="h-3.5 w-3.5 text-emerald-400" />
+                    Riwayat Waktu &amp; Sinkronisasi ({localReports.length}{' '}
+                    Laporan)
                   </span>
-                </div>
+                  {showHistoryLogs ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </button>
 
-                {localReports.length === 0 ? (
-                  <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 text-center text-xs text-slate-500">
-                    Belum ada laporan pada sesi ini.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {[...localReports].reverse().map((rep) => {
-                      const cpObj = activeCourse.checkpoints.find(
-                        (c) => c.id === rep.checkpointId
-                      );
-                      const title =
-                        rep.reportType === 'START'
-                          ? 'START QR'
-                          : rep.reportType === 'FINISH'
-                          ? 'FINISH QR'
-                          : `${cpObj?.code || rep.checkpointId} — ${cpObj?.name || ''}`;
+                {showHistoryLogs && (
+                  <div className="border-t border-slate-800 p-4 space-y-2 bg-slate-950/50">
+                    {localReports.length === 0 ? (
+                      <div className="text-center text-xs text-slate-500 py-2">
+                        Belum ada laporan pada sesi ini.
+                      </div>
+                    ) : (
+                      [...localReports].reverse().map((rep) => {
+                        const cpObj = activeCourse.checkpoints.find(
+                          (c) => c.id === rep.checkpointId
+                        );
+                        const title =
+                          rep.reportType === 'START'
+                            ? 'START QR'
+                            : rep.reportType === 'FINISH'
+                            ? 'FINISH QR'
+                            : `${cpObj?.code || rep.checkpointId} — ${
+                                cpObj?.name || ''
+                              }`;
 
-                      return (
-                        <div
-                          key={rep.reportId}
-                          className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-1.5 text-xs"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-bold text-slate-100">{title}</span>
-                            <SyncBadge status={rep.syncStatus} />
-                          </div>
-                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-400">
-                            <span>
-                              Waktu Perangkat:{' '}
-                              {new Date(rep.measuredAt).toLocaleTimeString('id-ID')}
-                            </span>
-                            {rep.receivedAt && (
-                              <span>
-                                Diterima Server:{' '}
-                                {new Date(rep.receivedAt).toLocaleTimeString('id-ID')}
+                        return (
+                          <div
+                            key={rep.reportId}
+                            className="rounded-lg border border-slate-800 bg-slate-950 p-2.5 space-y-1 text-xs"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-bold text-slate-100">
+                                {title}
                               </span>
-                            )}
-                            <span className="font-mono text-slate-500">
-                              ID: {rep.reportId.slice(0, 16)}...
-                            </span>
-                          </div>
-                          {rep.rejectionReason && (
-                            <div className="rounded bg-rose-950/60 border border-rose-500/30 px-2.5 py-1 text-[11px] text-rose-300">
-                              Catatan Server: {rep.rejectionReason}
+                              <SyncBadge status={rep.syncStatus} />
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                            <div className="text-[11px] text-slate-400">
+                              Waktu Scan:{' '}
+                              {new Date(rep.measuredAt).toLocaleTimeString(
+                                'id-ID'
+                              )}
+                            </div>
+                            {rep.rejectionReason && (
+                              <div className="rounded bg-rose-950/60 border border-rose-500/30 px-2 py-1 text-[11px] text-rose-300">
+                                Catatan Server: {rep.rejectionReason}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 )}
               </div>
@@ -1844,19 +2649,20 @@ export default function ParticipantView() {
               {/* ==============================================================
                   TOMBOL KECIL "KELUAR COURSE" (JAUH DARI TOMBOL SCAN + KONFIRMASI)
                  ============================================================== */}
-              <div className="pt-8 border-t border-slate-900 flex flex-col items-center justify-center">
+              <div className="pt-4 flex flex-col items-center justify-center">
                 {!confirmingLeaveCourse ? (
                   <button
                     type="button"
                     onClick={() => setConfirmingLeaveCourse(true)}
                     className="rounded px-2.5 py-1 text-[11px] text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition"
                   >
-                    Keluar dari Course Ini (Sebelum / Sesudah Finish)
+                    Keluar dari Course Ini (Ganti Course)
                   </button>
                 ) : (
                   <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-3 text-center space-y-2 max-w-xs">
                     <p className="text-[11px] text-slate-300">
-                      Yakin ingin keluar dari Course <strong>{activeCourse.name}</strong>?
+                      Yakin ingin keluar dari Course{' '}
+                      <strong>{activeCourse.name}</strong>?
                     </p>
                     <div className="flex items-center justify-center gap-2">
                       <button

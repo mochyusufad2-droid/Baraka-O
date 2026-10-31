@@ -41,11 +41,17 @@ export enum LocationFreshness {
   UNAVAILABLE = 'UNAVAILABLE',
 }
 
+export interface GeoPointLocation {
+  latitude: number;
+  longitude: number;
+  name?: string;
+}
+
 export interface Checkpoint {
   id: string;
   courseId: string;
   code: string;          // Contoh: "CP1", "CP2"
-  name: string;
+  name: string;          // Opsional (boleh string kosong "")
   orderIndex: number;    // Urutan pos (1, 2, 3...)
   qrSecret: string;      // Payload unik untuk QR Checkpoint
   latitude: number;
@@ -61,7 +67,7 @@ export interface Course {
   id: string;
   name: string;
   description: string;
-  locationName: string;
+  locationName: string;                   // Opsional
   date: string;
   isActive: boolean;
   scoringEnabled: boolean;
@@ -70,6 +76,11 @@ export interface Course {
   defaultGpsRadiusMeters: number;
   enforceOrder: boolean;                  // Apakah peserta wajib mengunjungi pos secara berurutan
   allowParticipantMapVisibility: boolean; // Apakah lokasi peserta boleh ditampilkan di peta monitoring
+  durationMinutes?: number;               // Durasi batas waktu course dalam menit (0 / undefined = tanpa batas)
+  overtimePenaltyEnabled?: boolean;       // Opsi apakah penalti keterlambatan aktif
+  overtimePenaltyPointsPerMinute?: number;// Pengurangan poin tiap menit keterlambatan
+  startLocation?: GeoPointLocation;       // Titik koordinat Start di peta (Segitiga 🔺)
+  finishLocation?: GeoPointLocation;      // Titik koordinat Finish di peta (Lingkaran Ganda ◎)
   setupQrCode: string;                    // Payload Setup QR untuk Load Course
   startQrCode: string;                    // Payload Start QR untuk memulai sesi
   finishQrCode: string;                   // Payload Finish QR untuk menyelesaikan sesi
@@ -126,7 +137,10 @@ export interface ParticipantSession {
   finishedAt?: string;         // Waktu selesai berdasarkan kejadian Finish QR
   finishedReceivedAt?: string; // Waktu laporan Finish diterima server
   validatedCheckpointIds: string[];
-  totalScore: number;
+  grossScore?: number;         // Total poin pos sebelum dikurangi penalti keterlambatan
+  overtimeMinutes?: number;    // Jumlah menit keterlambatan (pembulatan ke atas)
+  penaltyPoints?: number;      // Total potongan poin akibat keterlambatan
+  totalScore: number;          // Skor akhir bersih (Net Score = max(0, grossScore - penaltyPoints))
   durationSeconds?: number;
   lastLocation?: LastKnownLocation; // Hanya menyimpan 1 posisi terakhir (bukan riwayat rute lengkap)
 }

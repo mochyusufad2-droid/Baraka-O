@@ -1,0 +1,182 @@
+{
+  "entities": {
+    "Course": {
+      "title": "Course",
+      "description": "Unified Orienteering and Amazing Race course configuration created by an organizer.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique identifier for the course."
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the organizer who owns this course."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Display name of the course."
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Instructions or summary of the course."
+        },
+        "locationName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150,
+          "description": "Geographical venue name."
+        },
+        "date": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 32,
+          "description": "Scheduled date of the course."
+        },
+        "validationMethod": {
+          "type": "string",
+          "enum": ["QR_ONLY", "GPS_AUTO", "QR_AND_GPS", "QR_OR_GPS"],
+          "maxLength": 32,
+          "description": "Checkpoint validation method enforced by the course."
+        },
+        "defaultGpsRadiusMeters": {
+          "type": "number",
+          "description": "Default GPS validation tolerance radius in meters."
+        },
+        "enforceOrder": {
+          "type": "boolean",
+          "description": "Whether checkpoints must be visited in strict order."
+        },
+        "scoringEnabled": {
+          "type": "boolean",
+          "description": "Whether checkpoints award points."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "description",
+        "locationName",
+        "date",
+        "validationMethod",
+        "defaultGpsRadiusMeters",
+        "enforceOrder",
+        "scoringEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ParticipantSessionDoc": {
+      "title": "ParticipantSessionDoc",
+      "description": "Race session state for a participant team within a course.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique session identifier."
+        },
+        "courseId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent course ID."
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the participant or organizer."
+        },
+        "bibNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "description": "Participant BIB number."
+        },
+        "participantName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Participant display name."
+        },
+        "teamName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Mandatory team name."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["NOT_STARTED", "ACTIVE", "FINISHED"],
+          "maxLength": 24,
+          "description": "Current session lifecycle state."
+        },
+        "totalScore": {
+          "type": "number",
+          "description": "Accumulated score points."
+        },
+        "checkpointsCompleted": {
+          "type": "number",
+          "description": "Number of validated checkpoints."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "courseId",
+        "ownerId",
+        "bibNumber",
+        "participantName",
+        "teamName",
+        "status",
+        "totalScore",
+        "checkpointsCompleted",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/courses/{courseId}": {
+      "schema": {
+        "$ref": "#/entities/Course"
+      },
+      "description": "Stores course configurations owned by organizers."
+    },
+    "/courses/{courseId}/sessions/{sessionId}": {
+      "schema": {
+        "$ref": "#/entities/ParticipantSessionDoc"
+      },
+      "description": "Stores participant race sessions scoped under a specific course."
+    }
+  }
+}
