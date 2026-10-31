@@ -432,6 +432,11 @@ function isSetupQrPayload(qr?: string, course?: Course): boolean {
  * potongan penalti (penaltyPoints), dan skor bersih akhir (totalScore) pada sesi peserta.
  */
 function recalculateSessionScore(session: ParticipantSession, course: Course): void {
+  // Pastikan hanya checkpoint yang masih ada di course yang dihitung
+  session.validatedCheckpointIds = session.validatedCheckpointIds.filter((cpId) =>
+    course.checkpoints.some((c) => c.id === cpId)
+  );
+
   const grossScore = course.scoringEnabled
     ? session.validatedCheckpointIds.reduce((sum, cpId) => {
         const cp = course.checkpoints.find((c) => c.id === cpId);
@@ -460,6 +465,18 @@ function recalculateSessionScore(session: ParticipantSession, course: Course): v
   session.overtimeMinutes = overtimeMinutes;
   session.penaltyPoints = penaltyPoints;
   session.totalScore = Math.max(0, grossScore - penaltyPoints);
+
+  // Perbarui pointsAwarded pada laporan checkpoint yang sudah diterima di sesi ini
+  db.reports.forEach((r) => {
+    if (
+      r.sessionId === session.id &&
+      r.reportType === 'CHECKPOINT' &&
+      r.syncStatus === SyncStatus.ACCEPTED_SERVER
+    ) {
+      const cp = course.checkpoints.find((c) => c.id === r.checkpointId);
+      r.pointsAwarded = course.scoringEnabled && cp ? Number(cp.points) || 0 : 0;
+    }
+  });
 }
 
 function processSingleReport(
@@ -1206,11 +1223,31 @@ async function startServer() {
       (s) => s.id === req.params.sessionId && s.participantId === participantId
     );
     if (!session) {
-      res.status(404).json({ error: 'Sesi tidak ditemukan.' });
+      res.status(404).json({ error: 'Sesi tidak ditemukan.', sessionDeleted: true });
       return;
     }
+    const matchedCourse = db.courses.find((c) => c.id === session.courseId) || null;
+    if (matchedCourse) {
+      recalculateSessionScore(session, matchedCourse);
+    }
+    const sanitizedCourse: Course | null = matchedCourse
+      ? {
+          ...matchedCourse,
+          startQrCode: 'HIDDEN_ON_CLIENT',
+          finishQrCode: 'HIDDEN_ON_CLIENT',
+          checkpoints: matchedCourse.checkpoints.map((cp) => ({
+            ...cp,
+            qrSecret: 'VERIFIED_BY_SERVER',
+          })),
+        }
+      : null;
+
     const sessionReports = db.reports.filter((r) => r.sessionId === session.id);
-    res.json({ session, reports: sessionReports });
+    res.json({
+      session,
+      course: sanitizedCourse,
+      reports: sessionReports,
+    });
   });
 
   // --------------------------------------------------------------------------

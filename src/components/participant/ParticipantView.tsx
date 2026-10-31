@@ -330,6 +330,48 @@ export default function ParticipantView() {
     refreshLocalReports();
   }, [refreshLocalReports]);
 
+  // Sinkronisasi Real-Time Pengaturan Course & Sesi dari Server (ketika panitia mengedit Course / Checkpoint)
+  const syncLatestCourseAndSession = useCallback(async () => {
+    if (!activeSession || !token || !isEffectivelyOnline) return;
+    try {
+      const res = await fetch(`/api/participant/session/${activeSession.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 404) {
+        const errData = await res.json().catch(() => ({}));
+        if (errData.sessionDeleted) {
+          setActiveCourse(null);
+          setActiveSession(null);
+          setFeedbackBanner({
+            type: 'warning',
+            text: 'Course telah dihapus oleh panitia. Silakan scan Setup QR Course yang baru.',
+          });
+        }
+        return;
+      }
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        session?: ParticipantSession;
+        course?: Course | null;
+      };
+      if (data.course) {
+        setActiveCourse(data.course);
+      }
+      if (data.session) {
+        setActiveSession(data.session);
+      }
+    } catch {
+      // Abaikan kesalahan jaringan saat background polling
+    }
+  }, [activeSession, token, isEffectivelyOnline]);
+
+  useEffect(() => {
+    if (!activeSession || !token || !isEffectivelyOnline) return;
+    syncLatestCourseAndSession();
+    const poll = window.setInterval(syncLatestCourseAndSession, 5000);
+    return () => window.clearInterval(poll);
+  }, [activeSession?.id, token, isEffectivelyOnline, syncLatestCourseAndSession]);
+
   // Fungsi memicu sinkronisasi antrean laporan checkpoint ke server
   const triggerSyncQueue = useCallback(
     async (showSilentIfEmpty = true) => {

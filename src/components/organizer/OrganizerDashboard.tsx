@@ -243,6 +243,64 @@ export default function OrganizerDashboard() {
     );
   }, [dashboard, selectedCourseId]);
 
+  /**
+   * Course efektif yang menggabungkan perubahan dari form Edit Course secara real-time (Live Preview)
+   * sehingga peta interaktif, badge aturan, dan kalkulasi langsung berubah saat opsi diubah.
+   */
+  const effectiveSelectedCourse: Course | undefined = useMemo(() => {
+    if (!selectedCourse) return undefined;
+    if (!isEditingCourse) return selectedCourse;
+
+    const liveRadius = Math.max(5, Number(editCourseRadiusInput) || 35);
+    const liveDuration = Math.max(0, Number(editCourseDurationInput) || 0);
+    const livePenaltyRate = Math.max(0, Number(editCoursePenaltyInput) || 0);
+
+    return {
+      ...selectedCourse,
+      name: editCourseName.trim() || selectedCourse.name,
+      description: editCourseDescription,
+      locationName: editCourseLocation,
+      date: editCourseDate || selectedCourse.date,
+      scoringEnabled: editCourseScoring,
+      validationMethod: editCourseValidation,
+      defaultGpsRadiusMeters: liveRadius,
+      enforceOrder: editCourseEnforceOrder,
+      durationMinutes: liveDuration,
+      overtimePenaltyEnabled: editCoursePenaltyEnabled,
+      overtimePenaltyPointsPerMinute: livePenaltyRate,
+    };
+  }, [
+    selectedCourse,
+    isEditingCourse,
+    editCourseName,
+    editCourseDescription,
+    editCourseLocation,
+    editCourseDate,
+    editCourseScoring,
+    editCourseValidation,
+    editCourseRadiusInput,
+    editCourseEnforceOrder,
+    editCourseDurationInput,
+    editCoursePenaltyEnabled,
+    editCoursePenaltyInput,
+  ]);
+
+  // Helper untuk langsung memperbarui course di state lokal dashboard secara real-time tanpa jeda
+  const applyUpdatedCourseLocally = useCallback((updatedCourse: Course) => {
+    setDashboard((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        courses: prev.courses.map((c) =>
+          c.id === updatedCourse.id ? updatedCourse : c
+        ),
+      };
+    });
+    setBulkPrintCourse((prev) =>
+      prev && prev.id === updatedCourse.id ? updatedCourse : prev
+    );
+  }, []);
+
   // Saat berganti Course atau jumlah CP bertambah, otomatis isi saran kode pos berikutnya (CP1, CP2, dst.)
   useEffect(() => {
     if (!selectedCourse) return;
@@ -314,12 +372,13 @@ export default function OrganizerDashboard() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal memperbarui Course.');
-      setIsEditingCourse(false);
-      await fetchDashboard();
       if (data.course) {
+        applyUpdatedCourseLocally(data.course);
         syncCourseToFirestore(data.course).catch(() => {});
       }
-      showTemporarySuccess(`Course "${data.course.name}" berhasil diperbarui!`);
+      setIsEditingCourse(false);
+      await fetchDashboard();
+      showTemporarySuccess(`Course "${data.course.name}" berhasil diperbarui secara real-time!`);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'Gagal memperbarui Course'
@@ -364,7 +423,11 @@ export default function OrganizerDashboard() {
           },
           body: JSON.stringify({ startLocation: loc }),
         });
+        const data = await res.json();
         if (!res.ok) throw new Error('Gagal menyimpan titik Start');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
         await fetchDashboard();
         showTemporarySuccess(
           loc
@@ -377,7 +440,7 @@ export default function OrganizerDashboard() {
         );
       }
     },
-    [selectedCourse, token, fetchDashboard, showTemporarySuccess]
+    [selectedCourse, token, fetchDashboard, showTemporarySuccess, applyUpdatedCourseLocally]
   );
 
   const handleUpdateFinishLocation = useCallback(
@@ -392,7 +455,11 @@ export default function OrganizerDashboard() {
           },
           body: JSON.stringify({ finishLocation: loc }),
         });
+        const data = await res.json();
         if (!res.ok) throw new Error('Gagal menyimpan titik Finish');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
         await fetchDashboard();
         showTemporarySuccess(
           loc
@@ -405,7 +472,7 @@ export default function OrganizerDashboard() {
         );
       }
     },
-    [selectedCourse, token, fetchDashboard, showTemporarySuccess]
+    [selectedCourse, token, fetchDashboard, showTemporarySuccess, applyUpdatedCourseLocally]
   );
 
   // Pilih Checkpoint untuk Diedit (dari tabel maupun dari klik simbol di peta)
@@ -428,7 +495,7 @@ export default function OrganizerDashboard() {
     setCpRadiusInput(String(selectedCourse?.defaultGpsRadiusMeters || 35));
   }, [selectedCourse]);
 
-  // Compute Leaderboard rows with live / finished Overtime Penalty calculation
+  // Compute Leaderboard rows with live / finished Overtime Penalty calculation (selalu mengikuti aturan Course terbaru secara real-time)
   const leaderboardRows = useMemo(() => {
     if (!dashboard) return [];
     const filteredSessions = dashboard.sessions.filter(
@@ -446,9 +513,14 @@ export default function OrganizerDashboard() {
       const participant = dashboard.participants.find(
         (p: ParticipantPublic) => p.id === sess.participantId
       );
-      const course = dashboard.courses.find(
+      const baseCourse = dashboard.courses.find(
         (c: Course) => c.id === sess.courseId
       );
+      const course =
+        effectiveSelectedCourse && baseCourse?.id === effectiveSelectedCourse.id
+          ? effectiveSelectedCourse
+          : baseCourse;
+
       const liveDurationSec =
         sess.status === SessionStatus.FINISHED
           ? sess.durationSeconds
@@ -456,18 +528,17 @@ export default function OrganizerDashboard() {
           ? Math.max(0, Math.floor((nowTick - Date.parse(sess.startedAt)) / 1000))
           : undefined;
 
-      const grossScore =
-        sess.grossScore !== undefined
-          ? sess.grossScore
-          : course?.scoringEnabled
+      const grossScore = course
+        ? course.scoringEnabled
           ? sess.validatedCheckpointIds.reduce((sum, cpId) => {
               const cp = course.checkpoints.find((c) => c.id === cpId);
               return sum + (cp ? Number(cp.points) || 0 : 0);
             }, 0)
-          : sess.totalScore;
+          : 0
+        : sess.grossScore ?? sess.totalScore;
 
-      let overtimeMinutes = sess.overtimeMinutes || 0;
-      let penaltyPoints = sess.penaltyPoints || 0;
+      let overtimeMinutes = 0;
+      let penaltyPoints = 0;
 
       if (
         course &&
@@ -485,10 +556,7 @@ export default function OrganizerDashboard() {
         }
       }
 
-      const netScore =
-        sess.status === SessionStatus.FINISHED
-          ? sess.totalScore
-          : Math.max(0, grossScore - penaltyPoints);
+      const netScore = Math.max(0, grossScore - penaltyPoints);
 
       return {
         sessionId: sess.id,
@@ -522,7 +590,7 @@ export default function OrganizerDashboard() {
         ...item,
         rank: idx + 1,
       }));
-  }, [dashboard, selectedCourse, nowTick]);
+  }, [dashboard, selectedCourse, effectiveSelectedCourse, nowTick]);
 
   // Create Unified Course (Location optional, clean number strings, duration & penalty)
   const handleCreateCourse = async (e: React.FormEvent) => {
@@ -616,6 +684,9 @@ export default function OrganizerDashboard() {
         const data = await res.json();
         if (!res.ok)
           throw new Error(data.error || 'Gagal memperbarui checkpoint');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
         setEditingCheckpointId(null);
         setCpName('');
         await fetchDashboard();
@@ -644,6 +715,9 @@ export default function OrganizerDashboard() {
         const data = await res.json();
         if (!res.ok)
           throw new Error(data.error || 'Gagal menambahkan checkpoint');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
         setCpName('');
         await fetchDashboard();
         showTemporarySuccess(
@@ -661,13 +735,17 @@ export default function OrganizerDashboard() {
   const handleDeleteCheckpoint = async (cpId: string) => {
     if (!selectedCourse || !token) return;
     try {
-      await fetch(
+      const res = await fetch(
         `/api/organizer/courses/${selectedCourse.id}/checkpoints/${cpId}`,
         {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${token}` },
         }
       );
+      const data = await res.json();
+      if (data?.course) {
+        applyUpdatedCourseLocally(data.course);
+      }
       if (editingCheckpointId === cpId) {
         setEditingCheckpointId(null);
       }
@@ -1371,18 +1449,24 @@ export default function OrganizerDashboard() {
                     <label className="block text-slate-300 mb-1">
                       Radius GPS Default (m)
                     </label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="35"
-                      value={newCourseRadiusInput}
-                      onChange={(e) =>
-                        setNewCourseRadiusInput(
-                          sanitizeDigitsOnly(e.target.value)
-                        )
-                      }
-                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
-                    />
+                    {newCourseValidation === ValidationMethod.QR_ONLY ? (
+                      <div className="w-full px-3 py-2 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-500 font-mono text-[11px]">
+                        Nonaktif (Mode QR Saja)
+                      </div>
+                    ) : (
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="35"
+                        value={newCourseRadiusInput}
+                        onChange={(e) =>
+                          setNewCourseRadiusInput(
+                            sanitizeDigitsOnly(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
+                      />
+                    )}
                   </div>
                 </div>
 
@@ -1600,28 +1684,36 @@ export default function OrganizerDashboard() {
           </div>
 
           {/* Bottom Row: Selected Course Active Management, Map Planner & Checkpoint Table */}
-          {selectedCourse && (
+          {selectedCourse && effectiveSelectedCourse && (
             <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
               {/* Header Course Aktif + Tombol Edit Course, Hapus Course & Print QR Massal */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
-                      {selectedCourse.locationName
-                        ? `${selectedCourse.locationName} (${selectedCourse.date})`
-                        : selectedCourse.date}
+                      {effectiveSelectedCourse.locationName
+                        ? `${effectiveSelectedCourse.locationName} (${effectiveSelectedCourse.date})`
+                        : effectiveSelectedCourse.date}
                     </span>
                     <span className="text-xs font-mono text-slate-400">
-                      Validasi: {selectedCourse.validationMethod} • Radius
-                      Default: {selectedCourse.defaultGpsRadiusMeters}m
+                      Validasi: {effectiveSelectedCourse.validationMethod}
+                      {effectiveSelectedCourse.validationMethod !==
+                      ValidationMethod.QR_ONLY
+                        ? ` • Radius Default: ${effectiveSelectedCourse.defaultGpsRadiusMeters}m`
+                        : ' (Tanpa Radius GPS)'}
+                    </span>
+                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+                      {effectiveSelectedCourse.enforceOrder
+                        ? 'Wajib Urut (Garis Alur Aktif)'
+                        : 'Urutan Bebas (Tanpa Garis Alur)'}
                     </span>
                     <span className="text-xs font-mono px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
-                      {selectedCourse.durationMinutes &&
-                      selectedCourse.durationMinutes > 0
-                        ? `Durasi: ${selectedCourse.durationMinutes} Menit${
-                            selectedCourse.overtimePenaltyEnabled
+                      {effectiveSelectedCourse.durationMinutes &&
+                      effectiveSelectedCourse.durationMinutes > 0
+                        ? `Durasi: ${effectiveSelectedCourse.durationMinutes} Menit${
+                            effectiveSelectedCourse.overtimePenaltyEnabled
                               ? ` • Penalti Telat: -${
-                                  selectedCourse.overtimePenaltyPointsPerMinute ||
+                                  effectiveSelectedCourse.overtimePenaltyPointsPerMinute ||
                                   0
                                 } pts/mnt`
                               : ' (Tanpa Penalti)'
@@ -1630,7 +1722,7 @@ export default function OrganizerDashboard() {
                     </span>
                   </div>
                   <h2 className="text-lg font-bold text-white mt-1">
-                    {selectedCourse.name}
+                    {effectiveSelectedCourse.name}
                   </h2>
                 </div>
 
@@ -1660,7 +1752,7 @@ export default function OrganizerDashboard() {
 
                   <button
                     type="button"
-                    onClick={() => setBulkPrintCourse(selectedCourse)}
+                    onClick={() => setBulkPrintCourse(effectiveSelectedCourse)}
                     className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition"
                   >
                     <Printer className="w-4 h-4" />
@@ -1675,14 +1767,13 @@ export default function OrganizerDashboard() {
                   onSubmit={handleSaveEditCourse}
                   className="p-4 rounded-xl bg-sky-950/20 border border-sky-500/40 space-y-3.5 text-xs"
                 >
-                  <div className="flex items-center justify-between border-b border-sky-500/20 pb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-500/20 pb-2">
                     <div className="font-bold text-sky-300 flex items-center gap-2 text-sm">
                       <Edit3 className="w-4 h-4" />
                       Edit / Update Pengaturan Course Aktif ({selectedCourse.name})
                     </div>
                     <span className="text-[11px] text-emerald-300 font-mono">
-                      ✓ Kode QR Setup, Start, Finish &amp; CP Tetap Aman (Tidak
-                      Berubah)
+                      ⚡ Pratinjau Peta Real-Time Aktif • Kode QR Tetap Aman
                     </span>
                   </div>
 
@@ -1770,18 +1861,24 @@ export default function OrganizerDashboard() {
                       <label className="block text-slate-300 mb-1">
                         Radius GPS Default (m)
                       </label>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="35"
-                        value={editCourseRadiusInput}
-                        onChange={(e) =>
-                          setEditCourseRadiusInput(
-                            sanitizeDigitsOnly(e.target.value)
-                          )
-                        }
-                        className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
-                      />
+                      {editCourseValidation === ValidationMethod.QR_ONLY ? (
+                        <div className="w-full px-3 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-500 font-mono text-[11px]">
+                          Nonaktif (Mode QR Saja — Tanpa Lingkaran Radius)
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="35"
+                          value={editCourseRadiusInput}
+                          onChange={(e) =>
+                            setEditCourseRadiusInput(
+                              sanitizeDigitsOnly(e.target.value)
+                            )
+                          }
+                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                        />
+                      )}
                     </div>
                   </div>
 
@@ -1884,14 +1981,14 @@ export default function OrganizerDashboard() {
 
               {/* PETA INTERAKTIF PERANCANG TITIK START (🔺), CHECKPOINT (⭕), DAN FINISH (◎) */}
               <CourseMapPlanner
-                course={selectedCourse}
+                course={effectiveSelectedCourse}
                 draftCpCode={cpCode}
                 draftCpName={cpName}
                 draftCpLat={cpLat}
                 draftCpLng={cpLng}
                 draftCpRadiusMeters={
                   Number(cpRadiusInput) ||
-                  selectedCourse.defaultGpsRadiusMeters ||
+                  effectiveSelectedCourse.defaultGpsRadiusMeters ||
                   35
                 }
                 editingCheckpointId={editingCheckpointId}
@@ -1928,7 +2025,7 @@ export default function OrganizerDashboard() {
                         <Plus className="w-4 h-4 text-amber-400" />
                         <span>
                           Tambah Checkpoint (Pos Kontrol) ke{' '}
-                          {selectedCourse.name}
+                          {effectiveSelectedCourse.name}
                         </span>
                       </>
                     )}
@@ -2008,19 +2105,28 @@ export default function OrganizerDashboard() {
                 </div>
 
                 <div className="flex flex-wrap items-center justify-end gap-2.5">
-                  <span className="text-slate-400 whitespace-nowrap">
-                    Radius Validasi GPS (m):
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="35"
-                    value={cpRadiusInput}
-                    onChange={(e) =>
-                      setCpRadiusInput(sanitizeDigitsOnly(e.target.value))
-                    }
-                    className="w-24 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
-                  />
+                  {effectiveSelectedCourse.validationMethod !==
+                  ValidationMethod.QR_ONLY ? (
+                    <>
+                      <span className="text-slate-400 whitespace-nowrap">
+                        Radius Validasi GPS (m):
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="35"
+                        value={cpRadiusInput}
+                        onChange={(e) =>
+                          setCpRadiusInput(sanitizeDigitsOnly(e.target.value))
+                        }
+                        className="w-24 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+                      />
+                    </>
+                  ) : (
+                    <span className="text-[11px] font-mono text-slate-500">
+                      Validasi QR Saja (Tanpa Radius GPS)
+                    </span>
+                  )}
                   <button
                     type="submit"
                     className="px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold whitespace-nowrap transition"
@@ -2041,7 +2147,12 @@ export default function OrganizerDashboard() {
                       <th className="py-2.5 px-3">Simbol &amp; Kode Pos</th>
                       <th className="py-2.5 px-3">Nama Lokasi (Opsional)</th>
                       <th className="py-2.5 px-3">Poin</th>
-                      <th className="py-2.5 px-3">Koordinat GPS &amp; Radius</th>
+                      <th className="py-2.5 px-3">
+                        {effectiveSelectedCourse.validationMethod !==
+                        ValidationMethod.QR_ONLY
+                          ? 'Koordinat GPS & Radius'
+                          : 'Koordinat Peta'}
+                      </th>
                       <th className="py-2.5 px-3 text-right">Aksi</th>
                     </tr>
                   </thead>
@@ -2094,9 +2205,16 @@ export default function OrganizerDashboard() {
                             <td className="py-2.5 px-3 font-mono text-slate-300">
                               {cp.latitude.toFixed(5)},{' '}
                               {cp.longitude.toFixed(5)}{' '}
-                              <span className="text-slate-500">
-                                (Radius: {cp.radiusMeters}m)
-                              </span>
+                              {effectiveSelectedCourse.validationMethod !==
+                              ValidationMethod.QR_ONLY ? (
+                                <span className="text-slate-500">
+                                  (Radius: {cp.radiusMeters}m)
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">
+                                  (QR Saja)
+                                </span>
+                              )}
                             </td>
                             <td className="py-2.5 px-3 text-right">
                               <div className="inline-flex items-center gap-1">

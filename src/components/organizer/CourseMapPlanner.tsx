@@ -9,7 +9,12 @@ import {
   RotateCcw,
   Search,
 } from 'lucide-react';
-import { Checkpoint, Course, GeoPointLocation } from '../../types';
+import {
+  Checkpoint,
+  Course,
+  GeoPointLocation,
+  ValidationMethod,
+} from '../../types';
 
 export type MapClickMode = 'CP' | 'START' | 'FINISH';
 export type MapTileStyle = 'STREET' | 'SATELLITE' | 'TOPO';
@@ -374,6 +379,8 @@ export function CourseMapPlanner({
     }
   }, [course.id, fitMapToCourseBounds]);
 
+  const usesGpsRadius = course.validationMethod !== ValidationMethod.QR_ONLY;
+
   // Render ulang simbol IOF (Start 🔺, CP ⭕ + Radius, Finish ◎, Garis Rute, dan Preview CP 🎯)
   useEffect(() => {
     const group = overlayGroupRef.current;
@@ -402,7 +409,7 @@ export function CourseMapPlanner({
       startMarker.addTo(group);
     }
 
-    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS)
+    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS jika mode validasi memakai GPS)
     const sortedCps = [...course.checkpoints].sort(
       (a, b) => a.orderIndex - b.orderIndex
     );
@@ -412,25 +419,31 @@ export function CourseMapPlanner({
       const cpLatLng: [number, number] = [cp.latitude, cp.longitude];
       routeCoords.push(cpLatLng);
 
-      // Lingkaran toleransi radius GPS dalam satuan meter
-      L.circle(cpLatLng, {
-        radius: cp.radiusMeters || course.defaultGpsRadiusMeters || 35,
-        color: isEditingThis ? '#f59e0b' : '#d946ef',
-        weight: 1.5,
-        fillColor: isEditingThis ? '#f59e0b' : '#d946ef',
-        fillOpacity: 0.12,
-        dashArray: '4 4',
-      }).addTo(group);
+      // Lingkaran toleransi radius GPS hanya muncul jika Course menggunakan opsi validasi dengan GPS
+      if (usesGpsRadius) {
+        L.circle(cpLatLng, {
+          radius: cp.radiusMeters || course.defaultGpsRadiusMeters || 35,
+          color: isEditingThis ? '#f59e0b' : '#d946ef',
+          weight: 1.5,
+          fillColor: isEditingThis ? '#f59e0b' : '#d946ef',
+          fillOpacity: 0.12,
+          dashArray: '4 4',
+        }).addTo(group);
+      }
 
       const cpMarker = L.marker(cpLatLng, {
         icon: createCheckpointCircleIcon(cp, isEditingThis),
       });
 
       const titleStr = cp.name ? `${cp.code} — ${cp.name}` : cp.code;
+      const radiusOrQrInfo = usesGpsRadius
+        ? `Radius GPS: ${cp.radiusMeters || course.defaultGpsRadiusMeters || 35}m`
+        : 'Validasi: QR Code Saja';
+
       cpMarker.bindTooltip(
         `<strong>⭕ Pos #${cp.orderIndex}: ${titleStr}</strong><br/>Poin: ${
           cp.points
-        } pts • Radius: ${cp.radiusMeters}m<br/><em>Klik simbol ini untuk mengedit pos</em>`,
+        } pts • ${radiusOrQrInfo}<br/><em>Klik simbol ini untuk mengedit pos</em>`,
         { direction: 'top', offset: [0, -14] }
       );
 
@@ -473,12 +486,13 @@ export function CourseMapPlanner({
     }
 
     // 4. Garis Rute Penghubung (START -> CP1 -> CP2 -> ... -> FINISH)
-    if (routeCoords.length >= 2) {
+    // Hanya muncul jika pengaturan Course memilih Wajib Urut (enforceOrder === true)
+    if (course.enforceOrder && routeCoords.length >= 2) {
       L.polyline(routeCoords, {
         color: '#d946ef',
         weight: 3,
         opacity: 0.85,
-        dashArray: course.enforceOrder ? undefined : '8 6',
+        dashArray: '8 6',
       }).addTo(group);
     }
 
@@ -495,19 +509,21 @@ export function CourseMapPlanner({
 
       if (!matchesExistingUnedited) {
         const draftLatLng: [number, number] = [parsedDraftLat, parsedDraftLng];
-        const previewRadius =
-          draftCpRadiusMeters > 0
-            ? draftCpRadiusMeters
-            : course.defaultGpsRadiusMeters || 35;
+        if (usesGpsRadius) {
+          const previewRadius =
+            draftCpRadiusMeters > 0
+              ? draftCpRadiusMeters
+              : course.defaultGpsRadiusMeters || 35;
 
-        L.circle(draftLatLng, {
-          radius: previewRadius,
-          color: '#fbbf24',
-          weight: 2,
-          fillColor: '#fbbf24',
-          fillOpacity: 0.16,
-          dashArray: '5 4',
-        }).addTo(group);
+          L.circle(draftLatLng, {
+            radius: previewRadius,
+            color: '#fbbf24',
+            weight: 2,
+            fillColor: '#fbbf24',
+            fillOpacity: 0.16,
+            dashArray: '5 4',
+          }).addTo(group);
+        }
 
         L.marker(draftLatLng, {
           icon: createDraftCpIcon(draftCpCode, Boolean(editingCheckpointId)),
@@ -516,6 +532,7 @@ export function CourseMapPlanner({
     }
   }, [
     course,
+    usesGpsRadius,
     draftCpCode,
     draftCpLat,
     draftCpLng,
@@ -600,18 +617,39 @@ export function CourseMapPlanner({
       {/* Header & Legenda Standar IOF Orienteering */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-bold">
               Peta Interaktif Perancang Lintasan (Point &amp; Click)
             </span>
-            {totalRouteMeters > 0 && (
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
-                Jarak Rute Lurus:{' '}
-                {totalRouteMeters >= 1000
-                  ? `${(totalRouteMeters / 1000).toFixed(2)} km`
-                  : `${totalRouteMeters} m`}
+            {course.enforceOrder ? (
+              totalRouteMeters > 0 ? (
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+                  Garis Alur Aktif (Wajib Urut) • Jarak Lurus:{' '}
+                  {totalRouteMeters >= 1000
+                    ? `${(totalRouteMeters / 1000).toFixed(2)} km`
+                    : `${totalRouteMeters} m`}
+                </span>
+              ) : (
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+                  Garis Alur Aktif (Wajib Urut)
+                </span>
+              )
+            ) : (
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                Urutan Bebas (Score-O — Tanpa Garis Alur)
               </span>
             )}
+            <span
+              className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+                usesGpsRadius
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}
+            >
+              {usesGpsRadius
+                ? `Lingkaran Radius GPS: Aktif (${course.validationMethod})`
+                : 'Mode QR Saja (Tanpa Lingkaran Radius GPS)'}
+            </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
             Klik langsung pada peta untuk menempatkan titik{' '}
