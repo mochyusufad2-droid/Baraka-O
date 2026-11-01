@@ -37,6 +37,7 @@ import {
   clearPersistedParticipantState,
   createUniqueReportId,
   getLocalReportsForSession,
+  loadOrganizerCoursesBackup,
   loadPersistedParticipantState,
   loadPersistedParticipantStateFromIdbFallback,
   savePersistedParticipantState,
@@ -171,7 +172,15 @@ function SyncBadge({ status }: { status: SyncStatus }) {
   }
 }
 
-export default function ParticipantView() {
+interface ParticipantViewProps {
+  onAuthenticated?: () => void;
+  onLogout?: () => void;
+}
+
+export default function ParticipantView({
+  onAuthenticated,
+  onLogout,
+}: ParticipantViewProps = {}) {
   const initialPersisted = useMemo(() => loadPersistedParticipantState(), []);
 
   const [token, setToken] = useState<string | null>(initialPersisted.token);
@@ -250,12 +259,20 @@ export default function ParticipantView() {
 
   const isEffectivelyOnline = browserOnline && !simulatedOffline;
 
-  // Live stopwatch tick
+  // Live stopwatch tick (dijeda selama kamera terbuka agar layar kamera tidak re-render/kedip)
   const [nowTick, setNowTick] = useState<number>(Date.now());
   useEffect(() => {
+    if (cameraActiveFor) return;
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [cameraActiveFor]);
+
+  // Beritahu komponen induk (App) ketika peserta sudah terautentikasi
+  useEffect(() => {
+    if (token && participant) {
+      onAuthenticated?.();
+    }
+  }, [token, participant, onAuthenticated]);
 
   // Tampilkan toast instan selama 2,6 detik
   const showRunnerToast = useCallback(
@@ -330,13 +347,86 @@ export default function ParticipantView() {
     refreshLocalReports();
   }, [refreshLocalReports]);
 
+  const hasLocalStartReport = localReports.some(
+    (r) =>
+      r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+  );
+  const hasLocalFinishReport = localReports.some(
+    (r) =>
+      r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+  );
+  const sessionCanRecordCheckpoints =
+    activeSession?.status === SessionStatus.ACTIVE ||
+    activeSession?.status === SessionStatus.FINISHED ||
+    hasLocalStartReport;
+  const sessionMarkedFinishedLocallyOrServer =
+    activeSession?.status === SessionStatus.FINISHED || hasLocalFinishReport;
+
+  const isSessionActivelyRunning =
+    sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer;
+
+  // Gabungkan sesi dari server tanpa pernah menurunkan (downgrade) status ACTIVE/FINISHED lokal
+  const mergeServerSessionSafely = useCallback(
+    (
+      prev: ParticipantSession | null,
+      incoming: ParticipantSession
+    ): ParticipantSession => {
+      if (!prev) return incoming;
+      const merged: ParticipantSession = { ...incoming };
+
+      const locallyStarted =
+        prev.status === SessionStatus.ACTIVE ||
+        prev.status === SessionStatus.FINISHED ||
+        Boolean(prev.startedAt) ||
+        hasLocalStartReport;
+
+      if (locallyStarted && merged.status === SessionStatus.NOT_STARTED) {
+        merged.status = SessionStatus.ACTIVE;
+        merged.startedAt = merged.startedAt || prev.startedAt;
+      }
+
+      const locallyFinished =
+        prev.status === SessionStatus.FINISHED ||
+        Boolean(prev.finishedAt) ||
+        hasLocalFinishReport;
+
+      if (locallyFinished && merged.status !== SessionStatus.FINISHED) {
+        merged.status = SessionStatus.FINISHED;
+        merged.finishedAt = merged.finishedAt || prev.finishedAt;
+      }
+
+      // Gabungkan validatedCheckpointIds agar pos yang sudah valid tidak hilang
+      if (
+        Array.isArray(prev.validatedCheckpointIds) &&
+        prev.validatedCheckpointIds.length > 0
+      ) {
+        const setIds = new Set([
+          ...(merged.validatedCheckpointIds || []),
+          ...prev.validatedCheckpointIds,
+        ]);
+        merged.validatedCheckpointIds = Array.from(setIds);
+      }
+
+      return merged;
+    },
+    [hasLocalStartReport, hasLocalFinishReport]
+  );
+
   // Sinkronisasi Real-Time Pengaturan Course & Sesi dari Server (ketika panitia mengedit Course / Checkpoint)
   const syncLatestCourseAndSession = useCallback(async () => {
-    if (!activeSession || !token || !isEffectivelyOnline) return;
+    if (!activeSession || !token || !isEffectivelyOnline || cameraActiveFor) {
+      return;
+    }
     try {
-      const res = await fetch(`/api/participant/session/${activeSession.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const courseIdParam = encodeURIComponent(
+        activeCourse?.id || activeSession.courseId || ''
+      );
+      const res = await fetch(
+        `/api/participant/session/${activeSession.id}?courseId=${courseIdParam}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
       if (res.status === 404) {
         const errData = await res.json().catch(() => ({}));
         if (errData.sessionDeleted) {
@@ -353,40 +443,87 @@ export default function ParticipantView() {
       const data = (await res.json()) as {
         session?: ParticipantSession;
         course?: Course | null;
+        sessionMissingOnServer?: boolean;
       };
       if (data.course) {
-        setActiveCourse(data.course);
+        setActiveCourse((prev) => {
+          if (prev && JSON.stringify(prev) === JSON.stringify(data.course)) {
+            return prev;
+          }
+          return data.course!;
+        });
+      }
+      if (data.sessionMissingOnServer) {
+        // Pulihkan sesi & riwayat laporan ke server secara otomatis di latar belakang
+        void syncPendingReportsWithServer({
+          sessionId: activeSession.id,
+          token,
+          isOfflineSimulated: simulatedOffline,
+          forceSyncAllAccepted: true,
+          sessionOverride: activeSession,
+          onStatusUpdate: (updated) => setLocalReports(updated),
+        });
+        return;
       }
       if (data.session) {
-        setActiveSession(data.session);
+        setActiveSession((prev) => {
+          const next = mergeServerSessionSafely(prev, data.session!);
+          if (prev && JSON.stringify(prev) === JSON.stringify(next)) {
+            return prev;
+          }
+          return next;
+        });
       }
     } catch {
       // Abaikan kesalahan jaringan saat background polling
     }
-  }, [activeSession, token, isEffectivelyOnline]);
+  }, [
+    activeSession,
+    activeCourse?.id,
+    token,
+    isEffectivelyOnline,
+    cameraActiveFor,
+    simulatedOffline,
+    mergeServerSessionSafely,
+  ]);
 
   useEffect(() => {
-    if (!activeSession || !token || !isEffectivelyOnline) return;
+    if (!activeSession || !token || !isEffectivelyOnline || cameraActiveFor) {
+      return;
+    }
     syncLatestCourseAndSession();
     const poll = window.setInterval(syncLatestCourseAndSession, 5000);
     return () => window.clearInterval(poll);
-  }, [activeSession?.id, token, isEffectivelyOnline, syncLatestCourseAndSession]);
+  }, [
+    activeSession?.id,
+    token,
+    isEffectivelyOnline,
+    cameraActiveFor,
+    syncLatestCourseAndSession,
+  ]);
 
   // Fungsi memicu sinkronisasi antrean laporan checkpoint ke server
   const triggerSyncQueue = useCallback(
-    async (showSilentIfEmpty = true) => {
-      if (!activeSession || !token) return;
+    async (
+      showSilentIfEmpty = true,
+      sessionOverride?: ParticipantSession | null
+    ) => {
+      const targetSession = sessionOverride || activeSession;
+      if (!targetSession || !token) return;
       setIsSyncing(true);
       const outcome = await syncPendingReportsWithServer({
-        sessionId: activeSession.id,
+        sessionId: targetSession.id,
         token,
         isOfflineSimulated: simulatedOffline,
+        sessionOverride: targetSession,
         onStatusUpdate: (updated) => setLocalReports(updated),
       });
       setIsSyncing(false);
 
       if (outcome.updatedSession) {
-        setActiveSession(outcome.updatedSession);
+        setActiveSession((prev) =>
+          mergeServerSessionSafely(prev || targetSession, outcome.updatedSession!)
+        );
       }
 
       if (outcome.attempted > 0) {
@@ -413,24 +550,8 @@ export default function ParticipantView() {
         });
       }
     },
-    [activeSession, token, simulatedOffline]
+    [activeSession, token, simulatedOffline, mergeServerSessionSafely]
   );
-
-  const hasLocalStartReport = localReports.some(
-    (r) =>
-      r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
-  );
-  const hasLocalFinishReport = localReports.some(
-    (r) =>
-      r.reportType === 'FINISH' && r.syncStatus !== SyncStatus.REJECTED_SERVER
-  );
-  const sessionCanRecordCheckpoints =
-    activeSession?.status === SessionStatus.ACTIVE || hasLocalStartReport;
-  const sessionMarkedFinishedLocallyOrServer =
-    activeSession?.status === SessionStatus.FINISHED || hasLocalFinishReport;
-
-  const isSessionActivelyRunning =
-    sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer;
 
   // Pemeriksa apakah suatu kode QR adalah Setup QR (untuk menangani Kondisi A & Kondisi B)
   const checkAccidentalSetupQrScan = useCallback(
@@ -702,6 +823,39 @@ export default function ParticipantView() {
       const updatedLocal = await getLocalReportsForSession(activeSession.id);
       setLocalReports(updatedLocal);
 
+      // Langsung kunci status sesi secara lokal (ACTIVE saat START, FINISHED saat FINISH)
+      // agar tidak pernah tertimpa atau memunculkan peringatan "Harus scan Start dulu" saat scan CP!
+      let nextSessionState: ParticipantSession = activeSession;
+      if (params.reportType === 'START') {
+        nextSessionState = {
+          ...activeSession,
+          status: SessionStatus.ACTIVE,
+          startedAt: activeSession.startedAt || measuredAt,
+        };
+        setActiveSession(nextSessionState);
+        savePersistedParticipantState({
+          token,
+          participant,
+          activeCourse,
+          activeSession: nextSessionState,
+          simulatedOffline,
+        });
+      } else if (params.reportType === 'FINISH') {
+        nextSessionState = {
+          ...activeSession,
+          status: SessionStatus.FINISHED,
+          finishedAt: activeSession.finishedAt || measuredAt,
+        };
+        setActiveSession(nextSessionState);
+        savePersistedParticipantState({
+          token,
+          participant,
+          activeCourse,
+          activeSession: nextSessionState,
+          simulatedOffline,
+        });
+      }
+
       const timeStr = new Date(measuredAt).toLocaleTimeString('id-ID');
       const label = params.displayLabel || params.reportType;
 
@@ -732,14 +886,15 @@ export default function ParticipantView() {
         text: `${label} berhasil disimpan di perangkat (${timeStr}).`,
       });
 
-      // Sinkronisasi ke server di latar belakang tanpa menahan langkah peserta
-      await triggerSyncQueue(true);
+      // Sinkronisasi ke server di latar belakang dengan menyertakan snapshot sesi terbaru
+      await triggerSyncQueue(true, nextSessionState);
     },
     [
       participant,
       activeCourse,
       activeSession,
       token,
+      simulatedOffline,
       showRunnerToast,
       triggerSyncQueue,
     ]
@@ -756,15 +911,20 @@ export default function ParticipantView() {
       setFeedbackBanner(null);
 
       try {
+        const backupCourses = loadOrganizerCoursesBackup();
         const res = await fetch('/api/participant/load-event', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ setupQrCode: trimmed }),
+          body: JSON.stringify({
+            setupQrCode: trimmed,
+            backupCourses,
+            participantSnapshot: participant,
+          }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           triggerRunnerFeedback('error');
           const errMsg = data.error || 'Gagal memuat Course dari Setup QR.';
@@ -797,7 +957,7 @@ export default function ParticipantView() {
         showRunnerToast('error', 'GAGAL MEMUAT COURSE', msg);
       }
     },
-    [token, showRunnerToast]
+    [token, participant, showRunnerToast]
   );
 
   /**
@@ -832,20 +992,48 @@ export default function ParticipantView() {
         }
 
         const upperScanned = scanned.toUpperCase();
+        const expectedStartCode = `BARAKA:START:${activeCourse.id}`.toUpperCase();
+        const expectedFinishCode = `BARAKA:FINISH:${activeCourse.id}`.toUpperCase();
 
-        // KASUS 3: Deteksi apakah ini START QR
-        const isStartQr =
+        // KASUS 3: Deteksi apakah ini START QR atau sedang menekan tombol SCAN START
+        if (
           upperScanned.startsWith('BARAKA:START:') ||
-          cameraActiveFor === 'START';
-
-        if (isStartQr && !upperScanned.startsWith('BARAKA:CP:') && !upperScanned.startsWith('BARAKA:FINISH:')) {
+          cameraActiveFor === 'START'
+        ) {
           if (sessionCanRecordCheckpoints) {
             triggerRunnerFeedback('error');
-            const msg = 'Waktu Start Anda sudah berjalan. Silakan scan Pos Checkpoint atau Finish.';
+            const msg =
+              'Waktu Start Anda sudah berjalan. Silakan scan Pos Checkpoint atau Finish.';
             setFeedbackBanner({ type: 'warning', text: msg });
             showRunnerToast('warning', 'SUDAH START', msg);
             return;
           }
+
+          // Jika peserta menekan tombol SCAN START tetapi mengarahkan kamera ke QR CP atau FINISH
+          if (!upperScanned.startsWith('BARAKA:START:')) {
+            triggerRunnerFeedback('error');
+            const msg = upperScanned.startsWith('BARAKA:CP:')
+              ? 'Itu adalah QR Pos Checkpoint! Silakan scan QR START terlebih dahulu.'
+              : upperScanned.startsWith('BARAKA:FINISH:')
+              ? 'Itu adalah QR Finish! Silakan scan QR START terlebih dahulu.'
+              : 'QR yang dipindai bukan kode START. Silakan scan QR START resmi dari panitia.';
+            setFeedbackBanner({ type: 'error', text: msg });
+            showRunnerToast('error', 'BUKAN QR START!', msg);
+            return;
+          }
+
+          // Pastikan QR START adalah milik Course yang sedang dimuat
+          if (
+            upperScanned !== expectedStartCode &&
+            scanned !== activeCourse.startQrCode
+          ) {
+            triggerRunnerFeedback('error');
+            const msg = `QR Start ini milik Course lain. Pastikan Anda memindai QR START untuk "${activeCourse.name}".`;
+            setFeedbackBanner({ type: 'error', text: msg });
+            showRunnerToast('error', 'QR START TIDAK COCOK', msg);
+            return;
+          }
+
           await recordAndQueueReport({
             checkpointId: 'START',
             reportType: 'START',
@@ -864,9 +1052,20 @@ export default function ParticipantView() {
         if (isFinishQr && !upperScanned.startsWith('BARAKA:CP:')) {
           if (!sessionCanRecordCheckpoints) {
             triggerRunnerFeedback('error');
-            const msg = 'Anda belum melakukan Scan Start QR! Silakan scan Start QR terlebih dahulu.';
+            const msg =
+              'Anda belum melakukan Scan Start QR! Silakan scan Start QR terlebih dahulu.';
             setFeedbackBanner({ type: 'error', text: msg });
             showRunnerToast('error', 'BELUM START!', msg);
+            return;
+          }
+          if (
+            upperScanned !== expectedFinishCode &&
+            scanned !== activeCourse.finishQrCode
+          ) {
+            triggerRunnerFeedback('error');
+            const msg = `QR yang dipindai bukan kode FINISH untuk "${activeCourse.name}".`;
+            setFeedbackBanner({ type: 'error', text: msg });
+            showRunnerToast('error', 'BUKAN QR FINISH!', msg);
             return;
           }
           await recordAndQueueReport({
@@ -882,7 +1081,8 @@ export default function ParticipantView() {
         // KASUS 5: Deteksi otomatis Pos Checkpoint dari isi QR (format BARAKA:CP:<courseId>:<cpCode>:<secret> atau kode CP)
         if (!sessionCanRecordCheckpoints) {
           triggerRunnerFeedback('error');
-          const msg = 'Silakan scan Start QR terlebih dahulu sebelum memindai Pos Checkpoint!';
+          const msg =
+            'Silakan scan Start QR terlebih dahulu sebelum memindai Pos Checkpoint!';
           setFeedbackBanner({ type: 'error', text: msg });
           showRunnerToast('error', 'BELUM SCAN START!', msg);
           return;
@@ -1007,7 +1207,17 @@ export default function ParticipantView() {
     }
   }, [flashOn]);
 
+  // Simpan referensi handler QR ke dalam useRef agar useEffect kamera HANYA bergantung pada [cameraActiveFor]
+  // sehingga stream kamera tidak pernah berkedip / restart saat ada update GPS atau polling di latar belakang!
+  const qrDetectedHandlerRef = useRef(handleQrCodeDetectedFromCamera);
   useEffect(() => {
+    qrDetectedHandlerRef.current = handleQrCodeDetectedFromCamera;
+  }, [handleQrCodeDetectedFromCamera]);
+
+  useEffect(() => {
+    if (!cameraActiveFor) return;
+
+    let isCancelled = false;
     let stream: MediaStream | null = null;
     let scanTimer: number | null = null;
     const offscreenCanvas = document.createElement('canvas');
@@ -1016,23 +1226,29 @@ export default function ParticipantView() {
     });
 
     async function startCamera() {
-      if (!cameraActiveFor) return;
       setFlashOn(false);
       setFlashSupported(true);
 
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        const mediaStream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 },
           },
         });
-        streamRef.current = stream;
+
+        if (isCancelled) {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        stream = mediaStream;
+        streamRef.current = mediaStream;
 
         if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+          videoRef.current.srcObject = mediaStream;
+          await videoRef.current.play().catch(() => {});
         }
 
         const BarcodeDetectorClass = (
@@ -1051,7 +1267,12 @@ export default function ParticipantView() {
 
         scanTimer = window.setInterval(async () => {
           const video = videoRef.current;
-          if (!video || video.readyState < 2 || isProcessingScanRef.current) {
+          if (
+            isCancelled ||
+            !video ||
+            video.readyState < 2 ||
+            isProcessingScanRef.current
+          ) {
             return;
           }
 
@@ -1060,7 +1281,7 @@ export default function ParticipantView() {
             try {
               const codes = await nativeDetector.detect(video);
               if (codes.length > 0 && codes[0].rawValue) {
-                void handleQrCodeDetectedFromCamera(codes[0].rawValue);
+                void qrDetectedHandlerRef.current(codes[0].rawValue);
                 return;
               }
             } catch {
@@ -1105,7 +1326,7 @@ export default function ParticipantView() {
                 { inversionAttempts: 'dontInvert' }
               );
               if (decoded && decoded.data) {
-                void handleQrCodeDetectedFromCamera(decoded.data);
+                void qrDetectedHandlerRef.current(decoded.data);
               }
             } catch {
               // Abaikan frame gagal
@@ -1113,24 +1334,27 @@ export default function ParticipantView() {
           }
         }, 200);
       } catch {
-        setFeedbackBanner({
-          type: 'warning',
-          text: 'Kamera tidak dapat diakses. Pastikan izin kamera diberikan atau gunakan menu Input Manual di bawah.',
-        });
-        setCameraActiveFor(null);
+        if (!isCancelled) {
+          setFeedbackBanner({
+            type: 'warning',
+            text: 'Kamera tidak dapat diakses. Pastikan izin kamera diberikan atau gunakan menu Input Manual di bawah.',
+          });
+          setCameraActiveFor(null);
+        }
       }
     }
 
     startCamera();
 
     return () => {
+      isCancelled = true;
       if (scanTimer) window.clearInterval(scanTimer);
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
       }
       streamRef.current = null;
     };
-  }, [cameraActiveFor, handleQrCodeDetectedFromCamera]);
+  }, [cameraActiveFor]);
 
   // ==========================================================================
   // HANDLER AUTENTIKASI & INPUT MANUAL
@@ -1169,6 +1393,11 @@ export default function ParticipantView() {
         });
         return;
       }
+      try {
+        localStorage.removeItem('baraka_organizer_token');
+      } catch {
+        // Abaikan
+      }
       setToken(data.token);
       setParticipant(data.participant);
       triggerRunnerFeedback('success');
@@ -1206,6 +1435,11 @@ export default function ParticipantView() {
         });
         return;
       }
+      try {
+        localStorage.removeItem('baraka_organizer_token');
+      } catch {
+        // Abaikan
+      }
       setToken(data.token);
       setParticipant(data.participant);
       triggerRunnerFeedback('success');
@@ -1238,6 +1472,7 @@ export default function ParticipantView() {
     setConfirmingLeaveCourse(false);
     clearPersistedParticipantState();
     setFeedbackBanner(null);
+    onLogout?.();
   }
 
   function handleConfirmLeaveCourse() {
@@ -1273,6 +1508,22 @@ export default function ParticipantView() {
     if (checkAccidentalSetupQrScan(trimmed)) {
       setStartQrInput('');
       return;
+    }
+
+    if (activeCourse) {
+      const upperTrimmed = trimmed.toUpperCase();
+      const expectedStart = `BARAKA:START:${activeCourse.id}`.toUpperCase();
+      if (
+        upperTrimmed !== expectedStart &&
+        trimmed !== activeCourse.startQrCode
+      ) {
+        triggerRunnerFeedback('error');
+        setFeedbackBanner({
+          type: 'error',
+          text: `Kode Start QR tidak cocok dengan Course "${activeCourse.name}". Pastikan Anda memasukkan kode Start yang benar.`,
+        });
+        return;
+      }
     }
 
     await recordAndQueueReport({

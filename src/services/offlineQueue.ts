@@ -202,6 +202,37 @@ export function clearPersistedParticipantState(): void {
     });
 }
 
+const LS_ORGANIZER_COURSES_BACKUP_KEY = 'baraka_organizer_courses_backup_v1';
+
+export function saveOrganizerCoursesBackup(courses: Course[]): void {
+  try {
+    localStorage.setItem(LS_ORGANIZER_COURSES_BACKUP_KEY, JSON.stringify(courses));
+  } catch {
+    // Abaikan jika penyimpanan penuh
+  }
+}
+
+export function loadOrganizerCoursesBackup(): Course[] {
+  try {
+    const raw = localStorage.getItem(LS_ORGANIZER_COURSES_BACKUP_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Course[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function removeCourseFromOrganizerBackup(courseId: string): void {
+  try {
+    const current = loadOrganizerCoursesBackup();
+    const filtered = current.filter((c) => c.id !== courseId);
+    saveOrganizerCoursesBackup(filtered);
+  } catch {
+    // Abaikan
+  }
+}
+
 export interface SyncQueueOutcome {
   attempted: number;
   syncedCount: number;
@@ -216,16 +247,26 @@ export async function syncPendingReportsWithServer(params: {
   sessionId: string;
   token: string;
   isOfflineSimulated?: boolean;
+  forceSyncAllAccepted?: boolean;
+  sessionOverride?: ParticipantSession | null;
   onStatusUpdate?: (reports: CheckpointReport[]) => void;
 }): Promise<SyncQueueOutcome> {
-  const { sessionId, token, isOfflineSimulated, onStatusUpdate } = params;
+  const {
+    sessionId,
+    token,
+    isOfflineSimulated,
+    forceSyncAllAccepted,
+    sessionOverride,
+    onStatusUpdate,
+  } = params;
   const allReports = await getLocalReportsForSession(sessionId);
 
   const unsynced = allReports.filter(
     (r) =>
       r.syncStatus === SyncStatus.SAVED_LOCAL ||
       r.syncStatus === SyncStatus.PENDING_SYNC ||
-      r.syncStatus === SyncStatus.SENDING
+      r.syncStatus === SyncStatus.SENDING ||
+      (forceSyncAllAccepted && r.syncStatus === SyncStatus.ACCEPTED_SERVER)
   );
 
   if (unsynced.length === 0) {
@@ -270,6 +311,24 @@ export async function syncPendingReportsWithServer(params: {
     onStatusUpdate(await getLocalReportsForSession(sessionId));
   }
 
+  // Sertakan juga bukti laporan START lokal yang valid agar jika server sempat cold-start,
+  // server otomatis memulihkan status ACTIVE sebelum memvalidasi Pos Checkpoint!
+  const localValidStartReport = allReports.find(
+    (r) =>
+      r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+  );
+  const payloadReports = [...markedSending];
+  if (
+    localValidStartReport &&
+    !payloadReports.some((r) => r.reportId === localValidStartReport.reportId)
+  ) {
+    payloadReports.unshift(localValidStartReport);
+  }
+
+  const persisted = loadPersistedParticipantState();
+  const effectiveSessionSnapshot =
+    sessionOverride || persisted.activeSession || null;
+
   try {
     const response = await fetch('/api/participant/reports/sync', {
       method: 'POST',
@@ -277,7 +336,12 @@ export async function syncPendingReportsWithServer(params: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ reports: markedSending }),
+      body: JSON.stringify({
+        reports: payloadReports,
+        sessionSnapshot: effectiveSessionSnapshot,
+        courseSnapshot: persisted.activeCourse,
+        participantSnapshot: persisted.participant,
+      }),
     });
 
     if (!response.ok) {
@@ -297,10 +361,13 @@ export async function syncPendingReportsWithServer(params: {
     const finalReports = await getLocalReportsForSession(sessionId);
     onStatusUpdate?.(finalReports);
 
-    const syncedCount = verifiedReports.filter(
+    const unsyncedIds = new Set(unsynced.map((u) => u.reportId));
+    const newlyVerified = verifiedReports.filter((r) => unsyncedIds.has(r.reportId));
+
+    const syncedCount = newlyVerified.filter(
       (r) => r.syncStatus === SyncStatus.ACCEPTED_SERVER
     ).length;
-    const rejectedCount = verifiedReports.filter(
+    const rejectedCount = newlyVerified.filter(
       (r) => r.syncStatus === SyncStatus.REJECTED_SERVER
     ).length;
     const remainingQueueCount = finalReports.filter(

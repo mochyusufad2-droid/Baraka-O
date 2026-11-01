@@ -155,6 +155,7 @@ interface DatabaseSchema {
   organizerTokens: string[];
   participantTokens: Record<string, string>; // token -> participantId
   courses: Course[];
+  deletedCourseIds?: string[];
   participants: StoredParticipant[];
   sessions: ParticipantSession[];
   reports: CheckpointReport[];
@@ -343,73 +344,108 @@ function createInitialDatabase(): DatabaseSchema {
         pinSalt: sampleParticipantPin.salt,
       },
     ],
+    deletedCourseIds: [],
     sessions: [],
     reports: [],
   };
 }
 
-function loadDb(): DatabaseSchema {
+function normalizeRestoredCourse(raw: Course): Course {
+  const courseId = raw.id;
+  return {
+    ...raw,
+    setupQrCode:
+      raw.setupQrCode && !raw.setupQrCode.includes('HIDDEN')
+        ? raw.setupQrCode
+        : `BARAKA:SETUP:${courseId}`,
+    startQrCode:
+      raw.startQrCode && !raw.startQrCode.includes('HIDDEN')
+        ? raw.startQrCode
+        : `BARAKA:START:${courseId}`,
+    finishQrCode:
+      raw.finishQrCode && !raw.finishQrCode.includes('HIDDEN')
+        ? raw.finishQrCode
+        : `BARAKA:FINISH:${courseId}`,
+    checkpoints: Array.isArray(raw.checkpoints)
+      ? raw.checkpoints.map((cp, idx) => ({
+          ...cp,
+          courseId,
+          orderIndex: cp.orderIndex ?? idx + 1,
+          qrSecret:
+            cp.qrSecret && cp.qrSecret !== 'VERIFIED_BY_SERVER'
+              ? cp.qrSecret
+              : `BARAKA:CP:${courseId}:${cp.code.toUpperCase()}`,
+        }))
+      : [],
+  };
+}
+
+function parseAndMigrateDbContent(raw: string): DatabaseSchema | null {
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(DB_FILE)) {
-      const initial = createInitialDatabase();
-      fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
-      return initial;
-    }
-    const raw = fs.readFileSync(DB_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as DatabaseSchema;
-    if (!Array.isArray(parsed.courses)) {
-      const initial = createInitialDatabase();
-      fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
-      return initial;
+    if (!Array.isArray(parsed.courses)) return null;
+    if (!Array.isArray(parsed.deletedCourseIds)) {
+      parsed.deletedCourseIds = [];
     }
     const defaults = createInitialDatabase();
-    let mutated = false;
     parsed.courses.forEach((c) => {
       const matchDefault = defaults.courses.find((dc) => dc.id === c.id);
       if (matchDefault) {
         if (!c.startLocation && matchDefault.startLocation) {
           c.startLocation = matchDefault.startLocation;
-          mutated = true;
         }
         if (!c.finishLocation && matchDefault.finishLocation) {
           c.finishLocation = matchDefault.finishLocation;
-          mutated = true;
         }
         if (c.durationMinutes === undefined && matchDefault.durationMinutes !== undefined) {
           c.durationMinutes = matchDefault.durationMinutes;
           c.overtimePenaltyEnabled = matchDefault.overtimePenaltyEnabled;
           c.overtimePenaltyPointsPerMinute = matchDefault.overtimePenaltyPointsPerMinute;
-          mutated = true;
         }
       }
     });
-    if (mutated) {
-      fs.writeFileSync(DB_FILE, JSON.stringify(parsed, null, 2), 'utf-8');
-    }
     return parsed;
   } catch {
-    const initial = createInitialDatabase();
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
-    } catch {
-      // Abaikan kegagalan tulis di filesystem read-only
-    }
-    return initial;
+    return null;
   }
 }
 
-function saveDb(db: DatabaseSchema): void {
+function loadDb(): DatabaseSchema {
+  const backupFile = `${DB_FILE}.bak`;
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+    if (fs.existsSync(DB_FILE)) {
+      const fromMain = parseAndMigrateDbContent(fs.readFileSync(DB_FILE, 'utf-8'));
+      if (fromMain) return fromMain;
+    }
+    if (fs.existsSync(backupFile)) {
+      const fromBackup = parseAndMigrateDbContent(fs.readFileSync(backupFile, 'utf-8'));
+      if (fromBackup) {
+        saveDb(fromBackup);
+        return fromBackup;
+      }
+    }
+    const initial = createInitialDatabase();
+    saveDb(initial);
+    return initial;
+  } catch {
+    return createInitialDatabase();
+  }
+}
+
+function saveDb(dbToSave: DatabaseSchema): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const serialized = JSON.stringify(dbToSave, null, 2);
+    const tmpFile = `${DB_FILE}.tmp`;
+    const backupFile = `${DB_FILE}.bak`;
+    fs.writeFileSync(tmpFile, serialized, 'utf-8');
+    fs.renameSync(tmpFile, DB_FILE);
+    fs.writeFileSync(backupFile, serialized, 'utf-8');
   } catch {
     // Abaikan kegagalan tulis di filesystem read-only pada serverless
   }
@@ -646,7 +682,13 @@ function processSingleReport(
       return { report: acceptedAlready, session, isDuplicate: false };
     }
 
-    if ((payload.qrPayloadScanned || '').trim() !== course.startQrCode) {
+    const scannedStart = (payload.qrPayloadScanned || '').trim();
+    const expectedStartPrefix = `BARAKA:START:${course.id}`.toUpperCase();
+    const isStartMatch =
+      scannedStart === course.startQrCode ||
+      scannedStart.toUpperCase() === expectedStartPrefix;
+
+    if (!isStartMatch) {
       const rejected: CheckpointReport = {
         ...payload,
         measuredAt: safeMeasuredAt,
@@ -755,10 +797,15 @@ function processSingleReport(
       }
     }
 
-    // Evaluasi QR & GPS sesuai aturan Course
+    // Evaluasi QR & GPS sesuai aturan Course (dukung juga format deterministik BARAKA:CP:<courseId>:<cpCode>)
+    const scannedCp = (payload.qrPayloadScanned || '').trim();
+    const upperScannedCp = scannedCp.toUpperCase();
+    const expectedCpPrefix = `BARAKA:CP:${course.id}:${checkpoint.code}`.toUpperCase();
     const qrMatch =
-      Boolean(payload.qrPayloadScanned) &&
-      payload.qrPayloadScanned?.trim() === checkpoint.qrSecret;
+      Boolean(scannedCp) &&
+      (scannedCp === checkpoint.qrSecret ||
+        upperScannedCp === expectedCpPrefix ||
+        upperScannedCp.startsWith(`${expectedCpPrefix}:`));
 
     let gpsMatch = false;
     let distanceMeters: number | null = null;
@@ -898,7 +945,13 @@ function processSingleReport(
       return { report: rejected, session, isDuplicate: false };
     }
 
-    if ((payload.qrPayloadScanned || '').trim() !== course.finishQrCode) {
+    const scannedFinish = (payload.qrPayloadScanned || '').trim();
+    const expectedFinishPrefix = `BARAKA:FINISH:${course.id}`.toUpperCase();
+    const isFinishMatch =
+      scannedFinish === course.finishQrCode ||
+      scannedFinish.toUpperCase() === expectedFinishPrefix;
+
+    if (!isFinishMatch) {
       const rejected: CheckpointReport = {
         ...payload,
         measuredAt: safeMeasuredAt,
@@ -1122,11 +1175,39 @@ app.post('/api/participant/login', (req, res) => {
   // --------------------------------------------------------------------------
   app.post('/api/participant/load-event', requireParticipant, (req, res) => {
     const participantId = (req as Request & { participantId: string }).participantId;
-    const { setupQrCode } = req.body as { setupQrCode?: string };
+    const { setupQrCode, backupCourses, participantSnapshot } = req.body as {
+      setupQrCode?: string;
+      backupCourses?: Course[];
+      participantSnapshot?: ParticipantPublic;
+    };
 
     if (!setupQrCode) {
       res.status(400).json({ error: 'Setup QR Code wajib dipindai.' });
       return;
+    }
+
+    // Pulihkan data peserta jika server baru cold-start
+    if (
+      participantSnapshot &&
+      participantSnapshot.id === participantId &&
+      !db.participants.some((p) => p.id === participantId)
+    ) {
+      const fallbackPin = hashPin('1111');
+      db.participants.push({
+        ...participantSnapshot,
+        pinHash: fallbackPin.hash,
+        pinSalt: fallbackPin.salt,
+      });
+    }
+
+    // Pulihkan daftar course cadangan jika ada course yang belum tercatat di instance ini
+    if (Array.isArray(backupCourses)) {
+      const deletedSet = new Set(db.deletedCourseIds || []);
+      backupCourses.forEach((bc) => {
+        if (bc && bc.id && !deletedSet.has(bc.id) && !db.courses.some((c) => c.id === bc.id)) {
+          db.courses.push(normalizeRestoredCourse(bc));
+        }
+      });
     }
 
     const trimmedSetup = setupQrCode.trim();
@@ -1181,19 +1262,122 @@ app.post('/api/participant/login', (req, res) => {
 
   // --------------------------------------------------------------------------
   // ALUR PESERTA: SINKRONISASI LAPORAN CHECKPOINT / START / FINISH (SINGLE & BATCH)
+  // Dilengkapi Self-Healing Sesi & Course jika Server sempat Cold-Start
   // --------------------------------------------------------------------------
   app.post('/api/participant/reports/sync', requireParticipant, (req, res) => {
     const participantId = (req as Request & { participantId: string }).participantId;
-    const { reports } = req.body as { reports?: IncomingReportPayload[] };
+    const {
+      reports,
+      sessionSnapshot,
+      courseSnapshot,
+      participantSnapshot,
+    } = req.body as {
+      reports?: IncomingReportPayload[];
+      sessionSnapshot?: ParticipantSession | null;
+      courseSnapshot?: Course | null;
+      participantSnapshot?: ParticipantPublic | null;
+    };
 
     if (!Array.isArray(reports) || reports.length === 0) {
       res.status(400).json({ error: 'Daftar laporan kosong.' });
       return;
     }
 
+    const deletedSet = new Set(db.deletedCourseIds || []);
+
+    // 1. Self-Healing Participant jika belum ada di memori server
+    if (
+      participantSnapshot &&
+      participantSnapshot.id === participantId &&
+      !db.participants.some((p) => p.id === participantId)
+    ) {
+      const fallbackPin = hashPin('1111');
+      db.participants.push({
+        ...participantSnapshot,
+        pinHash: fallbackPin.hash,
+        pinSalt: fallbackPin.salt,
+      });
+    }
+
+    // 2. Self-Healing Course jika server baru cold-start dan course belum dihapus panitia
+    if (
+      courseSnapshot &&
+      courseSnapshot.id &&
+      !deletedSet.has(courseSnapshot.id) &&
+      !db.courses.some((c) => c.id === courseSnapshot.id)
+    ) {
+      db.courses.push(normalizeRestoredCourse(courseSnapshot));
+    }
+
     const sortedIncoming = [...reports].sort(
       (a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt)
     );
+
+    // 3. Self-Healing Session & Status START sebelum memproses laporan Checkpoint
+    const targetSessionId =
+      sessionSnapshot?.id || sortedIncoming[0]?.sessionId;
+    const targetCourseId =
+      sessionSnapshot?.courseId ||
+      courseSnapshot?.id ||
+      sortedIncoming[0]?.courseId;
+
+    if (targetSessionId && targetCourseId && !deletedSet.has(targetCourseId)) {
+      let existingSession = db.sessions.find(
+        (s) => s.id === targetSessionId && s.participantId === participantId
+      );
+
+      if (!existingSession) {
+        existingSession = {
+          id: targetSessionId,
+          courseId: targetCourseId,
+          participantId,
+          status: sessionSnapshot?.status || SessionStatus.NOT_STARTED,
+          loadedAt: sessionSnapshot?.loadedAt || new Date().toISOString(),
+          startedAt: sessionSnapshot?.startedAt,
+          startedReceivedAt: sessionSnapshot?.startedReceivedAt,
+          finishedAt: sessionSnapshot?.finishedAt,
+          finishedReceivedAt: sessionSnapshot?.finishedReceivedAt,
+          durationSeconds: sessionSnapshot?.durationSeconds,
+          validatedCheckpointIds: Array.isArray(
+            sessionSnapshot?.validatedCheckpointIds
+          )
+            ? [...sessionSnapshot.validatedCheckpointIds]
+            : [],
+          totalScore: sessionSnapshot?.totalScore || 0,
+          grossScore: sessionSnapshot?.grossScore,
+          overtimeMinutes: sessionSnapshot?.overtimeMinutes,
+          penaltyPoints: sessionSnapshot?.penaltyPoints,
+          lastLocation: sessionSnapshot?.lastLocation,
+        };
+        db.sessions.push(existingSession);
+      }
+
+      // Jika peserta sudah memiliki bukti START (dari sessionSnapshot atau dari laporan START di antrean),
+      // pastikan status sesi di server adalah ACTIVE sebelum memvalidasi CHECKPOINT!
+      const incomingStartReport = sortedIncoming.find(
+        (r) => r.reportType === 'START'
+      );
+      const hasStartEvidence =
+        sessionSnapshot?.status === SessionStatus.ACTIVE ||
+        sessionSnapshot?.status === SessionStatus.FINISHED ||
+        Boolean(sessionSnapshot?.startedAt) ||
+        Boolean(incomingStartReport);
+
+      if (
+        existingSession.status === SessionStatus.NOT_STARTED &&
+        hasStartEvidence
+      ) {
+        const startIso =
+          sessionSnapshot?.startedAt ||
+          incomingStartReport?.measuredAt ||
+          sortedIncoming[0].measuredAt;
+        existingSession.status = SessionStatus.ACTIVE;
+        existingSession.startedAt = startIso;
+        existingSession.startedReceivedAt =
+          existingSession.startedReceivedAt || new Date().toISOString();
+      }
+      saveDb(db);
+    }
 
     const results = sortedIncoming.map((item) =>
       processSingleReport(item, participantId)
@@ -1277,13 +1461,52 @@ app.post('/api/participant/login', (req, res) => {
 
   app.get('/api/participant/session/:sessionId', requireParticipant, (req, res) => {
     const participantId = (req as Request & { participantId: string }).participantId;
+    const courseIdQuery = (req.query.courseId as string | undefined)?.trim();
+    const deletedSet = new Set(db.deletedCourseIds || []);
+
+    if (courseIdQuery && deletedSet.has(courseIdQuery)) {
+      res.status(404).json({
+        error: 'Course telah dihapus oleh panitia.',
+        sessionDeleted: true,
+      });
+      return;
+    }
+
     const session = db.sessions.find(
       (s) => s.id === req.params.sessionId && s.participantId === participantId
     );
     if (!session) {
-      res.status(404).json({ error: 'Sesi tidak ditemukan.', sessionDeleted: true });
+      const matchedByQuery = courseIdQuery
+        ? db.courses.find((c) => c.id === courseIdQuery) || null
+        : null;
+      const sanitizedFallback: Course | null = matchedByQuery
+        ? {
+            ...matchedByQuery,
+            startQrCode: 'HIDDEN_ON_CLIENT',
+            finishQrCode: 'HIDDEN_ON_CLIENT',
+            checkpoints: matchedByQuery.checkpoints.map((cp) => ({
+              ...cp,
+              qrSecret: 'VERIFIED_BY_SERVER',
+            })),
+          }
+        : null;
+
+      res.json({
+        sessionMissingOnServer: true,
+        course: sanitizedFallback,
+        reports: [],
+      });
       return;
     }
+
+    if (deletedSet.has(session.courseId)) {
+      res.status(404).json({
+        error: 'Course telah dihapus oleh panitia.',
+        sessionDeleted: true,
+      });
+      return;
+    }
+
     const matchedCourse = db.courses.find((c) => c.id === session.courseId) || null;
     if (matchedCourse) {
       recalculateSessionScore(session, matchedCourse);
@@ -1477,11 +1700,52 @@ app.post('/api/participant/login', (req, res) => {
     res.json({ course });
   });
 
+  // Sinkronisasi / Pulihkan Cadangan Course Organizer jika Server sempat Cold-Start
+  app.post('/api/organizer/courses/sync-backup', requireOrganizer, (req, res) => {
+    const { courses: backupCourses } = req.body as { courses?: Course[] };
+    if (Array.isArray(backupCourses)) {
+      const deletedSet = new Set(db.deletedCourseIds || []);
+      let changed = false;
+      backupCourses.forEach((bc) => {
+        if (!bc || !bc.id || deletedSet.has(bc.id)) return;
+        const normalized = normalizeRestoredCourse(bc);
+        const existingIdx = db.courses.findIndex((c) => c.id === bc.id);
+        if (existingIdx === -1) {
+          db.courses.push(normalized);
+          changed = true;
+        } else if (
+          JSON.stringify(db.courses[existingIdx]) !== JSON.stringify(normalized)
+        ) {
+          db.courses[existingIdx] = normalized;
+          db.sessions
+            .filter((s) => s.courseId === normalized.id)
+            .forEach((s) => recalculateSessionScore(s, normalized));
+          changed = true;
+        }
+      });
+      if (changed) {
+        saveDb(db);
+      }
+    }
+    res.json({ courses: db.courses });
+  });
+
   // Hapus Course Aktif beserta sesi & laporannya
   app.delete('/api/organizer/courses/:courseId', requireOrganizer, (req, res) => {
-    const courseIndex = db.courses.findIndex((c) => c.id === req.params.courseId);
+    const targetId = req.params.courseId;
+    const courseIndex = db.courses.findIndex((c) => c.id === targetId);
+    if (!Array.isArray(db.deletedCourseIds)) {
+      db.deletedCourseIds = [];
+    }
+    if (!db.deletedCourseIds.includes(targetId)) {
+      db.deletedCourseIds.push(targetId);
+    }
     if (courseIndex === -1) {
-      res.status(404).json({ error: 'Course tidak ditemukan.' });
+      saveDb(db);
+      res.json({
+        deletedCourseId: targetId,
+        courses: db.courses,
+      });
       return;
     }
 

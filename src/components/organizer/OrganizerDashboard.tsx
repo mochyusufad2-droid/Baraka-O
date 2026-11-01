@@ -37,6 +37,12 @@ import {
 import { BulkQrPrintModal } from './QrPrintModals';
 import { CourseMapPlanner } from './CourseMapPlanner';
 import { syncCourseToFirestore } from '../../firebase';
+import {
+  clearPersistedParticipantState,
+  loadOrganizerCoursesBackup,
+  removeCourseFromOrganizerBackup,
+  saveOrganizerCoursesBackup,
+} from '../../services/offlineQueue';
 
 interface DashboardApiData {
   serverTime: string;
@@ -85,7 +91,15 @@ function sanitizeDigitsOnly(val: string): string {
   return digits;
 }
 
-export default function OrganizerDashboard() {
+interface OrganizerDashboardProps {
+  onAuthenticated?: () => void;
+  onLogout?: () => void;
+}
+
+export default function OrganizerDashboard({
+  onAuthenticated,
+  onLogout,
+}: OrganizerDashboardProps = {}) {
   const [token, setToken] = useState<string | null>(() =>
     localStorage.getItem(ORG_TOKEN_STORAGE_KEY)
   );
@@ -176,7 +190,14 @@ export default function OrganizerDashboard() {
     localStorage.removeItem(ORG_TOKEN_STORAGE_KEY);
     setToken(null);
     setDashboard(null);
-  }, []);
+    onLogout?.();
+  }, [onLogout]);
+
+  useEffect(() => {
+    if (token) {
+      onAuthenticated?.();
+    }
+  }, [token, onAuthenticated]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -195,6 +216,7 @@ export default function OrganizerDashboard() {
         );
         return;
       }
+      clearPersistedParticipantState();
       localStorage.setItem(ORG_TOKEN_STORAGE_KEY, data.token);
       setToken(data.token);
     } catch {
@@ -217,6 +239,31 @@ export default function OrganizerDashboard() {
       }
       if (!res.ok) throw new Error('Gagal memuat data dashboard organizer.');
       const data: DashboardApiData = await res.json();
+
+      // Cek apakah ada Course di cadangan lokal browser yang belum ada di server (mis. setelah serverless cold-start)
+      const localBackup = loadOrganizerCoursesBackup();
+      const missingOnServer = localBackup.filter(
+        (bc) => bc && bc.id && !data.courses.some((sc) => sc.id === bc.id)
+      );
+
+      if (missingOnServer.length > 0) {
+        const syncRes = await fetch('/api/organizer/courses/sync-backup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ courses: localBackup }),
+        });
+        if (syncRes.ok) {
+          const syncData = await syncRes.json().catch(() => ({}));
+          if (Array.isArray(syncData.courses)) {
+            data.courses = syncData.courses;
+          }
+        }
+      }
+
+      saveOrganizerCoursesBackup(data.courses);
       setDashboard(data);
       setSelectedCourseId((prev) => {
         if (prev && data.courses.some((c: Course) => c.id === prev)) return prev;
@@ -291,11 +338,13 @@ export default function OrganizerDashboard() {
   const applyUpdatedCourseLocally = useCallback((updatedCourse: Course) => {
     setDashboard((prev) => {
       if (!prev) return prev;
+      const nextCourses = prev.courses.map((c) =>
+        c.id === updatedCourse.id ? updatedCourse : c
+      );
+      saveOrganizerCoursesBackup(nextCourses);
       return {
         ...prev,
-        courses: prev.courses.map((c) =>
-          c.id === updatedCourse.id ? updatedCourse : c
-        ),
+        courses: nextCourses,
       };
     });
     setBulkPrintCourse((prev) =>
@@ -391,10 +440,12 @@ export default function OrganizerDashboard() {
   // Hapus Course Aktif
   const handleConfirmDeleteCourse = async () => {
     if (!confirmDeleteCourse || !token) return;
+    const targetId = confirmDeleteCourse.id;
     const targetName = confirmDeleteCourse.name;
     try {
+      removeCourseFromOrganizerBackup(targetId);
       const res = await fetch(
-        `/api/organizer/courses/${confirmDeleteCourse.id}`,
+        `/api/organizer/courses/${targetId}`,
         {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${token}` },
@@ -627,6 +678,12 @@ export default function OrganizerDashboard() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal membuat Course baru');
       const created: Course = data.course;
+      if (created?.id) {
+        const existingBackup = loadOrganizerCoursesBackup().filter(
+          (c) => c.id !== created.id
+        );
+        saveOrganizerCoursesBackup([...existingBackup, created]);
+      }
       setNewCourseName('');
       setNewCourseDescription('');
       setNewCourseLocation('');
