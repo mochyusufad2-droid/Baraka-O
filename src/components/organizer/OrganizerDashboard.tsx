@@ -188,9 +188,11 @@ export default function OrganizerDashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: pinInput }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setLoginError(data.error || 'PIN Organizer tidak valid.');
+        setLoginError(
+          data.error || `PIN Organizer tidak valid (HTTP ${res.status}).`
+        );
         return;
       }
       localStorage.setItem(ORG_TOKEN_STORAGE_KEY, data.token);

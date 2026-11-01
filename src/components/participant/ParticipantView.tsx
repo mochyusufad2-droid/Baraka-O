@@ -1159,11 +1159,13 @@ export default function ParticipantView() {
           pin: regPin,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setFeedbackBanner({
           type: 'error',
-          text: data.error || 'Registrasi gagal.',
+          text:
+            data.error ||
+            `Registrasi gagal (HTTP ${res.status}). Pastikan endpoint API tersedia.`,
         });
         return;
       }
@@ -1194,9 +1196,14 @@ export default function ParticipantView() {
           pin: loginPin,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setFeedbackBanner({ type: 'error', text: data.error || 'Login gagal.' });
+        setFeedbackBanner({
+          type: 'error',
+          text:
+            data.error ||
+            `Login gagal (HTTP ${res.status}). Pastikan server API aktif.`,
+        });
         return;
       }
       setToken(data.token);

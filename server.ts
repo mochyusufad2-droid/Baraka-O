@@ -41,11 +41,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.VERCEL
+  ? path.join('/tmp', 'baraka-data')
+  : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'baraka-db.json');
+const TOKEN_SECRET =
+  process.env.BARAKA_TOKEN_SECRET || 'baraka-adventure-hmac-secret-2026';
 
 // ============================================================================
-// 1. UTILITAS KRIPTOGRAFI PIN & TOKEN (TANPA PLAINTEXT PIN)
+// 1. UTILITAS KRIPTOGRAFI PIN & TOKEN (TANPA PLAINTEXT PIN + STATELESS HMAC)
 // ============================================================================
 
 export function hashPin(pin: string, existingSalt?: string): { hash: string; salt: string } {
@@ -62,8 +66,52 @@ export function verifyPin(pin: string, expectedHash: string, salt: string): bool
   return crypto.timingSafeEqual(a, b);
 }
 
-function generateToken(): string {
-  return crypto.randomBytes(24).toString('hex');
+function signPayload(payload: string): string {
+  return crypto
+    .createHmac('sha256', TOKEN_SECRET)
+    .update(payload)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function createOrganizerToken(): string {
+  const ts = Date.now().toString(36);
+  const nonce = crypto.randomBytes(6).toString('hex');
+  const body = `otk.${ts}.${nonce}`;
+  return `${body}.${signPayload(body)}`;
+}
+
+function verifyOrganizerToken(token: string, validList: string[]): boolean {
+  if (!token) return false;
+  if (validList.includes(token)) return true;
+  const parts = token.split('.');
+  if (parts.length === 4 && parts[0] === 'otk') {
+    const body = `${parts[0]}.${parts[1]}.${parts[2]}`;
+    return signPayload(body) === parts[3];
+  }
+  return false;
+}
+
+function createParticipantToken(participantId: string): string {
+  const ts = Date.now().toString(36);
+  const body = `ptk.${participantId}.${ts}`;
+  return `${body}.${signPayload(body)}`;
+}
+
+function verifyParticipantToken(
+  token: string,
+  tokenMap: Record<string, string>
+): string | null {
+  if (!token) return null;
+  if (tokenMap[token]) return tokenMap[token];
+  const parts = token.split('.');
+  if (parts.length === 4 && parts[0] === 'ptk') {
+    const body = `${parts[0]}.${parts[1]}.${parts[2]}`;
+    if (signPayload(body) === parts[3]) {
+      return parts[1];
+    }
+  }
+  return null;
 }
 
 // ============================================================================
@@ -301,15 +349,15 @@ function createInitialDatabase(): DatabaseSchema {
 }
 
 function loadDb(): DatabaseSchema {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(DB_FILE)) {
-    const initial = createInitialDatabase();
-    fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
-    return initial;
-  }
   try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(DB_FILE)) {
+      const initial = createInitialDatabase();
+      fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
+      return initial;
+    }
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as DatabaseSchema;
     if (!Array.isArray(parsed.courses)) {
@@ -344,16 +392,27 @@ function loadDb(): DatabaseSchema {
     return parsed;
   } catch {
     const initial = createInitialDatabase();
-    fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(DB_FILE, JSON.stringify(initial, null, 2), 'utf-8');
+    } catch {
+      // Abaikan kegagalan tulis di filesystem read-only
+    }
     return initial;
   }
 }
 
 function saveDb(db: DatabaseSchema): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+  } catch {
+    // Abaikan kegagalan tulis di filesystem read-only pada serverless
   }
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
 }
 
 const db: DatabaseSchema = loadDb();
@@ -376,7 +435,7 @@ function toPublicParticipant(p: StoredParticipant): ParticipantPublic {
 function requireOrganizer(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  if (!token || !db.organizerTokens.includes(token)) {
+  if (!verifyOrganizerToken(token, db.organizerTokens)) {
     res.status(401).json({
       error: 'Akses ditolak. Silakan login sebagai Organizer terlebih dahulu.',
     });
@@ -388,7 +447,7 @@ function requireOrganizer(req: Request, res: Response, next: NextFunction) {
 function requireParticipant(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  const participantId = db.participantTokens[token];
+  const participantId = verifyParticipantToken(token, db.participantTokens);
   if (!token || !participantId) {
     res.status(401).json({
       error: 'Sesi peserta tidak valid. Silakan masuk atau registrasi ulang.',
@@ -917,119 +976,118 @@ function processSingleReport(
 // 6. INISIALISASI EXPRESS SERVER & ENDPOINT API
 // ============================================================================
 
-async function startServer() {
-  const app = express();
-  app.use(express.json({ limit: '2mb' }));
+export const app = express();
+app.use(express.json({ limit: '2mb' }));
 
-  app.get('/api/health', (_req, res) => {
-    res.json({
-      status: 'ok',
-      app: 'BARAKA ADVENTURE',
-      serverTime: new Date().toISOString(),
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    app: 'BARAKA ADVENTURE',
+    serverTime: new Date().toISOString(),
+  });
+});
+
+// --------------------------------------------------------------------------
+// AUTENTIKASI ORGANIZER (PIN HASHED DI SERVER)
+// --------------------------------------------------------------------------
+app.post('/api/organizer/login', (req, res) => {
+  const { pin } = req.body as { pin?: string };
+  if (!pin) {
+    res.status(400).json({ error: 'PIN Organizer wajib diisi.' });
+    return;
+  }
+  const isValid = verifyPin(pin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt);
+  if (!isValid) {
+    res.status(401).json({ error: 'PIN Organizer salah.' });
+    return;
+  }
+  const token = createOrganizerToken();
+  db.organizerTokens.push(token);
+  saveDb(db);
+  res.json({ token, role: 'ORGANIZER' });
+});
+
+app.post('/api/organizer/change-pin', requireOrganizer, (req, res) => {
+  const { currentPin, newPin } = req.body as { currentPin?: string; newPin?: string };
+  if (!currentPin || !newPin || String(newPin).trim().length < 4) {
+    res.status(400).json({ error: 'PIN baru minimal 4 karakter.' });
+    return;
+  }
+  if (!verifyPin(currentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+    res.status(401).json({ error: 'PIN Organizer saat ini tidak sesuai.' });
+    return;
+  }
+  const updated = hashPin(newPin);
+  db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
+  saveDb(db);
+  res.json({ message: 'PIN Organizer berhasil diperbarui dengan aman (hashed).' });
+});
+
+// --------------------------------------------------------------------------
+// AUTENTIKASI & REGISTRASI PESERTA (NAMA TIM WAJIB DIISI & PIN HASHED)
+// --------------------------------------------------------------------------
+app.post('/api/participant/register', (req, res) => {
+  const { name, teamName, phone, pin } = req.body as {
+    name?: string;
+    teamName?: string;
+    phone?: string;
+    pin?: string;
+  };
+
+  if (!name || !name.trim() || !teamName || !teamName.trim() || !pin || String(pin).trim().length < 4) {
+    res.status(400).json({
+      error: 'Nama peserta, Nama Tim, dan PIN (minimal 4 digit) wajib diisi.',
     });
+    return;
+  }
+
+  const { hash, salt } = hashPin(pin);
+  const nextNumber = 101 + db.participants.length;
+  const newParticipant: StoredParticipant = {
+    id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    name: name.trim(),
+    teamName: teamName.trim(),
+    phone: phone?.trim() || '',
+    bibNumber: `BRK-${nextNumber}`,
+    registeredAt: new Date().toISOString(),
+    pinHash: hash,
+    pinSalt: salt,
+  };
+
+  db.participants.push(newParticipant);
+  const token = createParticipantToken(newParticipant.id);
+  db.participantTokens[token] = newParticipant.id;
+  saveDb(db);
+
+  res.status(201).json({
+    token,
+    participant: toPublicParticipant(newParticipant),
   });
+});
 
-  // --------------------------------------------------------------------------
-  // AUTENTIKASI ORGANIZER (PIN HASHED DI SERVER)
-  // --------------------------------------------------------------------------
-  app.post('/api/organizer/login', (req, res) => {
-    const { pin } = req.body as { pin?: string };
-    if (!pin) {
-      res.status(400).json({ error: 'PIN Organizer wajib diisi.' });
-      return;
-    }
-    const isValid = verifyPin(pin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt);
-    if (!isValid) {
-      res.status(401).json({ error: 'PIN Organizer salah.' });
-      return;
-    }
-    const token = generateToken();
-    db.organizerTokens.push(token);
-    saveDb(db);
-    res.json({ token, role: 'ORGANIZER' });
-  });
+app.post('/api/participant/login', (req, res) => {
+  const { bibOrName, pin } = req.body as { bibOrName?: string; pin?: string };
+  if (!bibOrName || !pin) {
+    res.status(400).json({ error: 'Nomor dada (BIB) / Nama dan PIN wajib diisi.' });
+    return;
+  }
 
-  app.post('/api/organizer/change-pin', requireOrganizer, (req, res) => {
-    const { currentPin, newPin } = req.body as { currentPin?: string; newPin?: string };
-    if (!currentPin || !newPin || String(newPin).trim().length < 4) {
-      res.status(400).json({ error: 'PIN baru minimal 4 karakter.' });
-      return;
-    }
-    if (!verifyPin(currentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
-      res.status(401).json({ error: 'PIN Organizer saat ini tidak sesuai.' });
-      return;
-    }
-    const updated = hashPin(newPin);
-    db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
-    saveDb(db);
-    res.json({ message: 'PIN Organizer berhasil diperbarui dengan aman (hashed).' });
-  });
+  const query = bibOrName.trim().toLowerCase();
+  const found = db.participants.find(
+    (p) =>
+      p.bibNumber.toLowerCase() === query ||
+      p.name.toLowerCase() === query ||
+      p.teamName.toLowerCase() === query
+  );
 
-  // --------------------------------------------------------------------------
-  // AUTENTIKASI & REGISTRASI PESERTA (NAMA TIM WAJIB DIISI & PIN HASHED)
-  // --------------------------------------------------------------------------
-  app.post('/api/participant/register', (req, res) => {
-    const { name, teamName, phone, pin } = req.body as {
-      name?: string;
-      teamName?: string;
-      phone?: string;
-      pin?: string;
-    };
+  if (!found || !verifyPin(pin, found.pinHash, found.pinSalt)) {
+    res.status(401).json({ error: 'Nomor peserta/Nama atau PIN tidak cocok.' });
+    return;
+  }
 
-    if (!name || !name.trim() || !teamName || !teamName.trim() || !pin || String(pin).trim().length < 4) {
-      res.status(400).json({
-        error: 'Nama peserta, Nama Tim, dan PIN (minimal 4 digit) wajib diisi.',
-      });
-      return;
-    }
-
-    const { hash, salt } = hashPin(pin);
-    const nextNumber = 101 + db.participants.length;
-    const newParticipant: StoredParticipant = {
-      id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      name: name.trim(),
-      teamName: teamName.trim(),
-      phone: phone?.trim() || '',
-      bibNumber: `BRK-${nextNumber}`,
-      registeredAt: new Date().toISOString(),
-      pinHash: hash,
-      pinSalt: salt,
-    };
-
-    db.participants.push(newParticipant);
-    const token = generateToken();
-    db.participantTokens[token] = newParticipant.id;
-    saveDb(db);
-
-    res.status(201).json({
-      token,
-      participant: toPublicParticipant(newParticipant),
-    });
-  });
-
-  app.post('/api/participant/login', (req, res) => {
-    const { bibOrName, pin } = req.body as { bibOrName?: string; pin?: string };
-    if (!bibOrName || !pin) {
-      res.status(400).json({ error: 'Nomor dada (BIB) / Nama dan PIN wajib diisi.' });
-      return;
-    }
-
-    const query = bibOrName.trim().toLowerCase();
-    const found = db.participants.find(
-      (p) =>
-        p.bibNumber.toLowerCase() === query ||
-        p.name.toLowerCase() === query ||
-        p.teamName.toLowerCase() === query
-    );
-
-    if (!found || !verifyPin(pin, found.pinHash, found.pinSalt)) {
-      res.status(401).json({ error: 'Nomor peserta/Nama atau PIN tidak cocok.' });
-      return;
-    }
-
-    const token = generateToken();
-    db.participantTokens[token] = found.id;
-    saveDb(db);
+  const token = createParticipantToken(found.id);
+  db.participantTokens[token] = found.id;
+  saveDb(db);
 
     const activeSessions = db.sessions.filter((s) => s.participantId === found.id);
     const latestSession =
@@ -1613,9 +1671,10 @@ async function startServer() {
     });
   });
 
-  // --------------------------------------------------------------------------
-  // VITE MIDDLEWARE (DEVELOPMENT) ATAU STATIC FILES (PRODUCTION)
-  // --------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// VITE MIDDLEWARE (DEVELOPMENT) ATAU STATIC FILES (NON-VERCEL STANDALONE)
+// --------------------------------------------------------------------------
+async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     process.env.DISABLE_HMR = 'true';
     const { createServer: createViteServer } = await import('vite');
@@ -1665,4 +1724,9 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
+
