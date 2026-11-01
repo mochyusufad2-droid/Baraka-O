@@ -60,6 +60,17 @@ export interface Checkpoint {
   points: number;        // Skor pos (jika course menggunakan sistem skor)
 }
 
+export interface OrganizerPublic {
+  id: string;
+  code: string;          // Contoh: "SUPERADMIN", "ORG-01", "ORG-02"
+  username: string;      // Contoh: "superadmin", "panitia1"
+  name: string;          // Nama tampilan panitia / organizer
+  organization?: string; // Nama klub / instansi penyelenggara
+  isSuperAdmin: boolean;
+  isActive: boolean;
+  createdAt: string;
+}
+
 /**
  * Entitas tunggal Course (Hasil penyatuan Event & Course sesuai kesepakatan diskusi).
  */
@@ -72,6 +83,8 @@ export interface Course {
   isActive: boolean;
   scoringEnabled: boolean;
   createdAt: string;
+  createdByOrganizerId?: string;          // ID Organizer pembuat course
+  createdByOrganizerName?: string;        // Nama Organizer pembuat course
   validationMethod: ValidationMethod;
   defaultGpsRadiusMeters: number;
   enforceOrder: boolean;                  // Apakah peserta wajib mengunjungi pos secara berurutan
@@ -94,6 +107,7 @@ export interface ParticipantPublic {
   phone?: string;
   bibNumber: string;
   registeredAt: string;
+  createdByOrganizerId?: string; // Jika didaftarkan langsung oleh seorang Organizer
 }
 
 export interface LastKnownLocation {
@@ -130,6 +144,7 @@ export interface ParticipantSession {
   id: string;
   courseId: string;
   participantId: string;
+  attemptNumber?: number;      // Percobaan ke-berapa pada Course ini (1 = Utama, 2+ = Re-run)
   status: SessionStatus;
   loadedAt: string;
   startedAt?: string;          // Waktu mulai berdasarkan kejadian Start QR

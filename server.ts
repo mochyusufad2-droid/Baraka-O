@@ -9,6 +9,7 @@ import type {
   Course,
   GeoPointLocation,
   LastKnownLocation,
+  OrganizerPublic,
   ParticipantPublic,
   ParticipantSession,
   SessionStatus as SessionStatusType,
@@ -74,22 +75,55 @@ function signPayload(payload: string): string {
     .slice(0, 32);
 }
 
-function createOrganizerToken(): string {
+export interface OrganizerAuthContext {
+  organizerId: string;
+  isSuperAdmin: boolean;
+  code: string;
+  username: string;
+  name: string;
+  organization?: string;
+}
+
+function createOrganizerToken(organizerId = 'SUPERADMIN', isSuperAdmin = true): string {
   const ts = Date.now().toString(36);
-  const nonce = crypto.randomBytes(6).toString('hex');
-  const body = `otk.${ts}.${nonce}`;
+  const roleFlag = isSuperAdmin ? 'SA' : 'ORG';
+  const body = `otk.${organizerId}.${roleFlag}.${ts}`;
   return `${body}.${signPayload(body)}`;
 }
 
-function verifyOrganizerToken(token: string, validList: string[]): boolean {
-  if (!token) return false;
-  if (validList.includes(token)) return true;
+function parseOrganizerTokenPayload(
+  token: string,
+  validList: string[]
+): { organizerId: string; isSuperAdmin: boolean } | null {
+  if (!token) return null;
   const parts = token.split('.');
+  // Format baru 5 bagian: otk.<organizerId>.<SA|ORG>.<ts>.<sig>
+  if (parts.length === 5 && parts[0] === 'otk') {
+    const body = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+    if (signPayload(body) === parts[4]) {
+      return {
+        organizerId: parts[1],
+        isSuperAdmin: parts[2] === 'SA',
+      };
+    }
+  }
+  // Format lama 4 bagian (backward compatibility -> dianggap Superadmin)
   if (parts.length === 4 && parts[0] === 'otk') {
     const body = `${parts[0]}.${parts[1]}.${parts[2]}`;
-    return signPayload(body) === parts[3];
+    if (signPayload(body) === parts[3]) {
+      return {
+        organizerId: 'SUPERADMIN',
+        isSuperAdmin: true,
+      };
+    }
   }
-  return false;
+  if (validList.includes(token)) {
+    return {
+      organizerId: 'SUPERADMIN',
+      isSuperAdmin: true,
+    };
+  }
+  return null;
 }
 
 function createParticipantToken(participantId: string): string {
@@ -147,11 +181,17 @@ interface StoredParticipant extends ParticipantPublic {
   pinSalt: string;
 }
 
+interface StoredOrganizer extends OrganizerPublic {
+  pinHash: string;
+  pinSalt: string;
+}
+
 interface DatabaseSchema {
   organizerAuth: {
     pinHash: string;
     pinSalt: string;
   };
+  organizers?: StoredOrganizer[];
   organizerTokens: string[];
   participantTokens: Record<string, string>; // token -> participantId
   courses: Course[];
@@ -387,6 +427,9 @@ function parseAndMigrateDbContent(raw: string): DatabaseSchema | null {
     if (!Array.isArray(parsed.deletedCourseIds)) {
       parsed.deletedCourseIds = [];
     }
+    if (!Array.isArray(parsed.organizers)) {
+      parsed.organizers = [];
+    }
     const defaults = createInitialDatabase();
     parsed.courses.forEach((c) => {
       const matchDefault = defaults.courses.find((dc) => dc.id === c.id);
@@ -461,22 +504,113 @@ function toPublicParticipant(p: StoredParticipant): ParticipantPublic {
     phone: p.phone,
     bibNumber: p.bibNumber,
     registeredAt: p.registeredAt,
+    createdByOrganizerId: p.createdByOrganizerId,
+  };
+}
+
+function toPublicOrganizer(o: StoredOrganizer): OrganizerPublic {
+  return {
+    id: o.id,
+    code: o.code,
+    username: o.username,
+    name: o.name,
+    organization: o.organization,
+    isSuperAdmin: Boolean(o.isSuperAdmin),
+    isActive: o.isActive !== false,
+    createdAt: o.createdAt,
+  };
+}
+
+function getSuperAdminPublicProfile(): OrganizerPublic {
+  return {
+    id: 'SUPERADMIN',
+    code: 'SUPERADMIN',
+    username: 'superadmin',
+    name: 'Superadmin Utama',
+    organization: 'BARAKA Pusat',
+    isSuperAdmin: true,
+    isActive: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
   };
 }
 
 // ============================================================================
-// 4. MIDDLEWARE OTORISASI ORGANIZER & PARTICIPANT
+// 4. MIDDLEWARE OTORISASI ORGANIZER, SUPERADMIN & PARTICIPANT
 // ============================================================================
+
+function resolveOrganizerAuth(token: string): OrganizerAuthContext | null {
+  const parsed = parseOrganizerTokenPayload(token, db.organizerTokens);
+  if (!parsed) return null;
+
+  if (parsed.isSuperAdmin || parsed.organizerId === 'SUPERADMIN') {
+    return {
+      organizerId: 'SUPERADMIN',
+      isSuperAdmin: true,
+      code: 'SUPERADMIN',
+      username: 'superadmin',
+      name: 'Superadmin Utama',
+      organization: 'BARAKA Pusat',
+    };
+  }
+
+  const orgList = db.organizers || [];
+  const foundOrg = orgList.find((o) => o.id === parsed.organizerId);
+  if (!foundOrg) {
+    // Jika server sempat cold-start tetapi token HMAC valid untuk organizer non-superadmin,
+    // tetap izinkan akses terisolasi berdasarkan organizerId dari token HMAC
+    return {
+      organizerId: parsed.organizerId,
+      isSuperAdmin: false,
+      code: parsed.organizerId.toUpperCase().slice(0, 8),
+      username: parsed.organizerId,
+      name: 'Organizer',
+    };
+  }
+
+  if (foundOrg.isActive === false) {
+    return null;
+  }
+
+  return {
+    organizerId: foundOrg.id,
+    isSuperAdmin: false,
+    code: foundOrg.code,
+    username: foundOrg.username,
+    name: foundOrg.name,
+    organization: foundOrg.organization,
+  };
+}
+
+function canAccessCourse(course: Course, auth: OrganizerAuthContext): boolean {
+  if (auth.isSuperAdmin) return true;
+  return course.createdByOrganizerId === auth.organizerId;
+}
 
 function requireOrganizer(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  if (!verifyOrganizerToken(token, db.organizerTokens)) {
+  const auth = resolveOrganizerAuth(token);
+  if (!auth) {
     res.status(401).json({
-      error: 'Akses ditolak. Silakan login sebagai Organizer terlebih dahulu.',
+      error: 'Akses ditolak atau akun Organizer sedang dinonaktifkan. Silakan login kembali.',
     });
     return;
   }
+  (req as Request & { organizerAuth?: OrganizerAuthContext }).organizerAuth = auth;
+  next();
+}
+
+function requireSuperAdmin(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const auth = resolveOrganizerAuth(token);
+  if (!auth || !auth.isSuperAdmin) {
+    res.status(403).json({
+      error: 'Fitur ini hanya dapat diakses oleh Superadmin Utama.',
+    });
+    return;
+  }
+  (req as Request & { organizerAuth?: OrganizerAuthContext }).organizerAuth = auth;
   next();
 }
 
@@ -1041,39 +1175,358 @@ app.get('/api/health', (_req, res) => {
 });
 
 // --------------------------------------------------------------------------
-// AUTENTIKASI ORGANIZER (PIN HASHED DI SERVER)
+// AUTENTIKASI ORGANIZER & SUPERADMIN (FLEKSIBEL: PIN SAJA ATAU USERNAME + PIN)
 // --------------------------------------------------------------------------
 app.post('/api/organizer/login', (req, res) => {
-  const { pin } = req.body as { pin?: string };
-  if (!pin) {
-    res.status(400).json({ error: 'PIN Organizer wajib diisi.' });
+  const { username, pin } = req.body as { username?: string; pin?: string };
+  if (!pin || !String(pin).trim()) {
+    res.status(400).json({ error: 'PIN Organizer / Superadmin wajib diisi.' });
     return;
   }
-  const isValid = verifyPin(pin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt);
-  if (!isValid) {
-    res.status(401).json({ error: 'PIN Organizer salah.' });
+
+  const trimmedPin = String(pin).trim();
+  const trimmedUsername = (username || '').trim().toLowerCase();
+  const orgList = db.organizers || [];
+
+  // 1. Jika Username diisi secara eksplisit
+  if (trimmedUsername) {
+    const isSuperAdminQuery =
+      trimmedUsername === 'superadmin' ||
+      trimmedUsername === 'admin' ||
+      trimmedUsername === 'master' ||
+      trimmedUsername === 'pusat';
+
+    if (isSuperAdminQuery) {
+      const validSuper = verifyPin(
+        trimmedPin,
+        db.organizerAuth.pinHash,
+        db.organizerAuth.pinSalt
+      );
+      if (!validSuper) {
+        res.status(401).json({ error: 'PIN Superadmin tidak sesuai.' });
+        return;
+      }
+      const token = createOrganizerToken('SUPERADMIN', true);
+      db.organizerTokens.push(token);
+      saveDb(db);
+      res.json({
+        token,
+        role: 'SUPERADMIN',
+        organizer: getSuperAdminPublicProfile(),
+      });
+      return;
+    }
+
+    const matchedOrg = orgList.find(
+      (o) =>
+        o.username.toLowerCase() === trimmedUsername ||
+        o.code.toLowerCase() === trimmedUsername ||
+        o.name.toLowerCase() === trimmedUsername
+    );
+
+    if (!matchedOrg || !verifyPin(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt)) {
+      res.status(401).json({
+        error: 'Username/ID Organizer atau PIN tidak cocok.',
+      });
+      return;
+    }
+
+    if (matchedOrg.isActive === false) {
+      res.status(403).json({
+        error: 'Akun Organizer ini sedang dinonaktifkan oleh Superadmin.',
+      });
+      return;
+    }
+
+    const token = createOrganizerToken(matchedOrg.id, false);
+    saveDb(db);
+    res.json({
+      token,
+      role: 'ORGANIZER',
+      organizer: toPublicOrganizer(matchedOrg),
+    });
     return;
   }
-  const token = createOrganizerToken();
-  db.organizerTokens.push(token);
+
+  // 2. Jika HANYA mengisi PIN saja (tanpa Username)
+  const isSuperAdminPin = verifyPin(
+    trimmedPin,
+    db.organizerAuth.pinHash,
+    db.organizerAuth.pinSalt
+  );
+  if (isSuperAdminPin) {
+    const token = createOrganizerToken('SUPERADMIN', true);
+    db.organizerTokens.push(token);
+    saveDb(db);
+    res.json({
+      token,
+      role: 'SUPERADMIN',
+      organizer: getSuperAdminPublicProfile(),
+    });
+    return;
+  }
+
+  const matchedByPin = orgList.find((o) =>
+    verifyPin(trimmedPin, o.pinHash, o.pinSalt)
+  );
+  if (!matchedByPin) {
+    res.status(401).json({
+      error: 'PIN Organizer tidak dikenali. Pastikan PIN benar atau masukkan Username.',
+    });
+    return;
+  }
+
+  if (matchedByPin.isActive === false) {
+    res.status(403).json({
+      error: 'Akun Organizer ini sedang dinonaktifkan oleh Superadmin.',
+    });
+    return;
+  }
+
+  const token = createOrganizerToken(matchedByPin.id, false);
   saveDb(db);
-  res.json({ token, role: 'ORGANIZER' });
+  res.json({
+    token,
+    role: 'ORGANIZER',
+    organizer: toPublicOrganizer(matchedByPin),
+  });
 });
 
 app.post('/api/organizer/change-pin', requireOrganizer, (req, res) => {
+  const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
   const { currentPin, newPin } = req.body as { currentPin?: string; newPin?: string };
   if (!currentPin || !newPin || String(newPin).trim().length < 4) {
     res.status(400).json({ error: 'PIN baru minimal 4 karakter.' });
     return;
   }
-  if (!verifyPin(currentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+
+  const cleanNewPin = String(newPin).trim();
+  const orgList = db.organizers || [];
+
+  if (auth.isSuperAdmin) {
+    if (!verifyPin(currentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+      res.status(401).json({ error: 'PIN Superadmin saat ini tidak sesuai.' });
+      return;
+    }
+    const conflictOrg = orgList.find((o) => verifyPin(cleanNewPin, o.pinHash, o.pinSalt));
+    if (conflictOrg) {
+      res.status(400).json({
+        error: `PIN tersebut sudah dipakai oleh Organizer "${conflictOrg.name}". Gunakan PIN lain agar login cepat tetap unik.`,
+      });
+      return;
+    }
+    const updated = hashPin(cleanNewPin);
+    db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
+    saveDb(db);
+    res.json({ message: 'PIN Superadmin berhasil diperbarui dengan aman (hashed).' });
+    return;
+  }
+
+  const targetOrg = orgList.find((o) => o.id === auth.organizerId);
+  if (!targetOrg) {
+    res.status(404).json({ error: 'Akun Organizer tidak ditemukan.' });
+    return;
+  }
+  if (!verifyPin(currentPin, targetOrg.pinHash, targetOrg.pinSalt)) {
     res.status(401).json({ error: 'PIN Organizer saat ini tidak sesuai.' });
     return;
   }
-  const updated = hashPin(newPin);
-  db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
+  if (verifyPin(cleanNewPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+    res.status(400).json({ error: 'PIN baru tidak boleh sama dengan PIN Superadmin.' });
+    return;
+  }
+  const conflictOther = orgList.find(
+    (o) => o.id !== targetOrg.id && verifyPin(cleanNewPin, o.pinHash, o.pinSalt)
+  );
+  if (conflictOther) {
+    res.status(400).json({
+      error: 'PIN baru tersebut sudah digunakan Organizer lain. Silakan pilih kombinasi PIN berbeda.',
+    });
+    return;
+  }
+  const updated = hashPin(cleanNewPin);
+  targetOrg.pinHash = updated.hash;
+  targetOrg.pinSalt = updated.salt;
   saveDb(db);
-  res.json({ message: 'PIN Organizer berhasil diperbarui dengan aman (hashed).' });
+  res.json({ message: 'PIN Organizer berhasil diperbarui.' });
+});
+
+// --------------------------------------------------------------------------
+// MANAJEMEN AKUN ORGANIZER OLEH SUPERADMIN
+// --------------------------------------------------------------------------
+app.get('/api/organizer/accounts', requireSuperAdmin, (_req, res) => {
+  const orgList = db.organizers || [];
+  res.json({
+    organizers: orgList.map(toPublicOrganizer),
+  });
+});
+
+app.post('/api/organizer/accounts', requireSuperAdmin, (req, res) => {
+  const { name, username, organization, pin } = req.body as {
+    name?: string;
+    username?: string;
+    organization?: string;
+    pin?: string;
+  };
+
+  if (!name || !name.trim() || !pin || String(pin).trim().length < 4) {
+    res.status(400).json({
+      error: 'Nama Organizer dan PIN Login (minimal 4 karakter) wajib diisi.',
+    });
+    return;
+  }
+
+  const cleanPin = String(pin).trim();
+  if (!Array.isArray(db.organizers)) {
+    db.organizers = [];
+  }
+
+  // Pastikan PIN unik agar Organizer bisa login cukup dengan mengetik PIN saja maupun Username + PIN
+  if (verifyPin(cleanPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+    res.status(400).json({
+      error: 'PIN Organizer tidak boleh sama dengan PIN Superadmin Utama.',
+    });
+    return;
+  }
+
+  const pinConflict = db.organizers.find((o) =>
+    verifyPin(cleanPin, o.pinHash, o.pinSalt)
+  );
+  if (pinConflict) {
+    res.status(400).json({
+      error: `PIN ini sudah digunakan oleh Organizer "${pinConflict.name}" (${pinConflict.code}). Gunakan PIN unik agar panitia bisa login langsung dengan PIN.`,
+    });
+    return;
+  }
+
+  const nextIndex = db.organizers.length + 1;
+  const code = `ORG-${String(nextIndex).padStart(2, '0')}`;
+  const cleanUsername = (username || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '') || code.toLowerCase();
+
+  if (
+    ['superadmin', 'admin', 'master', 'pusat'].includes(cleanUsername) ||
+    db.organizers.some(
+      (o) =>
+        o.username.toLowerCase() === cleanUsername ||
+        o.code.toLowerCase() === cleanUsername
+    )
+  ) {
+    res.status(400).json({
+      error: `Username "${cleanUsername}" sudah terdaftar. Gunakan username lain.`,
+    });
+    return;
+  }
+
+  const { hash, salt } = hashPin(cleanPin);
+  const newOrganizer: StoredOrganizer = {
+    id: `org-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    code,
+    username: cleanUsername,
+    name: name.trim(),
+    organization: (organization || '').trim(),
+    isSuperAdmin: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    pinHash: hash,
+    pinSalt: salt,
+  };
+
+  db.organizers.push(newOrganizer);
+  saveDb(db);
+
+  res.status(201).json({
+    organizer: toPublicOrganizer(newOrganizer),
+    organizers: db.organizers.map(toPublicOrganizer),
+  });
+});
+
+app.put('/api/organizer/accounts/:organizerId', requireSuperAdmin, (req, res) => {
+  const orgList = db.organizers || [];
+  const target = orgList.find((o) => o.id === req.params.organizerId);
+  if (!target) {
+    res.status(404).json({ error: 'Akun Organizer tidak ditemukan.' });
+    return;
+  }
+
+  const { name, username, organization, isActive, newPin } = req.body as {
+    name?: string;
+    username?: string;
+    organization?: string;
+    isActive?: boolean;
+    newPin?: string;
+  };
+
+  if (name !== undefined && name.trim()) {
+    target.name = name.trim();
+  }
+  if (organization !== undefined) {
+    target.organization = organization.trim();
+  }
+  if (username !== undefined && username.trim()) {
+    const cleanUser = username.trim().toLowerCase().replace(/\s+/g, '');
+    const duplicateUser = orgList.some(
+      (o) => o.id !== target.id && o.username.toLowerCase() === cleanUser
+    );
+    if (duplicateUser || ['superadmin', 'admin', 'master'].includes(cleanUser)) {
+      res.status(400).json({ error: `Username "${cleanUser}" sudah digunakan.` });
+      return;
+    }
+    target.username = cleanUser;
+  }
+  if (typeof isActive === 'boolean') {
+    target.isActive = isActive;
+  }
+
+  if (newPin !== undefined && String(newPin).trim() !== '') {
+    const cleanPin = String(newPin).trim();
+    if (cleanPin.length < 4) {
+      res.status(400).json({ error: 'PIN baru minimal 4 karakter.' });
+      return;
+    }
+    if (verifyPin(cleanPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+      res.status(400).json({ error: 'PIN Organizer tidak boleh sama dengan PIN Superadmin.' });
+      return;
+    }
+    const pinConflict = orgList.find(
+      (o) => o.id !== target.id && verifyPin(cleanPin, o.pinHash, o.pinSalt)
+    );
+    if (pinConflict) {
+      res.status(400).json({
+        error: `PIN tersebut sudah digunakan oleh Organizer "${pinConflict.name}".`,
+      });
+      return;
+    }
+    const updatedHash = hashPin(cleanPin);
+    target.pinHash = updatedHash.hash;
+    target.pinSalt = updatedHash.salt;
+  }
+
+  saveDb(db);
+  res.json({
+    organizer: toPublicOrganizer(target),
+    organizers: orgList.map(toPublicOrganizer),
+  });
+});
+
+app.delete('/api/organizer/accounts/:organizerId', requireSuperAdmin, (req, res) => {
+  if (!Array.isArray(db.organizers)) {
+    db.organizers = [];
+  }
+  const idx = db.organizers.findIndex((o) => o.id === req.params.organizerId);
+  if (idx === -1) {
+    res.status(404).json({ error: 'Akun Organizer tidak ditemukan.' });
+    return;
+  }
+  const removed = db.organizers[idx];
+  db.organizers.splice(idx, 1);
+  saveDb(db);
+  res.json({
+    deletedId: removed.id,
+    organizers: db.organizers.map(toPublicOrganizer),
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -1143,8 +1596,13 @@ app.post('/api/participant/login', (req, res) => {
   saveDb(db);
 
     const activeSessions = db.sessions.filter((s) => s.participantId === found.id);
+    // Prioritaskan sesi yang sedang berjalan (ACTIVE / NOT_STARTED) jika ada, atau sesi terakhir
+    const unfinishedSession = [...activeSessions]
+      .reverse()
+      .find((s) => s.status !== SessionStatus.FINISHED);
     const latestSession =
-      activeSessions.length > 0 ? activeSessions[activeSessions.length - 1] : null;
+      unfinishedSession ||
+      (activeSessions.length > 0 ? activeSessions[activeSessions.length - 1] : null);
     const matchedCourse = latestSession
       ? db.courses.find((c) => c.id === latestSession.courseId) || null
       : null;
@@ -1172,13 +1630,20 @@ app.post('/api/participant/login', (req, res) => {
 
   // --------------------------------------------------------------------------
   // ALUR PESERTA: LOAD COURSE MELALUI SETUP QR
+  // Mendukung Mulai Lagi dari Awal (Multi-Attempt) tanpa menghapus data sesi sebelumnya!
   // --------------------------------------------------------------------------
   app.post('/api/participant/load-event', requireParticipant, (req, res) => {
     const participantId = (req as Request & { participantId: string }).participantId;
-    const { setupQrCode, backupCourses, participantSnapshot } = req.body as {
+    const {
+      setupQrCode,
+      backupCourses,
+      participantSnapshot,
+      forceNewSession,
+    } = req.body as {
       setupQrCode?: string;
       backupCourses?: Course[];
       participantSnapshot?: ParticipantPublic;
+      forceNewSession?: boolean;
     };
 
     if (!setupQrCode) {
@@ -1225,21 +1690,36 @@ app.post('/api/participant/login', (req, res) => {
       return;
     }
 
-    let session = db.sessions.find(
+    const existingCourseSessions = db.sessions.filter(
       (s) => s.participantId === participantId && s.courseId === matchedCourse.id
     );
 
+    // Cari sesi yang BELUM SELESAI (NOT_STARTED atau ACTIVE) pada course ini.
+    // Jika sesi sebelumnya sudah FINISHED (atau peserta menekan tombol "Mulai Lagi dari Awal" / forceNewSession),
+    // JANGAN menimpa atau menghapus sesi lama — buat sesi baru (Attempt berikutnya) agar riwayat sebelumnya tetap utuh!
+    let session = forceNewSession
+      ? undefined
+      : [...existingCourseSessions]
+          .reverse()
+          .find((s) => s.status !== SessionStatus.FINISHED);
+
     if (!session) {
+      const nextAttemptNumber = existingCourseSessions.length + 1;
       session = {
         id: `ses-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         courseId: matchedCourse.id,
         participantId,
+        attemptNumber: nextAttemptNumber,
         status: SessionStatus.NOT_STARTED,
         loadedAt: new Date().toISOString(),
         validatedCheckpointIds: [],
         totalScore: 0,
       };
       db.sessions.push(session);
+      saveDb(db);
+    } else if (!session.attemptNumber) {
+      const idx = existingCourseSessions.findIndex((s) => s.id === session!.id);
+      session.attemptNumber = idx >= 0 ? idx + 1 : 1;
       saveDb(db);
     }
 
@@ -1327,10 +1807,14 @@ app.post('/api/participant/login', (req, res) => {
       );
 
       if (!existingSession) {
+        const prevAttempts = db.sessions.filter(
+          (s) => s.participantId === participantId && s.courseId === targetCourseId
+        ).length;
         existingSession = {
           id: targetSessionId,
           courseId: targetCourseId,
           participantId,
+          attemptNumber: sessionSnapshot?.attemptNumber || prevAttempts + 1,
           status: sessionSnapshot?.status || SessionStatus.NOT_STARTED,
           loadedAt: sessionSnapshot?.loadedAt || new Date().toISOString(),
           startedAt: sessionSnapshot?.startedAt,
@@ -1532,20 +2016,66 @@ app.post('/api/participant/login', (req, res) => {
   });
 
   // --------------------------------------------------------------------------
-  // ENDPOINT DASHBOARD ORGANIZER (COURSE MANAGEMENT, LIVE MONITORING, RESULT)
+  // ENDPOINT DASHBOARD ORGANIZER (ISOLASI COURSE & PESERTA PER ORGANIZER)
+  // Superadmin dapat melihat seluruh Course, Peserta, dan daftar akun Organizer.
+  // Organizer biasa HANYA melihat Course buatannya sendiri dan peserta yang ikut di Course buatannya.
   // --------------------------------------------------------------------------
-  app.get('/api/organizer/dashboard', requireOrganizer, (_req, res) => {
+  app.get('/api/organizer/dashboard', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
+    const visibleCourses = db.courses.filter((c) => canAccessCourse(c, auth));
+    const visibleCourseIds = new Set(visibleCourses.map((c) => c.id));
+
+    const visibleSessions = auth.isSuperAdmin
+      ? db.sessions
+      : db.sessions.filter((s) => visibleCourseIds.has(s.courseId));
+
+    const visibleReports = auth.isSuperAdmin
+      ? db.reports
+      : db.reports.filter((r) => visibleCourseIds.has(r.courseId));
+
+    const participantIdsInOrganizerCourses = new Set(
+      visibleSessions.map((s) => s.participantId)
+    );
+
+    const visibleParticipants = auth.isSuperAdmin
+      ? db.participants.map(toPublicParticipant)
+      : db.participants
+          .filter(
+            (p) =>
+              participantIdsInOrganizerCourses.has(p.id) ||
+              p.createdByOrganizerId === auth.organizerId
+          )
+          .map(toPublicParticipant);
+
+    const currentOrganizer: OrganizerPublic = auth.isSuperAdmin
+      ? getSuperAdminPublicProfile()
+      : {
+          id: auth.organizerId,
+          code: auth.code,
+          username: auth.username,
+          name: auth.name,
+          organization: auth.organization,
+          isSuperAdmin: false,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+        };
+
     res.json({
       serverTime: new Date().toISOString(),
-      courses: db.courses,
-      participants: db.participants.map(toPublicParticipant),
-      sessions: db.sessions,
-      reports: db.reports,
+      currentOrganizer,
+      organizers: auth.isSuperAdmin
+        ? (db.organizers || []).map(toPublicOrganizer)
+        : undefined,
+      courses: visibleCourses,
+      participants: visibleParticipants,
+      sessions: visibleSessions,
+      reports: visibleReports,
     });
   });
 
-  // Buat Course Baru (Hasil Penyatuan Event & Course — Lokasi Opsional + Durasi & Penalti)
+  // Buat Course Baru (Otomatis menempelkan identitas Organizer pembuatnya)
   app.post('/api/organizer/courses', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const {
       name,
       description,
@@ -1588,6 +2118,8 @@ app.post('/api/participant/login', (req, res) => {
       isActive: true,
       scoringEnabled: scoringEnabled !== undefined ? Boolean(scoringEnabled) : true,
       createdAt: new Date().toISOString(),
+      createdByOrganizerId: auth.organizerId,
+      createdByOrganizerName: auth.name,
       validationMethod: validationMethod || ValidationMethod.QR_ONLY,
       defaultGpsRadiusMeters: Number(defaultGpsRadiusMeters) || 35,
       enforceOrder: enforceOrder !== undefined ? Boolean(enforceOrder) : true,
@@ -1621,11 +2153,18 @@ app.post('/api/participant/login', (req, res) => {
     res.status(201).json({ course: newCourse });
   });
 
-  // Perbarui / Edit Pengaturan Course Aktif (Tanpa mengubah QR Code yang sudah ada)
+  // Perbarui / Edit Pengaturan Course Aktif (Hanya Pemilik Course atau Superadmin)
   app.put('/api/organizer/courses/:courseId', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const course = db.courses.find((c) => c.id === req.params.courseId);
     if (!course) {
       res.status(404).json({ error: 'Course tidak ditemukan.' });
+      return;
+    }
+    if (!canAccessCourse(course, auth)) {
+      res.status(403).json({
+        error: 'Anda hanya dapat mengelola Course yang Anda buat sendiri.',
+      });
       return;
     }
 
@@ -1702,18 +2241,34 @@ app.post('/api/participant/login', (req, res) => {
 
   // Sinkronisasi / Pulihkan Cadangan Course Organizer jika Server sempat Cold-Start
   app.post('/api/organizer/courses/sync-backup', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const { courses: backupCourses } = req.body as { courses?: Course[] };
     if (Array.isArray(backupCourses)) {
       const deletedSet = new Set(db.deletedCourseIds || []);
       let changed = false;
       backupCourses.forEach((bc) => {
         if (!bc || !bc.id || deletedSet.has(bc.id)) return;
-        const normalized = normalizeRestoredCourse(bc);
+        // Organizer biasa hanya memulihkan course miliknya sendiri
+        if (
+          !auth.isSuperAdmin &&
+          bc.createdByOrganizerId &&
+          bc.createdByOrganizerId !== auth.organizerId
+        ) {
+          return;
+        }
+        const normalized = normalizeRestoredCourse({
+          ...bc,
+          createdByOrganizerId:
+            bc.createdByOrganizerId || (auth.isSuperAdmin ? undefined : auth.organizerId),
+          createdByOrganizerName:
+            bc.createdByOrganizerName || (auth.isSuperAdmin ? undefined : auth.name),
+        });
         const existingIdx = db.courses.findIndex((c) => c.id === bc.id);
         if (existingIdx === -1) {
           db.courses.push(normalized);
           changed = true;
         } else if (
+          canAccessCourse(db.courses[existingIdx], auth) &&
           JSON.stringify(db.courses[existingIdx]) !== JSON.stringify(normalized)
         ) {
           db.courses[existingIdx] = normalized;
@@ -1727,13 +2282,22 @@ app.post('/api/participant/login', (req, res) => {
         saveDb(db);
       }
     }
-    res.json({ courses: db.courses });
+    const visibleCourses = db.courses.filter((c) => canAccessCourse(c, auth));
+    res.json({ courses: visibleCourses });
   });
 
-  // Hapus Course Aktif beserta sesi & laporannya
+  // Hapus Course Aktif beserta sesi & laporannya (Hanya Pemilik Course atau Superadmin)
   app.delete('/api/organizer/courses/:courseId', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const targetId = req.params.courseId;
     const courseIndex = db.courses.findIndex((c) => c.id === targetId);
+    if (courseIndex !== -1 && !canAccessCourse(db.courses[courseIndex], auth)) {
+      res.status(403).json({
+        error: 'Anda tidak memiliki izin untuk menghapus Course milik Organizer lain.',
+      });
+      return;
+    }
+
     if (!Array.isArray(db.deletedCourseIds)) {
       db.deletedCourseIds = [];
     }
@@ -1744,7 +2308,7 @@ app.post('/api/participant/login', (req, res) => {
       saveDb(db);
       res.json({
         deletedCourseId: targetId,
-        courses: db.courses,
+        courses: db.courses.filter((c) => canAccessCourse(c, auth)),
       });
       return;
     }
@@ -1757,7 +2321,7 @@ app.post('/api/participant/login', (req, res) => {
     saveDb(db);
     res.json({
       deletedCourseId,
-      courses: db.courses,
+      courses: db.courses.filter((c) => canAccessCourse(c, auth)),
     });
   });
 
@@ -1766,9 +2330,16 @@ app.post('/api/participant/login', (req, res) => {
     '/api/organizer/courses/:courseId/checkpoints',
     requireOrganizer,
     (req, res) => {
+      const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
       const course = db.courses.find((c) => c.id === req.params.courseId);
       if (!course) {
         res.status(404).json({ error: 'Course tidak ditemukan.' });
+        return;
+      }
+      if (!canAccessCourse(course, auth)) {
+        res.status(403).json({
+          error: 'Anda hanya dapat menambah Checkpoint pada Course yang Anda buat sendiri.',
+        });
         return;
       }
 
@@ -1824,9 +2395,16 @@ app.post('/api/participant/login', (req, res) => {
     '/api/organizer/courses/:courseId/checkpoints/:checkpointId',
     requireOrganizer,
     (req, res) => {
+      const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
       const course = db.courses.find((c) => c.id === req.params.courseId);
       if (!course) {
         res.status(404).json({ error: 'Course tidak ditemukan.' });
+        return;
+      }
+      if (!canAccessCourse(course, auth)) {
+        res.status(403).json({
+          error: 'Anda hanya dapat mengedit Checkpoint pada Course yang Anda buat sendiri.',
+        });
         return;
       }
 
@@ -1879,9 +2457,16 @@ app.post('/api/participant/login', (req, res) => {
     '/api/organizer/courses/:courseId/checkpoints/:checkpointId',
     requireOrganizer,
     (req, res) => {
+      const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
       const course = db.courses.find((c) => c.id === req.params.courseId);
       if (!course) {
         res.status(404).json({ error: 'Course tidak ditemukan.' });
+        return;
+      }
+      if (!canAccessCourse(course, auth)) {
+        res.status(403).json({
+          error: 'Anda hanya dapat menghapus Checkpoint pada Course yang Anda buat sendiri.',
+        });
         return;
       }
 
@@ -1898,8 +2483,9 @@ app.post('/api/participant/login', (req, res) => {
     }
   );
 
-  // Tambah Peserta oleh Organizer (Nama Tim Wajib & PIN di-hash)
+  // Tambah Peserta oleh Organizer (Nama Tim Wajib & PIN di-hash + terikat ke Organizer pembuat)
   app.post('/api/organizer/participants', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const { name, teamName, phone, pin } = req.body as {
       name?: string;
       teamName?: string;
@@ -1923,6 +2509,7 @@ app.post('/api/participant/login', (req, res) => {
       phone: phone?.trim() || '',
       bibNumber: `BRK-${nextNumber}`,
       registeredAt: new Date().toISOString(),
+      createdByOrganizerId: auth.organizerId,
       pinHash: hash,
       pinSalt: salt,
     };

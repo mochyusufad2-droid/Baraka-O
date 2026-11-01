@@ -900,6 +900,8 @@ export default function ParticipantView({
     ]
   );
 
+  const forceNewSessionRef = useRef<boolean>(false);
+
   // Fungsi Load Course langsung dari nilai QR yang dipindai
   const executeLoadCourseByQr = useCallback(
     async (qrValue: string) => {
@@ -922,6 +924,7 @@ export default function ParticipantView({
             setupQrCode: trimmed,
             backupCourses,
             participantSnapshot: participant,
+            forceNewSession: forceNewSessionRef.current,
           }),
         });
         const data = await res.json().catch(() => ({}));
@@ -933,21 +936,27 @@ export default function ParticipantView({
           return;
         }
 
+        forceNewSessionRef.current = false;
         setActiveCourse(data.course);
         setActiveSession(data.session);
         setConfirmingLeaveCourse(false);
         if (data.course.checkpoints.length > 0) {
           setSelectedCheckpointId(data.course.checkpoints[0].id);
         }
+        const attemptNum = data.session?.attemptNumber || 1;
+        const attemptLabel =
+          attemptNum > 1
+            ? ` (Percobaan #${attemptNum} / Re-run — Data sebelumnya tetap tersimpan)`
+            : '';
         triggerRunnerFeedback('success');
         showRunnerToast(
           'success',
           '🗺️ COURSE DIMUAT!',
-          `${data.course.name} siap. Silakan Scan Start QR saat siap lari.`
+          `${data.course.name}${attemptLabel} siap. Silakan Scan Start QR saat siap lari.`
         );
         setFeedbackBanner({
           type: 'success',
-          text: `Course "${data.course.name}" berhasil dimuat! Silakan tekan tombol SCAN START QR saat siap memulai.`,
+          text: `Course "${data.course.name}"${attemptLabel} berhasil dimuat! Silakan tekan tombol SCAN START QR saat siap memulai.`,
         });
       } catch {
         triggerRunnerFeedback('error');
@@ -1475,18 +1484,36 @@ export default function ParticipantView({
     onLogout?.();
   }
 
-  function handleConfirmLeaveCourse() {
+  async function handleRestartFromBeginning() {
+    // Pastikan semua laporan sesi sebelumnya sudah disinkronkan ke server sebelum membuka layar Scan Setup QR baru
+    if (activeSession && token && isEffectivelyOnline) {
+      await triggerSyncQueue(true);
+    }
+    forceNewSessionRef.current = true;
     setActiveCourse(null);
     setActiveSession(null);
+    setLocalReports([]);
     setSelectedCheckpointId('');
+    setSetupQrInput('');
     setStartQrInput('');
     setCheckpointQrInput('');
     setFinishQrInput('');
     setConfirmingLeaveCourse(false);
-    setFeedbackBanner({
-      type: 'warning',
-      text: 'Anda telah keluar dari Course. Silakan pindai Setup QR untuk memuat Course kembali.',
+    savePersistedParticipantState({
+      token,
+      participant,
+      activeCourse: null,
+      activeSession: null,
+      simulatedOffline,
     });
+    setFeedbackBanner({
+      type: 'success',
+      text: 'Data hasil lari sebelumnya tetap tersimpan aman di server. Silakan Scan Setup QR untuk memulai lagi dari awal!',
+    });
+  }
+
+  function handleConfirmLeaveCourse() {
+    void handleRestartFromBeginning();
   }
 
   async function handleLoadCourse(e: React.FormEvent) {
@@ -2404,6 +2431,12 @@ export default function ParticipantView({
                     </h3>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {activeSession.attemptNumber &&
+                      activeSession.attemptNumber > 1 && (
+                        <span className="rounded-md px-2 py-1 text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                          Attempt #{activeSession.attemptNumber} (Re-run)
+                        </span>
+                      )}
                     {scoreBreakdown.isOvertime && (
                       <span className="rounded-md px-2 py-1 text-[10px] font-mono font-extrabold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
                         OVERTIME +{scoreBreakdown.overtimeMinutes}M
@@ -2546,13 +2579,26 @@ export default function ParticipantView({
                         </div>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleDownloadProofCard}
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 hover:bg-sky-500 py-3 text-xs sm:text-sm font-bold text-white transition"
-                    >
-                      <Download className="h-4 w-4" /> Unduh Kartu Bukti Hasil (PNG)
-                    </button>
+                    <div className="space-y-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleDownloadProofCard}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 hover:bg-sky-500 py-3 text-xs sm:text-sm font-bold text-white transition cursor-pointer"
+                      >
+                        <Download className="h-4 w-4" /> Unduh Kartu Bukti Hasil (PNG)
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleRestartFromBeginning()}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 py-3 text-xs sm:text-sm font-extrabold text-white shadow-lg shadow-emerald-950/60 transition cursor-pointer"
+                      >
+                        <RefreshCw className="h-4 w-4" /> Mulai Lagi dari Awal (Scan Setup QR)
+                      </button>
+                      <p className="text-[11px] text-slate-400">
+                        Tenang, hasil lari Anda di atas tetap tersimpan di server &amp; Leaderboard panitia.
+                      </p>
+                    </div>
                   </div>
                 )}
 
@@ -2947,37 +2993,40 @@ export default function ParticipantView({
               </div>
 
               {/* ==============================================================
-                  TOMBOL KECIL "KELUAR COURSE" (JAUH DARI TOMBOL SCAN + KONFIRMASI)
+                  TOMBOL "MULAI LAGI DARI AWAL / GANTI COURSE" (DENGAN KONFIRMASI)
                  ============================================================== */}
               <div className="pt-4 flex flex-col items-center justify-center">
                 {!confirmingLeaveCourse ? (
                   <button
                     type="button"
                     onClick={() => setConfirmingLeaveCourse(true)}
-                    className="rounded px-2.5 py-1 text-[11px] text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition cursor-pointer"
                   >
-                    Keluar dari Course Ini (Ganti Course)
+                    <RefreshCw className="h-3.5 w-3.5 text-emerald-400" />
+                    Mulai Lagi dari Awal / Scan Setup QR Baru
                   </button>
                 ) : (
-                  <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-3 text-center space-y-2 max-w-xs">
-                    <p className="text-[11px] text-slate-300">
-                      Yakin ingin keluar dari Course{' '}
-                      <strong>{activeCourse.name}</strong>?
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/95 p-3.5 text-center space-y-2.5 max-w-xs shadow-lg">
+                    <p className="text-xs text-slate-200 leading-relaxed">
+                      Kembali ke menu <strong>Scan Setup QR</strong> untuk mulai dari awal?{' '}
+                      <span className="text-emerald-400 block mt-0.5 text-[11px]">
+                        (Data sesi yang sudah tercatat tetap disimpan di server)
+                      </span>
                     </p>
                     <div className="flex items-center justify-center gap-2">
                       <button
                         type="button"
                         onClick={() => setConfirmingLeaveCourse(false)}
-                        className="rounded bg-slate-800 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-slate-700"
+                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 cursor-pointer"
                       >
                         Batal
                       </button>
                       <button
                         type="button"
                         onClick={handleConfirmLeaveCourse}
-                        className="rounded bg-rose-950 border border-rose-500/40 px-2.5 py-1 text-[11px] font-semibold text-rose-300 hover:bg-rose-900"
+                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-500 cursor-pointer"
                       >
-                        Ya, Keluar Course
+                        Ya, Mulai Lagi (Scan Setup)
                       </button>
                     </div>
                   </div>
