@@ -57,6 +57,7 @@ import {
 } from '../../services/gpsTracker';
 import { PWAInstallBanner } from '../pwa/PWAInstallBanner';
 import { syncSessionToFirestore } from '../../firebase';
+import { ParticipantCourseMap } from './ParticipantCourseMap';
 
 function formatStopwatchSeconds(totalSeconds?: number): string {
   if (totalSeconds === undefined || totalSeconds === null || totalSeconds < 0) {
@@ -251,6 +252,8 @@ export default function ParticipantView({
   // Panel lipat untuk mode manual / simulasi agar layar pelari bersih tanpa perlu scroll
   const [showManualTools, setShowManualTools] = useState(false);
   const [showHistoryLogs, setShowHistoryLogs] = useState(false);
+  // Tab tampilan peserta di dalam Course: 'COURSE' (Daftar Pos) | 'MAP' (Peta Lintasan Peserta jika diizinkan Organizer)
+  const [runnerViewTab, setRunnerViewTab] = useState<'COURSE' | 'MAP'>('COURSE');
 
   // Konfirmasi keluar Course (ditempatkan jauh dari tombol Scan)
   const [confirmingLeaveCourse, setConfirmingLeaveCourse] = useState(false);
@@ -369,6 +372,17 @@ export default function ParticipantView({
       setSelectedCheckpointId(activeCourse.checkpoints[0].id);
     }
   }, [activeCourse, selectedCheckpointId]);
+
+  // Jika Organizer menonaktifkan tampilan peta untuk peserta, kembalikan tab ke 'COURSE'
+  useEffect(() => {
+    if (
+      activeCourse &&
+      activeCourse.allowParticipantMapVisibility === false &&
+      runnerViewTab === 'MAP'
+    ) {
+      setRunnerViewTab('COURSE');
+    }
+  }, [activeCourse, runnerViewTab]);
 
   const refreshLocalReports = useCallback(async () => {
     if (!activeSession) {
@@ -667,19 +681,24 @@ export default function ParticipantView({
 
   const triggerSilentPeriodicLocationUpdate = useCallback(async () => {
     if (!token || !participant || !activeSession || !activeCourse) return;
-    if (!activeCourse.allowParticipantMapVisibility) return;
 
     const perm = await checkGeolocationPermission();
     if (perm === 'unsupported' || perm === 'denied') return;
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
+        const coords = {
+          latitude: Number(pos.coords.latitude.toFixed(6)),
+          longitude: Number(pos.coords.longitude.toFixed(6)),
+          accuracy: Math.round(pos.coords.accuracy),
+        };
+        setGpsCoords(coords);
         const payload: PendingLocationPayload = {
           sessionId: activeSession.id,
           participantId: participant.id,
-          latitude: Number(pos.coords.latitude.toFixed(6)),
-          longitude: Number(pos.coords.longitude.toFixed(6)),
-          accuracyMeters: Math.round(pos.coords.accuracy),
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+          accuracyMeters: coords.accuracy,
           measuredAt: new Date(pos.timestamp || Date.now()).toISOString(),
         };
         lastPeriodicAttemptMsRef.current = Date.now();
@@ -723,7 +742,6 @@ export default function ParticipantView({
 
   useEffect(() => {
     if (!isSessionActivelyRunning || !activeCourse || !activeSession) return;
-    if (!activeCourse.allowParticipantMapVisibility) return;
 
     if (lastPeriodicAttemptMsRef.current === 0) {
       triggerSilentPeriodicLocationUpdate();
@@ -3100,84 +3118,145 @@ export default function ParticipantView({
                   </div>
                 )}
 
-                {/* DAFTAR RINGKAS POS CHECKPOINT */}
-                <div className="space-y-2 pt-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      Daftar Pos Checkpoint
-                    </span>
-                    <span className="text-[11px] text-slate-400">
-                      Hijau = Sudah Tercatat
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {activeCourse.checkpoints.map((cp) => {
-                      const isServerValidated =
-                        activeSession.validatedCheckpointIds.includes(cp.id);
-                      const localCpReport = [...localReports]
-                        .reverse()
-                        .find(
-                          (r) =>
-                            r.reportType === 'CHECKPOINT' &&
-                            r.checkpointId === cp.id &&
-                            r.syncStatus !== SyncStatus.REJECTED_SERVER
-                        );
-                      const isDone = isServerValidated || Boolean(localCpReport);
+                {/* ============================================================
+                    TAB NAVIGASI "Course | Map" (GAYA REFERENSI iOrienteering)
+                    Jika Organizer mengaktifkan "Tampilkan Peta ke Peserta",
+                    tab "Map" muncul di sebelah kanan tab "Course".
+                   ============================================================ */}
+                <div className="pt-1 space-y-3">
+                  <div className="grid grid-cols-2 border-b border-slate-800 bg-slate-950/90 rounded-t-xl overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setRunnerViewTab('COURSE')}
+                      className={`py-2.5 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 ${
+                        runnerViewTab === 'COURSE'
+                          ? 'border-amber-500 text-white bg-slate-900/90'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Course ({completedCheckpointCount}/
+                      {activeCourse.checkpoints.length})
+                    </button>
 
-                      return (
-                        <div
-                          key={cp.id}
-                          className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-xs transition ${
-                            isDone
-                              ? 'border-emerald-500/50 bg-emerald-950/35'
-                              : 'border-slate-800 bg-slate-950/90'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5">
-                            <span
-                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${
+                    {activeCourse.allowParticipantMapVisibility !== false ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRunnerViewTab('MAP');
+                          if (!gpsCoords) {
+                            void getQuickGpsCoordinates();
+                          }
+                        }}
+                        className={`py-2.5 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 ${
+                          runnerViewTab === 'MAP'
+                            ? 'border-amber-500 text-white bg-slate-900/90'
+                            : 'border-transparent text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Map
+                      </button>
+                    ) : (
+                      <div
+                        className="py-2.5 text-center text-[11px] font-medium text-slate-500 border-b-2 border-transparent select-none"
+                        title="Dinonaktifkan oleh Organizer untuk kompetisi navigasi murni"
+                      >
+                        Map (Nonaktif oleh Panitia)
+                      </div>
+                    )}
+                  </div>
+
+                  {runnerViewTab === 'MAP' &&
+                  activeCourse.allowParticipantMapVisibility !== false ? (
+                    <ParticipantCourseMap
+                      course={activeCourse}
+                      validatedCheckpointIds={effectiveValidatedCheckpointIds}
+                      runnerCoords={gpsCoords}
+                      onRefreshGps={() => handleReadDeviceGps()}
+                      isReadingGps={isReadingGps}
+                    />
+                  ) : (
+                    /* DAFTAR RINGKAS POS CHECKPOINT (GAYA KARTU #1, #2, #3 DENGAN BENDERA) */
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between px-1">
+                        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                          Daftar Pos Checkpoint
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          Hijau = Sudah Tercatat
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2">
+                        {activeCourse.checkpoints.map((cp) => {
+                          const isServerValidated =
+                            activeSession.validatedCheckpointIds.includes(cp.id);
+                          const localCpReport = [...localReports]
+                            .reverse()
+                            .find(
+                              (r) =>
+                                r.reportType === 'CHECKPOINT' &&
+                                r.checkpointId === cp.id &&
+                                r.syncStatus !== SyncStatus.REJECTED_SERVER
+                            );
+                          const isDone =
+                            isServerValidated || Boolean(localCpReport);
+
+                          return (
+                            <div
+                              key={cp.id}
+                              className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
                                 isDone
-                                  ? 'bg-emerald-500 text-slate-950'
-                                  : 'bg-slate-800 text-slate-400'
+                                  ? 'border-emerald-500/50 bg-emerald-950/35'
+                                  : 'border-slate-800 bg-slate-950/95'
                               }`}
                             >
-                              {isDone ? '✓' : cp.orderIndex}
-                            </span>
-                            <div>
-                              <span className="font-bold text-white">
-                                {cp.code}
-                              </span>
-                              {cp.name ? (
-                                <>
-                                  {' '}
-                                  —{' '}
-                                  <span className="text-slate-300">
-                                    {cp.name}
+                              <div className="flex items-center gap-3">
+                                <Flag
+                                  className={`h-4 w-4 shrink-0 ${
+                                    isDone
+                                      ? 'text-emerald-400 fill-emerald-400'
+                                      : 'text-slate-300 fill-slate-300'
+                                  }`}
+                                />
+                                <span className="font-mono text-xs font-bold text-slate-400 w-7">
+                                  #{cp.orderIndex}
+                                </span>
+                                <div>
+                                  <span className="font-extrabold text-sm text-white">
+                                    {cp.code}
                                   </span>
-                                </>
-                              ) : null}
-                              <div className="text-[11px] text-slate-400">
-                                {cp.points} Poin
+                                  {cp.name ? (
+                                    <>
+                                      {' '}
+                                      —{' '}
+                                      <span className="text-slate-300">
+                                        {cp.name}
+                                      </span>
+                                    </>
+                                  ) : null}
+                                  <div className="text-[11px] text-slate-400">
+                                    {cp.points} Poin
+                                  </div>
+                                </div>
+                              </div>
+                              <div>
+                                {isServerValidated ? (
+                                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                    <ShieldCheck className="h-3.5 w-3.5" /> Sah
+                                  </span>
+                                ) : localCpReport ? (
+                                  <SyncBadge status={localCpReport.syncStatus} />
+                                ) : (
+                                  <span className="text-[11px] text-slate-500">
+                                    ▸ Belum
+                                  </span>
+                                )}
                               </div>
                             </div>
-                          </div>
-                          <div>
-                            {isServerValidated ? (
-                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
-                                <ShieldCheck className="h-3.5 w-3.5" /> Sah
-                              </span>
-                            ) : localCpReport ? (
-                              <SyncBadge status={localCpReport.syncStatus} />
-                            ) : (
-                              <span className="text-[11px] text-slate-500">
-                                Belum
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

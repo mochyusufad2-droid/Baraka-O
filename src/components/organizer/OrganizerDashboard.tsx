@@ -40,6 +40,10 @@ import {
 } from '../../types';
 import { BulkQrPrintModal } from './QrPrintModals';
 import { CourseMapPlanner } from './CourseMapPlanner';
+import {
+  LiveMonitoringMap,
+  resolveSessionPositionOnCourse,
+} from './LiveMonitoringMap';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
@@ -221,6 +225,7 @@ export default function OrganizerDashboard({
   );
   const [newCourseRadiusInput, setNewCourseRadiusInput] = useState<string>('35');
   const [newCourseEnforceOrder, setNewCourseEnforceOrder] = useState<boolean>(true);
+  const [newCourseAllowMap, setNewCourseAllowMap] = useState<boolean>(true);
   const [newCourseDurationInput, setNewCourseDurationInput] = useState<string>('60');
   const [newCoursePenaltyEnabled, setNewCoursePenaltyEnabled] = useState<boolean>(true);
   const [newCoursePenaltyInput, setNewCoursePenaltyInput] = useState<string>('10');
@@ -239,11 +244,13 @@ export default function OrganizerDashboard({
   );
   const [editCourseRadiusInput, setEditCourseRadiusInput] = useState<string>('35');
   const [editCourseEnforceOrder, setEditCourseEnforceOrder] = useState<boolean>(true);
+  const [editCourseAllowMap, setEditCourseAllowMap] = useState<boolean>(true);
   const [editCourseDurationInput, setEditCourseDurationInput] = useState<string>('');
   const [editCoursePenaltyEnabled, setEditCoursePenaltyEnabled] = useState<boolean>(false);
   const [editCoursePenaltyInput, setEditCoursePenaltyInput] = useState<string>('10');
 
   const [confirmDeleteCourse, setConfirmDeleteCourse] = useState<Course | null>(null);
+  const [focusedMonitoringSessionId, setFocusedMonitoringSessionId] = useState<string | null>(null);
 
   // ==========================================================================
   // STATE FORM TAMBAH / EDIT CHECKPOINT (Input Poin & Radius string bebas angka 0)
@@ -663,6 +670,7 @@ export default function OrganizerDashboard({
     setEditCourseValidation(course.validationMethod);
     setEditCourseRadiusInput(String(course.defaultGpsRadiusMeters || 35));
     setEditCourseEnforceOrder(course.enforceOrder);
+    setEditCourseAllowMap(course.allowParticipantMapVisibility !== false);
     setEditCourseDurationInput(
       course.durationMinutes && course.durationMinutes > 0
         ? String(course.durationMinutes)
@@ -702,6 +710,7 @@ export default function OrganizerDashboard({
           validationMethod: editCourseValidation,
           defaultGpsRadiusMeters: parsedRadius,
           enforceOrder: editCourseEnforceOrder,
+          allowParticipantMapVisibility: editCourseAllowMap,
           durationMinutes: parsedDuration,
           overtimePenaltyEnabled: editCoursePenaltyEnabled,
           overtimePenaltyPointsPerMinute: parsedPenalty,
@@ -1146,7 +1155,7 @@ export default function OrganizerDashboard({
           validationMethod: newCourseValidation,
           defaultGpsRadiusMeters: parsedRadius,
           enforceOrder: newCourseEnforceOrder,
-          allowParticipantMapVisibility: true,
+          allowParticipantMapVisibility: newCourseAllowMap,
           durationMinutes: parsedDuration,
           overtimePenaltyEnabled: newCoursePenaltyEnabled,
           overtimePenaltyPointsPerMinute: parsedPenalty,
@@ -2382,6 +2391,25 @@ export default function OrganizerDashboard({
                   </label>
                 </div>
 
+                <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer p-2.5 rounded-lg bg-slate-900/80 border border-emerald-500/30">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={newCourseAllowMap}
+                      onChange={(e) => setNewCourseAllowMap(e.target.checked)}
+                      className="rounded border-slate-700"
+                    />
+                    <div>
+                      <span className="font-semibold text-emerald-300">
+                        Tampilkan Peta ke Peserta (Tab Course | Map)
+                      </span>
+                      <div className="text-[10px] text-slate-400">
+                        Matikan jika lomba mewajibkan navigasi peta kertas murni tanpa peta di HP peserta.
+                      </div>
+                    </div>
+                  </div>
+                </label>
+
                 <button
                   type="submit"
                   className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition flex items-center justify-center gap-1.5"
@@ -2763,7 +2791,7 @@ export default function OrganizerDashboard({
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-sky-500/20">
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-4">
                       <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
                         <input
                           type="checkbox"
@@ -2785,6 +2813,17 @@ export default function OrganizerDashboard({
                           className="rounded border-slate-700"
                         />
                         <span>Gunakan Sistem Poin</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-emerald-300 font-semibold cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editCourseAllowMap}
+                          onChange={(e) =>
+                            setEditCourseAllowMap(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Tampilkan Peta ke Peserta (Course | Map)</span>
                       </label>
                     </div>
 
@@ -3083,7 +3122,7 @@ export default function OrganizerDashboard({
       {/* TAB 3: LIVE MONITORING */}
       {activeTab === 'MONITORING' && dashboard && (
         <div className="space-y-6">
-          <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+          <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
                 <span className="text-[11px] font-mono uppercase text-emerald-400 flex items-center gap-1.5">
@@ -3091,7 +3130,7 @@ export default function OrganizerDashboard({
                   Real-Time Telemetry &amp; Last Known Position (~5 Menit)
                 </span>
                 <h2 className="text-lg font-bold text-white mt-0.5">
-                  Pemantauan Peserta Aktif di Lapangan
+                  Pemantauan Pergerakan Peserta di Lapangan
                 </h2>
               </div>
               <div className="text-xs text-slate-400">
@@ -3099,9 +3138,22 @@ export default function OrganizerDashboard({
                 <strong className="text-slate-200">
                   1 posisi terakhir per sesi
                 </strong>{' '}
-                (berjalan otomatis di latar belakang perangkat peserta).
+                (dikirim tiap <strong>5 menit</strong> &amp; saat scan pos — hemat baterai &amp; kuota).
               </div>
             </div>
+
+            {/* PETA INTERAKTIF LIVE MONITORING PERGERAKAN PESERTA */}
+            <LiveMonitoringMap
+              course={selectedCourse || dashboard.courses[0] || null}
+              sessions={dashboard.sessions.filter(
+                (s: ParticipantSession) =>
+                  !selectedCourse || s.courseId === selectedCourse.id
+              )}
+              participants={dashboard.participants}
+              focusedSessionId={focusedMonitoringSessionId}
+              onSelectSession={(sid) => setFocusedMonitoringSessionId(sid)}
+              nowTick={nowTick}
+            />
 
             {dashboard.sessions.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-sm">
@@ -3140,16 +3192,22 @@ export default function OrganizerDashboard({
                         liveElapsedSec > course.durationMinutes * 60
                     );
 
-                    const isLocationStale =
-                      sess.status === SessionStatus.ACTIVE &&
-                      (!sess.lastLocation ||
-                        nowTick - Date.parse(sess.lastLocation.measuredAt) >
-                          6 * 60 * 1000);
+                    const resolvedPos = resolveSessionPositionOnCourse(
+                      sess,
+                      course,
+                      nowTick
+                    );
+
+                    const isLocationStale = Boolean(resolvedPos?.isStale);
 
                     return (
                       <div
                         key={sess.id}
-                        className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 flex flex-col justify-between gap-4"
+                        className={`p-4 rounded-xl bg-slate-900/90 border flex flex-col justify-between gap-4 transition ${
+                          focusedMonitoringSessionId === sess.id
+                            ? 'border-emerald-400 ring-1 ring-emerald-400/40'
+                            : 'border-slate-800'
+                        }`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -3158,10 +3216,10 @@ export default function OrganizerDashboard({
                                 {participant?.bibNumber || '?'}
                               </span>
                               <span className="font-bold text-white text-sm">
-                                {participant?.name || 'Peserta'}
+                                {participant?.teamName || participant?.name || 'Tim'}
                               </span>
-                              <span className="text-xs text-emerald-300 font-medium">
-                                ({participant?.teamName || '-'})
+                              <span className="text-xs text-slate-300">
+                                ({participant?.name || '-'})
                               </span>
                             </div>
                             <div className="text-xs text-slate-400 mt-0.5">
@@ -3234,44 +3292,62 @@ export default function OrganizerDashboard({
                           <div className="flex items-center gap-2">
                             <Navigation
                               className={`w-4 h-4 shrink-0 ${
-                                sess.lastLocation
+                                resolvedPos
                                   ? 'text-sky-400'
                                   : 'text-slate-600'
                               }`}
                             />
-                            {sess.lastLocation ? (
+                            {resolvedPos ? (
                               <div>
+                                <div className="font-semibold text-emerald-300 text-[11px]">
+                                  {resolvedPos.sourceLabel}
+                                </div>
                                 <div className="font-mono text-slate-200">
-                                  {sess.lastLocation.latitude.toFixed(5)},{' '}
-                                  {sess.lastLocation.longitude.toFixed(5)}
-                                  {sess.lastLocation.accuracyMeters
+                                  {resolvedPos.latitude.toFixed(5)},{' '}
+                                  {resolvedPos.longitude.toFixed(5)}
+                                  {resolvedPos.accuracyMeters
                                     ? ` (±${Math.round(
-                                        sess.lastLocation.accuracyMeters
+                                        resolvedPos.accuracyMeters
                                       )}m)`
                                     : ''}
                                 </div>
-                                <div className="text-[11px] text-slate-400">
-                                  Diperbarui:{' '}
-                                  {formatTimeAgo(sess.lastLocation.measuredAt)}
-                                </div>
+                                {resolvedPos.measuredAt && (
+                                  <div className="text-[11px] text-slate-400">
+                                    Diperbarui:{' '}
+                                    {formatTimeAgo(resolvedPos.measuredAt)}
+                                  </div>
+                                )}
                               </div>
                             ) : (
                               <span className="text-slate-500">
-                                Belum ada laporan posisi GPS dari perangkat
-                                peserta
+                                Menunggu peserta Scan Start atau mengirim sinyal GPS
                               </span>
                             )}
                           </div>
 
-                          {isLocationStale && (
-                            <span
-                              className="flex items-center gap-1 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded"
-                              title="Lebih dari 6 menit belum ada update lokasi berkala"
-                            >
-                              <AlertTriangle className="w-3 h-3" />
-                              &gt;5m
-                            </span>
-                          )}
+                          <div className="flex items-center gap-1.5">
+                            {isLocationStale && (
+                              <span
+                                className="flex items-center gap-1 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded"
+                                title="Lebih dari 6 menit belum ada update lokasi berkala"
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                &gt;5m
+                              </span>
+                            )}
+                            {resolvedPos && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setFocusedMonitoringSessionId(sess.id)
+                                }
+                                className="inline-flex items-center gap-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 px-2.5 py-1.5 text-[11px] font-semibold text-sky-300 transition cursor-pointer"
+                              >
+                                <MapPin className="w-3 h-3" />
+                                Lihat di Peta
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     );

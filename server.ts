@@ -1090,10 +1090,27 @@ function loadDb(): DatabaseSchema {
   }
 }
 
+let telemetryDiskTimer: ReturnType<typeof setTimeout> | null = null;
+
 function saveDb(dbToSave: DatabaseSchema): void {
   recoverOrphanedOrganizersFromCourses(dbToSave);
   saveDbToDiskOnly(dbToSave);
   scheduleCloudSync(dbToSave);
+}
+
+/**
+ * Penyimpanan ringan khusus telemetri lokasi GPS (~5 menit):
+ * Langsung ter-update di memori RAM untuk Live Monitoring Organizer,
+ * di-debounce ke disk lokal (1,5 detik), dan tidak menghabiskan kuota tulis harian Cloud Firestore.
+ */
+function saveDbTelemetryOnly(dbToSave: DatabaseSchema): void {
+  if (telemetryDiskTimer) {
+    clearTimeout(telemetryDiskTimer);
+  }
+  telemetryDiskTimer = setTimeout(() => {
+    telemetryDiskTimer = null;
+    saveDbToDiskOnly(dbToSave);
+  }, 1500);
 }
 
 const db: DatabaseSchema = loadDb();
@@ -1773,9 +1790,10 @@ function processSingleReport(
     recalculateSessionScore(session, course);
 
     if (
-      course.allowParticipantMapVisibility &&
       typeof payload.latitude === 'number' &&
-      typeof payload.longitude === 'number'
+      typeof payload.longitude === 'number' &&
+      !Number.isNaN(payload.latitude) &&
+      !Number.isNaN(payload.longitude)
     ) {
       session.lastLocation = {
         participantId: session.participantId,
@@ -2720,14 +2738,6 @@ app.post('/api/participant/login', (req, res) => {
       return;
     }
 
-    const course = db.courses.find((c) => c.id === session.courseId);
-    if (course && !course.allowParticipantMapVisibility) {
-      res.status(403).json({
-        error: 'Course ini menonaktifkan tampilan lokasi peserta pada peta monitoring.',
-      });
-      return;
-    }
-
     const receivedAt = new Date().toISOString();
     const safeMeasuredAt =
       measuredAt && !Number.isNaN(Date.parse(measuredAt)) ? measuredAt : receivedAt;
@@ -2743,7 +2753,7 @@ app.post('/api/participant/login', (req, res) => {
     };
 
     session.lastLocation = lastLocation;
-    saveDb(db);
+    saveDbTelemetryOnly(db);
 
     res.json({
       status: 'ok',
