@@ -3609,7 +3609,16 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { maxAge: '1d' }));
+
+    // Cegah API 404 mengembalikan HTML index.html (mencegah error Unexpected token '<')
+    app.all('/api/*', (req, res) => {
+      res.status(404).json({
+        error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

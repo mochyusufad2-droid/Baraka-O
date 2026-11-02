@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
+    "start:standalone": "node server.js",
     "build": "vite build",
+    "build:server": "esbuild server.ts --platform=node --format=esm --target=node18 --outfile=server.js --packages=external",
+    "build:all": "vite build && esbuild server.ts --platform=node --format=esm --target=node18 --outfile=server.js --packages=external",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
