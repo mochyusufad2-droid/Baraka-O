@@ -507,11 +507,17 @@ export default function ParticipantView({
         return;
       }
       if (!res.ok) return;
-      const data = (await res.json()) as {
+      const rawText = await res.text().catch(() => '');
+      let data: {
         session?: ParticipantSession;
         course?: Course | null;
         sessionMissingOnServer?: boolean;
       };
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        return;
+      }
       if (data.course) {
         setActiveCourse((prev) => {
           if (prev && JSON.stringify(prev) === JSON.stringify(data.course)) {

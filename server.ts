@@ -568,15 +568,28 @@ function saveDbToDiskOnly(dbToSave: DatabaseSchema): void {
 const CORE_VAULT_KEY = 'brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_core_v2';
 const RACE_VAULT_KEY = 'brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_race_v2';
 
-setFirestoreLogLevel('silent');
-const firebaseServerApp =
-  getFirebaseApps().length > 0
-    ? getFirebaseApps()[0]
-    : initializeFirebaseApp(firebaseAppletConfig, 'baraka-server-vault');
-const cloudFirestore = getCloudFirestore(
-  firebaseServerApp,
-  firebaseAppletConfig.firestoreDatabaseId
-);
+let cloudFirestore: any = null;
+try {
+  const isStandalone = process.env.STANDALONE_MODE === 'true';
+  const hasConfig = Boolean(
+    firebaseAppletConfig &&
+    typeof firebaseAppletConfig === 'object' &&
+    (firebaseAppletConfig as { projectId?: string }).projectId
+  );
+  if (!isStandalone && hasConfig) {
+    setFirestoreLogLevel('silent');
+    const firebaseServerApp =
+      getFirebaseApps().length > 0
+        ? getFirebaseApps()[0]
+        : initializeFirebaseApp(firebaseAppletConfig, 'baraka-server-vault');
+    const dbId = (firebaseAppletConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
+    cloudFirestore = dbId
+      ? getCloudFirestore(firebaseServerApp, dbId)
+      : getCloudFirestore(firebaseServerApp);
+  }
+} catch {
+  cloudFirestore = null;
+}
 
 interface CoreVaultPayload {
   organizerAuth?: { pinHash: string; pinSalt: string };
@@ -601,6 +614,7 @@ let cloudHydrationPromise: Promise<void> | null = null;
 const CLOUD_HYDRATE_TTL_MS = 2500;
 
 async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
+  if (!cloudFirestore) return;
   isPushingToCloud = true;
   try {
     const nowIso = new Date().toISOString();
@@ -1116,6 +1130,7 @@ function saveDbTelemetryOnly(dbToSave: DatabaseSchema): void {
 const db: DatabaseSchema = loadDb();
 
 async function hydrateDbFromCloud(force = false): Promise<void> {
+  if (!cloudFirestore) return;
   if (!force && isCloudHydrated && Date.now() - lastCloudHydratedAt < CLOUD_HYDRATE_TTL_MS) {
     return;
   }
@@ -3457,6 +3472,98 @@ app.post('/api/participant/login', (req, res) => {
 
     res.json({
       deletedSessionId: sessionId,
+    });
+  });
+
+  // ==========================================================================
+  // MANAJEMEN DATABASE PENUH (EXPORT & RESTORE 1-KLIK UNTUK HOSTING SENDIRI)
+  // ==========================================================================
+
+  // Export Full Database Snapshot (JSON) - Khusus Superadmin
+  app.get('/api/organizer/database/export', requireSuperAdmin, (_req, res) => {
+    const backupSnapshot = {
+      exportVersion: 'BARAKA-DB-V2',
+      exportedAt: new Date().toISOString(),
+      courses: db.courses,
+      organizers: db.organizers || [],
+      participants: db.participants || [],
+      sessions: db.sessions || [],
+      reports: db.reports || [],
+      deletedCourseIds: db.deletedCourseIds || [],
+      deletedOrganizerIds: db.deletedOrganizerIds || [],
+      deletedSessionIds: db.deletedSessionIds || [],
+    };
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="baraka-full-database-${dateStr}.json"`
+    );
+    res.send(JSON.stringify(backupSnapshot, null, 2));
+  });
+
+  // Restore / Import Full Database Snapshot (JSON) - Khusus Superadmin
+  app.post('/api/organizer/database/import', requireSuperAdmin, (req, res) => {
+    const payload = req.body as Partial<DatabaseSchema>;
+    if (!payload || typeof payload !== 'object') {
+      res.status(400).json({ error: 'File data backup tidak valid.' });
+      return;
+    }
+
+    if (!Array.isArray(payload.courses)) {
+      res.status(400).json({
+        error: 'Format data backup tidak sesuai. Properti "courses" tidak ditemukan.',
+      });
+      return;
+    }
+
+    // Perbarui / Pulihkan database
+    if (Array.isArray(payload.courses)) {
+      db.courses = payload.courses.map(normalizeRestoredCourse);
+    }
+    if (Array.isArray(payload.organizers)) {
+      db.organizers = payload.organizers;
+    }
+    if (Array.isArray(payload.participants)) {
+      db.participants = payload.participants;
+    }
+    if (Array.isArray(payload.sessions)) {
+      db.sessions = payload.sessions;
+    }
+    if (Array.isArray(payload.reports)) {
+      db.reports = payload.reports;
+    }
+    if (Array.isArray(payload.deletedCourseIds)) {
+      db.deletedCourseIds = payload.deletedCourseIds;
+    }
+    if (Array.isArray(payload.deletedOrganizerIds)) {
+      db.deletedOrganizerIds = payload.deletedOrganizerIds;
+    }
+    if (Array.isArray(payload.deletedSessionIds)) {
+      db.deletedSessionIds = payload.deletedSessionIds;
+    }
+
+    // Hitung ulang skor setiap sesi
+    db.courses.forEach((course) => {
+      db.sessions
+        .filter((s) => s.courseId === course.id)
+        .forEach((s) => recalculateSessionScore(s, course));
+    });
+
+    saveDb(db);
+    saveDbToDiskOnly(db);
+    void pushDbToCloudNow(db);
+
+    res.json({
+      success: true,
+      message: 'Database berhasil dipulihkan secara penuh.',
+      stats: {
+        coursesCount: db.courses.length,
+        organizersCount: (db.organizers || []).length,
+        participantsCount: db.participants.length,
+        sessionsCount: db.sessions.length,
+        reportsCount: db.reports.length,
+      },
     });
   });
 

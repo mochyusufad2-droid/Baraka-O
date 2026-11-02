@@ -555,11 +555,20 @@ export function CourseMapPlanner({
           q
         )}`
       );
-      const data = (await res.json()) as Array<{
+      const rawText = await res.text().catch(() => '');
+      let data: Array<{
         lat: string;
         lon: string;
         display_name: string;
-      }>;
+      }> = [];
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        setSearchStatus(
+          'Layanan pencarian lokasi sedang padat. Silakan geser peta secara manual.'
+        );
+        return;
+      }
       if (!Array.isArray(data) || data.length === 0) {
         setSearchStatus('Lokasi tidak ditemukan. Coba kata kunci kota/tempat lain.');
         return;

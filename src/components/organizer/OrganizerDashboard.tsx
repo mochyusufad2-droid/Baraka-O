@@ -24,6 +24,9 @@ import {
   Check,
   Timer,
   Maximize2,
+  Database,
+  Download,
+  Upload,
 } from 'lucide-react';
 import {
   Course,
@@ -281,6 +284,17 @@ export default function OrganizerDashboard({
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
   const [isSpectatorFullscreen, setIsSpectatorFullscreen] = useState<boolean>(false);
 
+  // Full Database Backup & Restore States (Migrasi Mandiri)
+  const [isExportingDb, setIsExportingDb] = useState<boolean>(false);
+  const [isRestoringDb, setIsRestoringDb] = useState<boolean>(false);
+  const [pendingRestoreData, setPendingRestoreData] = useState<any | null>(null);
+  const [restoreStats, setRestoreStats] = useState<{
+    coursesCount: number;
+    participantsCount: number;
+    sessionsCount: number;
+    exportedAt?: string;
+  } | null>(null);
+
   // Form States for Superadmin Organizer Account Creation & Management
   const [orgNameInput, setOrgNameInput] = useState('');
   const [orgUsernameInput, setOrgUsernameInput] = useState('');
@@ -366,7 +380,13 @@ export default function OrganizerDashboard({
         return;
       }
       if (!res.ok) throw new Error('Gagal memuat data dashboard organizer.');
-      const data: DashboardApiData = await res.json();
+      const text = await res.text();
+      let data: DashboardApiData;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error('Server merespon format tidak valid (HTML/non-JSON).');
+      }
 
       // Cek apakah ada Course, Organizer, Peserta, atau Sesi di cadangan lokal browser (Smart Merge)
       // yang belum ada di server (mis. setelah serverless cold-start saat jaringan offline)
@@ -719,7 +739,7 @@ export default function OrganizerDashboard({
           overtimePenaltyPointsPerMinute: parsedPenalty,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Gagal memperbarui Course.');
       if (data.course) {
         applyUpdatedCourseLocally(data.course);
@@ -727,7 +747,7 @@ export default function OrganizerDashboard({
       }
       setIsEditingCourse(false);
       await fetchDashboard();
-      showTemporarySuccess(`Course "${data.course.name}" berhasil diperbarui secara real-time!`);
+      showTemporarySuccess(`Course "${data.course?.name || ''}" berhasil diperbarui secara real-time!`);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'Gagal memperbarui Course'
@@ -749,7 +769,7 @@ export default function OrganizerDashboard({
           headers: { Authorization: `Bearer ${token}` },
         }
       );
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Gagal menghapus Course.');
       setConfirmDeleteCourse(null);
       setIsEditingCourse(false);
@@ -774,7 +794,7 @@ export default function OrganizerDashboard({
           },
           body: JSON.stringify({ startLocation: loc }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error('Gagal menyimpan titik Start');
         if (data.course) {
           applyUpdatedCourseLocally(data.course);
@@ -806,7 +826,7 @@ export default function OrganizerDashboard({
           },
           body: JSON.stringify({ finishLocation: loc }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error('Gagal menyimpan titik Finish');
         if (data.course) {
           applyUpdatedCourseLocally(data.course);
@@ -1164,7 +1184,7 @@ export default function OrganizerDashboard({
           overtimePenaltyPointsPerMinute: parsedPenalty,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Gagal membuat Course baru');
       const created: Course = data.course;
       if (created?.id) {
@@ -1226,7 +1246,7 @@ export default function OrganizerDashboard({
             }),
           }
         );
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok)
           throw new Error(data.error || 'Gagal memperbarui checkpoint');
         if (data.course) {
@@ -1257,7 +1277,7 @@ export default function OrganizerDashboard({
             }),
           }
         );
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok)
           throw new Error(data.error || 'Gagal menambahkan checkpoint');
         if (data.course) {
@@ -1287,7 +1307,7 @@ export default function OrganizerDashboard({
           headers: { Authorization: `Bearer ${token}` },
         }
       );
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (data?.course) {
         applyUpdatedCourseLocally(data.course);
       }
@@ -1328,7 +1348,7 @@ export default function OrganizerDashboard({
           pin: partPin,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setPartStatusMsg(data.error || 'Gagal mendaftarkan peserta.');
         return;
@@ -1519,6 +1539,95 @@ export default function OrganizerDashboard({
       await fetchDashboard();
     } catch {
       setErrorMsg('Kesalahan jaringan saat menghapus akun Organizer.');
+    }
+  };
+
+  // Superadmin: Export Full Database Backup (.json)
+  const handleExportFullDatabase = async () => {
+    if (!token) return;
+    setIsExportingDb(true);
+    try {
+      const res = await fetch('/api/organizer/database/export', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(err.error || 'Gagal mengekspor database.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      link.download = `baraka-full-database-${dateStr}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      showTemporarySuccess('File database berhasil diunduh ke perangkat Anda.');
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat mengunduh database.');
+    } finally {
+      setIsExportingDb(false);
+    }
+  };
+
+  // Superadmin: Baca File JSON Cadangan untuk Konfirmasi Restore
+  const handleSelectRestoreFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.courses)) {
+          setErrorMsg('File bukan backup database BARAKA yang valid (format courses tidak ditemukan).');
+          return;
+        }
+        setPendingRestoreData(parsed);
+        setRestoreStats({
+          coursesCount: parsed.courses?.length || 0,
+          participantsCount: parsed.participants?.length || 0,
+          sessionsCount: parsed.sessions?.length || 0,
+          exportedAt: parsed.exportedAt,
+        });
+      } catch {
+        setErrorMsg('Gagal membaca file JSON. Pastikan file tidak korup.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Superadmin: Eksekusi Restore Database ke Server
+  const handleExecuteRestoreDatabase = async () => {
+    if (!token || !pendingRestoreData) return;
+    setIsRestoringDb(true);
+    try {
+      const res = await fetch('/api/organizer/database/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(pendingRestoreData),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal memulihkan database.');
+        return;
+      }
+      setPendingRestoreData(null);
+      setRestoreStats(null);
+      showTemporarySuccess(
+        `Database berhasil dipulihkan! (${data.stats?.coursesCount || 0} Course, ${data.stats?.participantsCount || 0} Peserta, ${data.stats?.sessionsCount || 0} Sesi).`
+      );
+      await fetchDashboard();
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat memulihkan database.');
+    } finally {
+      setIsRestoringDb(false);
     }
   };
 
@@ -3967,6 +4076,69 @@ export default function OrganizerDashboard({
                 </div>
               )}
             </div>
+
+            {/* Kartu Manajemen Database Mandiri (Full Backup & Restore 1-Klik) */}
+            <div className="lg:col-span-3 bg-[#111827] border border-amber-500/30 rounded-xl p-5 space-y-4 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
+                    <Database className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                      Kesiapan Hosting Mandiri (Self-Hosted)
+                    </span>
+                    <h2 className="text-base font-bold text-white">
+                      Pencadangan &amp; Pemulihan Database Penuh (100% Mandiri)
+                    </h2>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isExportingDb}
+                    onClick={handleExportFullDatabase}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-amber-500/20"
+                  >
+                    <Download className={`w-4 h-4 ${isExportingDb ? 'animate-bounce' : ''}`} />
+                    {isExportingDb ? 'Mengekspor...' : 'Download Full Database (.json)'}
+                  </button>
+
+                  <label className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition cursor-pointer border border-slate-700">
+                    <Upload className="w-4 h-4 text-emerald-400" />
+                    <span>Upload &amp; Pulihkan Database (.json)</span>
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleSelectRestoreFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-300">
+                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
+                  <div className="font-bold text-amber-300 mb-1">📦 1 File untuk Semua Data</div>
+                  <p className="text-slate-400 leading-relaxed text-[11px]">
+                    File backup menyimpan seluruh Course, titik pos, nomor BIB peserta, akun panitia, dan riwayat skor lomba tanpa ada yang tertinggal.
+                  </p>
+                </div>
+                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
+                  <div className="font-bold text-emerald-300 mb-1">🚀 Bebas Firebase &amp; Vercel</div>
+                  <p className="text-slate-400 leading-relaxed text-[11px]">
+                    Di hosting/domain pribadi Anda, database tersimpan di harddisk permanen server Anda sendiri tanpa batasan kuota atau biaya tambahan pihak ketiga.
+                  </p>
+                </div>
+                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
+                  <div className="font-bold text-purple-300 mb-1">🛡️ Perlindungan Human Error</div>
+                  <p className="text-slate-400 leading-relaxed text-[11px]">
+                    Sebelum lomba atau sebelum mengedit data penting, unduh backup ke laptop Anda sebagai arsip aman yang bisa dipulihkan kapan saja.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -4035,6 +4207,89 @@ export default function OrganizerDashboard({
           initialCourseId={selectedCourse?.id}
           onClose={() => setIsSpectatorFullscreen(false)}
         />
+      )}
+
+      {/* Modal Konfirmasi Restore Database (100% Mandiri) */}
+      {pendingRestoreData && restoreStats && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-amber-500/50 bg-slate-900 p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-amber-400">
+              <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30">
+                <Database className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  Konfirmasi Pemulihan Database
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  Pulihkan Seluruh Database Lomba?
+                </h3>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5 text-xs font-mono">
+              <div className="text-slate-400 font-semibold mb-1">
+                Data yang terdeteksi di dalam file backup:
+              </div>
+              <div className="flex justify-between text-slate-200">
+                <span>• Total Course:</span>
+                <strong className="text-amber-300">
+                  {restoreStats.coursesCount} Course
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-200">
+                <span>• Total Peserta Terdaftar:</span>
+                <strong className="text-emerald-300">
+                  {restoreStats.participantsCount} Peserta
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-200">
+                <span>• Total Sesi Hasil Lari:</span>
+                <strong className="text-sky-300">
+                  {restoreStats.sessionsCount} Sesi
+                </strong>
+              </div>
+              {restoreStats.exportedAt && (
+                <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-800">
+                  Waktu Ekspor: {new Date(restoreStats.exportedAt).toLocaleString('id-ID')}
+                </div>
+              )}
+            </div>
+
+            <p className="text-xs text-rose-300 leading-relaxed bg-rose-500/10 border border-rose-500/30 p-2.5 rounded-lg">
+              ⚠️ <strong>Perhatian:</strong> Database server akan diperbarui mengikuti isi file backup ini. Seluruh data Course, Pos, Peserta, dan Sesi akan disinkronkan seketika.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isRestoringDb}
+                onClick={() => {
+                  setPendingRestoreData(null);
+                  setRestoreStats(null);
+                }}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isRestoringDb}
+                onClick={handleExecuteRestoreDatabase}
+                className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-500/20"
+              >
+                {isRestoringDb ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Memulihkan Database...
+                  </>
+                ) : (
+                  'Ya, Pulihkan Database Sekarang'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

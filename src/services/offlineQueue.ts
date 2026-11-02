@@ -826,16 +826,31 @@ export async function syncPendingReportsWithServer(params: {
       }),
     });
 
+    const rawText = await response.text().catch(() => '');
     if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
-      throw new Error(errBody.error || `Gagal menghubungi server (HTTP ${response.status})`);
+      let errBody: { error?: string } = {};
+      try {
+        errBody = JSON.parse(rawText);
+      } catch {
+        errBody = {};
+      }
+      throw new Error(
+        errBody.error || `Gagal menghubungi server (HTTP ${response.status})`
+      );
     }
 
-    const data = (await response.json()) as {
+    let data: {
       processedAt: string;
       results: Array<{ report: CheckpointReport; isDuplicate: boolean }>;
       session: ParticipantSession | null;
     };
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      throw new Error(
+        'Respon server bukan format JSON yang valid (kemungkinan jaringan proxy/server sedang restart).'
+      );
+    }
 
     const verifiedReports = data.results.map((item) => item.report);
     await saveReportsLocally(verifiedReports);
