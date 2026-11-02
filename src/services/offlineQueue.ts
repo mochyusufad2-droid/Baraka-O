@@ -1,6 +1,9 @@
 import {
   CheckpointReport,
   Course,
+  OrganizerBackupRecord,
+  OrganizerVaultBackup,
+  ParticipantBackupRecord,
   ParticipantPublic,
   ParticipantSession,
   SyncStatus,
@@ -16,6 +19,7 @@ const LS_PARTICIPANT_STATE_KEY = 'baraka_participant_state_v2';
 export interface PersistedParticipantState {
   token: string | null;
   participant: ParticipantPublic | null;
+  participantBackup?: ParticipantBackupRecord | null;
   activeCourse: Course | null;
   activeSession: ParticipantSession | null;
   simulatedOffline: boolean;
@@ -127,6 +131,7 @@ export function loadPersistedParticipantState(): PersistedParticipantState {
       return {
         token: null,
         participant: null,
+        participantBackup: null,
         activeCourse: null,
         activeSession: null,
         simulatedOffline: false,
@@ -137,6 +142,7 @@ export function loadPersistedParticipantState(): PersistedParticipantState {
     return {
       token: null,
       participant: null,
+      participantBackup: null,
       activeCourse: null,
       activeSession: null,
       simulatedOffline: false,
@@ -203,35 +209,316 @@ export function clearPersistedParticipantState(): void {
 }
 
 const LS_ORGANIZER_COURSES_BACKUP_KEY = 'baraka_organizer_courses_backup_v1';
+const LS_ORGANIZER_VAULT_BACKUP_KEY = 'baraka_organizer_vault_backup_v2';
 
-export function saveOrganizerCoursesBackup(courses: Course[]): void {
+function createEmptyVaultBackup(): OrganizerVaultBackup {
+  return {
+    organizers: [],
+    deletedOrganizerIds: [],
+    courses: [],
+    deletedCourseIds: [],
+    participants: [],
+    sessions: [],
+    reports: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Membaca seluruh cadangan Vault di perangkat (Organizers, Courses, Participants, Sessions, Reports)
+ * serta memigrasikan cadangan Course versi lama jika ada.
+ */
+export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
+  const legacyCourses = (() => {
+    try {
+      const raw = localStorage.getItem(LS_ORGANIZER_COURSES_BACKUP_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as Course[]) : [];
+    } catch {
+      return [];
+    }
+  })();
+
   try {
-    localStorage.setItem(LS_ORGANIZER_COURSES_BACKUP_KEY, JSON.stringify(courses));
+    const rawVault = localStorage.getItem(LS_ORGANIZER_VAULT_BACKUP_KEY);
+    if (!rawVault) {
+      return {
+        ...createEmptyVaultBackup(),
+        courses: legacyCourses,
+      };
+    }
+    const parsed = JSON.parse(rawVault) as Partial<OrganizerVaultBackup>;
+    const deletedCourseIds = Array.isArray(parsed.deletedCourseIds)
+      ? parsed.deletedCourseIds
+      : [];
+    const deletedCourseSet = new Set(deletedCourseIds);
+    const deletedOrganizerIds = Array.isArray(parsed.deletedOrganizerIds)
+      ? parsed.deletedOrganizerIds
+      : [];
+    const deletedOrganizerSet = new Set(deletedOrganizerIds);
+
+    const courseMap = new Map<string, Course>();
+    for (const c of legacyCourses) {
+      if (c && c.id && !deletedCourseSet.has(c.id)) {
+        courseMap.set(c.id, c);
+      }
+    }
+    if (Array.isArray(parsed.courses)) {
+      for (const c of parsed.courses) {
+        if (c && c.id && !deletedCourseSet.has(c.id)) {
+          courseMap.set(c.id, c);
+        }
+      }
+    }
+
+    const organizers = Array.isArray(parsed.organizers)
+      ? parsed.organizers.filter((o) => o && o.id && !deletedOrganizerSet.has(o.id))
+      : [];
+
+    const participants = Array.isArray(parsed.participants)
+      ? parsed.participants.filter((p) => p && p.id)
+      : [];
+
+    const sessions = Array.isArray(parsed.sessions)
+      ? parsed.sessions.filter(
+          (s) => s && s.id && !deletedCourseSet.has(s.courseId)
+        )
+      : [];
+
+    const reports = Array.isArray(parsed.reports)
+      ? parsed.reports.filter(
+          (r) => r && r.reportId && !deletedCourseSet.has(r.courseId)
+        )
+      : [];
+
+    return {
+      organizers,
+      deletedOrganizerIds,
+      courses: Array.from(courseMap.values()),
+      deletedCourseIds,
+      participants,
+      sessions,
+      reports,
+      updatedAt: parsed.updatedAt || new Date().toISOString(),
+    };
+  } catch {
+    return {
+      ...createEmptyVaultBackup(),
+      courses: legacyCourses,
+    };
+  }
+}
+
+/**
+ * SMART MERGE (Gabung berdasarkan ID, BUKAN Timpa!):
+ * Ketika berganti login antara Superadmin dan Organizer di perangkat yang sama,
+ * data cadangan keduanya saling melengkapi dan tidak saling menghapus.
+ */
+export function mergeAndSaveOrganizerVaultBackup(
+  incoming: Partial<OrganizerVaultBackup>
+): OrganizerVaultBackup {
+  const current = loadOrganizerVaultBackup();
+
+  const deletedOrganizerSet = new Set<string>([
+    ...current.deletedOrganizerIds,
+    ...(incoming.deletedOrganizerIds || []),
+  ]);
+  const deletedCourseSet = new Set<string>([
+    ...current.deletedCourseIds,
+    ...(incoming.deletedCourseIds || []),
+  ]);
+
+  // 1. Merge Organizers by ID
+  const orgMap = new Map<string, OrganizerBackupRecord>();
+  for (const o of current.organizers) {
+    if (o && o.id && !deletedOrganizerSet.has(o.id)) {
+      orgMap.set(o.id, o);
+    }
+  }
+  if (Array.isArray(incoming.organizers)) {
+    for (const o of incoming.organizers) {
+      if (o && o.id && !deletedOrganizerSet.has(o.id)) {
+        const prev = orgMap.get(o.id);
+        orgMap.set(o.id, {
+          ...(prev || {}),
+          ...o,
+          pinHash: o.pinHash || prev?.pinHash || '',
+          pinSalt: o.pinSalt || prev?.pinSalt || '',
+        });
+      }
+    }
+  }
+
+  // 2. Merge Courses by ID
+  const courseMap = new Map<string, Course>();
+  for (const c of current.courses) {
+    if (c && c.id && !deletedCourseSet.has(c.id)) {
+      courseMap.set(c.id, c);
+    }
+  }
+  if (Array.isArray(incoming.courses)) {
+    for (const c of incoming.courses) {
+      if (c && c.id && !deletedCourseSet.has(c.id)) {
+        courseMap.set(c.id, c);
+      }
+    }
+  }
+
+  // 3. Merge Participants by ID
+  const partMap = new Map<string, ParticipantBackupRecord>();
+  for (const p of current.participants) {
+    if (p && p.id) {
+      partMap.set(p.id, p);
+    }
+  }
+  if (Array.isArray(incoming.participants)) {
+    for (const p of incoming.participants) {
+      if (p && p.id) {
+        const prev = partMap.get(p.id);
+        partMap.set(p.id, {
+          ...(prev || {}),
+          ...p,
+          pinHash: p.pinHash || prev?.pinHash || '',
+          pinSalt: p.pinSalt || prev?.pinSalt || '',
+        });
+      }
+    }
+  }
+
+  // 4. Merge Sessions by ID
+  const sessionMap = new Map<string, ParticipantSession>();
+  for (const s of current.sessions) {
+    if (s && s.id && !deletedCourseSet.has(s.courseId)) {
+      sessionMap.set(s.id, s);
+    }
+  }
+  if (Array.isArray(incoming.sessions)) {
+    for (const s of incoming.sessions) {
+      if (s && s.id && !deletedCourseSet.has(s.courseId)) {
+        sessionMap.set(s.id, s);
+      }
+    }
+  }
+
+  // 5. Merge Reports by reportId
+  const reportMap = new Map<string, CheckpointReport>();
+  for (const r of current.reports) {
+    if (r && r.reportId && !deletedCourseSet.has(r.courseId)) {
+      reportMap.set(r.reportId, r);
+    }
+  }
+  if (Array.isArray(incoming.reports)) {
+    for (const r of incoming.reports) {
+      if (r && r.reportId && !deletedCourseSet.has(r.courseId)) {
+        reportMap.set(r.reportId, r);
+      }
+    }
+  }
+
+  const merged: OrganizerVaultBackup = {
+    organizers: Array.from(orgMap.values()),
+    deletedOrganizerIds: Array.from(deletedOrganizerSet),
+    courses: Array.from(courseMap.values()),
+    deletedCourseIds: Array.from(deletedCourseSet),
+    participants: Array.from(partMap.values()),
+    sessions: Array.from(sessionMap.values()),
+    reports: Array.from(reportMap.values()),
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(merged));
+    localStorage.setItem(
+      LS_ORGANIZER_COURSES_BACKUP_KEY,
+      JSON.stringify(merged.courses)
+    );
   } catch {
     // Abaikan jika penyimpanan penuh
   }
+
+  return merged;
+}
+
+export function saveOrganizerCoursesBackup(courses: Course[]): void {
+  mergeAndSaveOrganizerVaultBackup({ courses });
 }
 
 export function loadOrganizerCoursesBackup(): Course[] {
-  try {
-    const raw = localStorage.getItem(LS_ORGANIZER_COURSES_BACKUP_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Course[]) : [];
-  } catch {
-    return [];
-  }
+  return loadOrganizerVaultBackup().courses;
 }
 
 export function removeCourseFromOrganizerBackup(courseId: string): void {
+  const current = loadOrganizerVaultBackup();
+  const nextDeleted = Array.from(
+    new Set([...current.deletedCourseIds, courseId])
+  );
+  const filteredCourses = current.courses.filter((c) => c.id !== courseId);
+  const filteredSessions = current.sessions.filter((s) => s.courseId !== courseId);
+  const filteredReports = current.reports.filter((r) => r.courseId !== courseId);
+
+  const updated: OrganizerVaultBackup = {
+    ...current,
+    courses: filteredCourses,
+    deletedCourseIds: nextDeleted,
+    sessions: filteredSessions,
+    reports: filteredReports,
+    updatedAt: new Date().toISOString(),
+  };
+
   try {
-    const current = loadOrganizerCoursesBackup();
-    const filtered = current.filter((c) => c.id !== courseId);
-    saveOrganizerCoursesBackup(filtered);
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
+    localStorage.setItem(
+      LS_ORGANIZER_COURSES_BACKUP_KEY,
+      JSON.stringify(filteredCourses)
+    );
   } catch {
     // Abaikan
   }
 }
+
+export function removeOrganizerFromVaultBackup(organizerId: string): void {
+  const current = loadOrganizerVaultBackup();
+  const nextDeleted = Array.from(
+    new Set([...current.deletedOrganizerIds, organizerId])
+  );
+  const filteredOrganizers = current.organizers.filter(
+    (o) => o.id !== organizerId
+  );
+
+  const updated: OrganizerVaultBackup = {
+    ...current,
+    organizers: filteredOrganizers,
+    deletedOrganizerIds: nextDeleted,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
+  } catch {
+    // Abaikan
+  }
+}
+
+export function removeSessionFromVaultBackup(sessionId: string): void {
+  const current = loadOrganizerVaultBackup();
+  const filteredSessions = current.sessions.filter((s) => s.id !== sessionId);
+  const filteredReports = current.reports.filter((r) => r.sessionId !== sessionId);
+
+  const updated: OrganizerVaultBackup = {
+    ...current,
+    sessions: filteredSessions,
+    reports: filteredReports,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
+  } catch {
+    // Abaikan
+  }
+}
+
 
 export interface SyncQueueOutcome {
   attempted: number;

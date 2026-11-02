@@ -27,6 +27,8 @@ import {
   Checkpoint,
   CheckpointReport,
   Course,
+  ORIENTEERING_AGE_GROUPS,
+  ORIENTEERING_GENDER_OPTIONS,
   ParticipantPublic,
   ParticipantSession,
   SessionStatus,
@@ -38,8 +40,10 @@ import {
   createUniqueReportId,
   getLocalReportsForSession,
   loadOrganizerCoursesBackup,
+  loadOrganizerVaultBackup,
   loadPersistedParticipantState,
   loadPersistedParticipantStateFromIdbFallback,
+  mergeAndSaveOrganizerVaultBackup,
   savePersistedParticipantState,
   saveReportsLocally,
   syncPendingReportsWithServer,
@@ -204,6 +208,8 @@ export default function ParticipantView({
   const [authTab, setAuthTab] = useState<'register' | 'login'>('login');
   const [regName, setRegName] = useState('');
   const [regTeam, setRegTeam] = useState('');
+  const [regGender, setRegGender] = useState<string>('Other');
+  const [regAgeGroup, setRegAgeGroup] = useState<string>('Semua Umur');
   const [regPhone, setRegPhone] = useState('');
   const [regPin, setRegPin] = useState('');
   const [loginIdentity, setLoginIdentity] = useState('BRK-101');
@@ -1388,6 +1394,8 @@ export default function ParticipantView({
         body: JSON.stringify({
           name: regName.trim(),
           teamName: regTeam.trim(),
+          gender: regGender,
+          ageGroup: regAgeGroup,
           phone: regPhone.trim(),
           pin: regPin,
         }),
@@ -1406,6 +1414,11 @@ export default function ParticipantView({
         localStorage.removeItem('baraka_organizer_token');
       } catch {
         // Abaikan
+      }
+      if (data.participantBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          participants: [data.participantBackup],
+        });
       }
       setToken(data.token);
       setParticipant(data.participant);
@@ -1426,12 +1439,14 @@ export default function ParticipantView({
     e.preventDefault();
     setFeedbackBanner(null);
     try {
+      const localVault = loadOrganizerVaultBackup();
       const res = await fetch('/api/participant/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bibOrName: loginIdentity,
           pin: loginPin,
+          vaultParticipants: localVault.participants,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1448,6 +1463,11 @@ export default function ParticipantView({
         localStorage.removeItem('baraka_organizer_token');
       } catch {
         // Abaikan
+      }
+      if (data.participantBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          participants: [data.participantBackup],
+        });
       }
       setToken(data.token);
       setParticipant(data.participant);
@@ -2259,6 +2279,42 @@ export default function ParticipantView({
                   />
                 </div>
               </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Gender (Kategori)
+                  </label>
+                  <select
+                    value={regGender}
+                    onChange={(e) => setRegGender(e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
+                  >
+                    {ORIENTEERING_GENDER_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Kelompok Umur (Orienteering)
+                  </label>
+                  <select
+                    value={regAgeGroup}
+                    onChange={(e) => setRegAgeGroup(e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
+                  >
+                    {ORIENTEERING_AGE_GROUPS.map((ag) => (
+                      <option key={ag} value={ag}>
+                        {ag === 'Semua Umur'
+                          ? 'Semua Umur (Tanpa Kelompok Umur)'
+                          : `${ag} Tahun`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Buat PIN Keamanan (Minimal 4 digit){' '}
@@ -2334,7 +2390,8 @@ export default function ParticipantView({
                   {participant.name}
                 </div>
                 <div className="text-xs text-emerald-400 font-medium">
-                  Tim: {participant.teamName}
+                  Tim: {participant.teamName} • {participant.gender || 'Other'} •{' '}
+                  {participant.ageGroup || 'Semua Umur'}
                 </div>
               </div>
             </div>

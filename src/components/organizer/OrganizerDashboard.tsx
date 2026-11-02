@@ -29,7 +29,10 @@ import {
   Checkpoint,
   CheckpointReport,
   GeoPointLocation,
+  ORIENTEERING_AGE_GROUPS,
+  ORIENTEERING_GENDER_OPTIONS,
   OrganizerPublic,
+  OrganizerVaultBackup,
   ParticipantPublic,
   ParticipantSession,
   SessionStatus,
@@ -40,8 +43,11 @@ import { CourseMapPlanner } from './CourseMapPlanner';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
-  loadOrganizerCoursesBackup,
+  loadOrganizerVaultBackup,
+  mergeAndSaveOrganizerVaultBackup,
   removeCourseFromOrganizerBackup,
+  removeOrganizerFromVaultBackup,
+  removeSessionFromVaultBackup,
   saveOrganizerCoursesBackup,
 } from '../../services/offlineQueue';
 
@@ -53,6 +59,7 @@ interface DashboardApiData {
   participants: ParticipantPublic[];
   sessions: ParticipantSession[];
   reports: CheckpointReport[];
+  vaultSnapshot?: OrganizerVaultBackup;
 }
 
 type OrganizerTab = 'OVERVIEW' | 'COURSES' | 'MONITORING' | 'RESULT' | 'ORGANIZERS';
@@ -80,6 +87,67 @@ function formatTimeAgo(isoString?: string): string {
   if (diffMin < 60) return `${diffMin} mnt lalu`;
   const diffHour = Math.floor(diffMin / 60);
   return `${diffHour} jam lalu`;
+}
+
+const MONTH_NAMES_EN = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+function getOrdinalSuffix(day: number): string {
+  if (day > 3 && day < 21) return 'th';
+  switch (day % 10) {
+    case 1:
+      return 'st';
+    case 2:
+      return 'nd';
+    case 3:
+      return 'rd';
+    default:
+      return 'th';
+  }
+}
+
+function formatEntryDateTimeParts(isoString?: string): {
+  dateLabel: string;
+  timeLabel: string;
+} {
+  if (!isoString) {
+    return { dateLabel: '-', timeLabel: '-' };
+  }
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) {
+    return { dateLabel: '-', timeLabel: '-' };
+  }
+  const day = d.getDate();
+  const month = MONTH_NAMES_EN[d.getMonth()] || '';
+  const year = d.getFullYear();
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return {
+    dateLabel: `${day}${getOrdinalSuffix(day)} ${month} ${year}`,
+    timeLabel: `${hours}:${minutes}`,
+  };
+}
+
+function formatShortCheckpointCode(code?: string, fallbackIndex?: number): string {
+  if (!code) return fallbackIndex ? String(fallbackIndex) : '-';
+  const trimmed = code.trim();
+  const cpNumericMatch = /^CP[-_]?(\d+)$/i.exec(trimmed);
+  if (cpNumericMatch) {
+    return cpNumericMatch[1];
+  }
+  return trimmed;
 }
 
 /**
@@ -172,9 +240,17 @@ export default function OrganizerDashboard({
   // Form States for Participant Creation by Organizer
   const [partName, setPartName] = useState('');
   const [partTeam, setPartTeam] = useState('');
+  const [partGender, setPartGender] = useState<string>('Other');
+  const [partAgeGroup, setPartAgeGroup] = useState<string>('Semua Umur');
   const [partPhone, setPartPhone] = useState('');
   const [partPin, setPartPin] = useState('');
   const [partStatusMsg, setPartStatusMsg] = useState<string | null>(null);
+
+  // Result View Options: With Split (Detail) vs Without Split (Ringkas) + Filters
+  const [showResultSplits, setShowResultSplits] = useState<boolean>(true);
+  const [resultGenderFilter, setResultGenderFilter] = useState<string>('ALL');
+  const [resultAgeGroupFilter, setResultAgeGroupFilter] = useState<string>('ALL');
+  const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
 
   // Form States for Superadmin Organizer Account Creation & Management
   const [orgNameInput, setOrgNameInput] = useState('');
@@ -217,12 +293,14 @@ export default function OrganizerDashboard({
     setLoginError(null);
     setIsLoggingIn(true);
     try {
+      const localVault = loadOrganizerVaultBackup();
       const res = await fetch('/api/organizer/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: usernameInput.trim() || undefined,
           pin: pinInput,
+          vaultBackup: localVault,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -231,6 +309,11 @@ export default function OrganizerDashboard({
           data.error || `PIN Organizer tidak valid (HTTP ${res.status}).`
         );
         return;
+      }
+      if (data.organizerBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          organizers: [data.organizerBackup],
+        });
       }
       clearPersistedParticipantState();
       localStorage.setItem(ORG_TOKEN_STORAGE_KEY, data.token);
@@ -256,30 +339,74 @@ export default function OrganizerDashboard({
       if (!res.ok) throw new Error('Gagal memuat data dashboard organizer.');
       const data: DashboardApiData = await res.json();
 
-      // Cek apakah ada Course di cadangan lokal browser yang belum ada di server (mis. setelah serverless cold-start)
-      const localBackup = loadOrganizerCoursesBackup();
-      const missingOnServer = localBackup.filter(
-        (bc) => bc && bc.id && !data.courses.some((sc) => sc.id === bc.id)
+      // Cek apakah ada Course, Organizer, Peserta, atau Sesi di cadangan lokal browser (Smart Merge)
+      // yang belum ada di server (mis. setelah serverless cold-start saat jaringan offline)
+      const localVault = loadOrganizerVaultBackup();
+      const isSuperAdmin = Boolean(data.currentOrganizer?.isSuperAdmin);
+      const currentOrgId = data.currentOrganizer?.id;
+
+      const missingCourses = localVault.courses.filter(
+        (bc) =>
+          bc &&
+          bc.id &&
+          (isSuperAdmin || !bc.createdByOrganizerId || bc.createdByOrganizerId === currentOrgId) &&
+          !data.courses.some((sc) => sc.id === bc.id)
+      );
+      const missingOrganizers = isSuperAdmin
+        ? localVault.organizers.filter(
+            (bo) =>
+              bo &&
+              bo.id &&
+              !(data.organizers || []).some((so) => so.id === bo.id)
+          )
+        : [];
+      const missingParticipants = localVault.participants.filter(
+        (bp) =>
+          bp &&
+          bp.id &&
+          (isSuperAdmin || bp.createdByOrganizerId === currentOrgId) &&
+          !data.participants.some((sp) => sp.id === bp.id)
       );
 
-      if (missingOnServer.length > 0) {
+      if (
+        missingCourses.length > 0 ||
+        missingOrganizers.length > 0 ||
+        missingParticipants.length > 0
+      ) {
         const syncRes = await fetch('/api/organizer/courses/sync-backup', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ courses: localBackup }),
+          body: JSON.stringify(localVault),
         });
         if (syncRes.ok) {
           const syncData = await syncRes.json().catch(() => ({}));
           if (Array.isArray(syncData.courses)) {
             data.courses = syncData.courses;
           }
+          if (Array.isArray(syncData.organizers)) {
+            data.organizers = syncData.organizers;
+          }
+          if (Array.isArray(syncData.participants)) {
+            data.participants = syncData.participants;
+          }
+          if (Array.isArray(syncData.sessions)) {
+            data.sessions = syncData.sessions;
+          }
+          if (Array.isArray(syncData.reports)) {
+            data.reports = syncData.reports;
+          }
         }
       }
 
-      saveOrganizerCoursesBackup(data.courses);
+      if (data.vaultSnapshot) {
+        mergeAndSaveOrganizerVaultBackup(data.vaultSnapshot);
+      } else {
+        saveOrganizerCoursesBackup(data.courses);
+      }
+
       setDashboard(data);
       setSelectedCourseId((prev) => {
         if (prev && data.courses.some((c: Course) => c.id === prev)) return prev;
@@ -564,7 +691,7 @@ export default function OrganizerDashboard({
     setCpRadiusInput(String(selectedCourse?.defaultGpsRadiusMeters || 35));
   }, [selectedCourse]);
 
-  // Compute Leaderboard rows with live / finished Overtime Penalty calculation (selalu mengikuti aturan Course terbaru secara real-time)
+  // Compute Leaderboard rows with live / finished Overtime Penalty + Split Legs (#1..#N & Finish Split)
   const leaderboardRows = useMemo(() => {
     if (!dashboard) return [];
     const filteredSessions = dashboard.sessions.filter(
@@ -627,11 +754,134 @@ export default function OrganizerDashboard({
 
       const netScore = Math.max(0, grossScore - penaltyPoints);
 
+      // Hitung Split per Pos (#1, #2, ..., #N) secara kronologis berdasarkan waktu kunjungan peserta
+      const startMs = sess.startedAt ? Date.parse(sess.startedAt) : undefined;
+      const validStartMs =
+        startMs !== undefined && !Number.isNaN(startMs) ? startMs : undefined;
+
+      const sessionCpReports = dashboard.reports
+        .filter(
+          (r: CheckpointReport) =>
+            r.sessionId === sess.id &&
+            r.reportType === 'CHECKPOINT' &&
+            r.serverVerified !== false
+        )
+        .sort(
+          (a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt)
+        );
+
+      const seenCpIds = new Set<string>();
+      const orderedSplits: Array<{
+        stepIndex: number;
+        checkpointId: string;
+        shortCode: string;
+        fullCode: string;
+        points: number;
+        cumulativeSeconds?: number;
+        legSplitSeconds?: number;
+        measuredAt?: string;
+      }> = [];
+
+      let prevEventMs = validStartMs;
+
+      for (const rep of sessionCpReports) {
+        if (seenCpIds.has(rep.checkpointId)) continue;
+        seenCpIds.add(rep.checkpointId);
+        const cp = course?.checkpoints.find((c) => c.id === rep.checkpointId);
+        const repMs = Date.parse(rep.measuredAt);
+        const validRepMs = !Number.isNaN(repMs) ? repMs : undefined;
+
+        const cumulativeSeconds =
+          validStartMs !== undefined && validRepMs !== undefined
+            ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1000))
+            : undefined;
+        const legSplitSeconds =
+          prevEventMs !== undefined && validRepMs !== undefined
+            ? Math.max(0, Math.floor((validRepMs - prevEventMs) / 1000))
+            : cumulativeSeconds;
+
+        if (validRepMs !== undefined) {
+          prevEventMs = validRepMs;
+        }
+
+        orderedSplits.push({
+          stepIndex: orderedSplits.length + 1,
+          checkpointId: rep.checkpointId,
+          shortCode: formatShortCheckpointCode(
+            cp?.code,
+            cp?.orderIndex || orderedSplits.length + 1
+          ),
+          fullCode: cp?.code || rep.checkpointId,
+          points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
+          cumulativeSeconds,
+          legSplitSeconds,
+          measuredAt: rep.measuredAt,
+        });
+      }
+
+      // Jika ada validatedCheckpointIds yang belum memiliki objek report di memori, tetap tampilkan posnya
+      for (const cpId of sess.validatedCheckpointIds) {
+        if (seenCpIds.has(cpId)) continue;
+        seenCpIds.add(cpId);
+        const cp = course?.checkpoints.find((c) => c.id === cpId);
+        orderedSplits.push({
+          stepIndex: orderedSplits.length + 1,
+          checkpointId: cpId,
+          shortCode: formatShortCheckpointCode(
+            cp?.code,
+            cp?.orderIndex || orderedSplits.length + 1
+          ),
+          fullCode: cp?.code || cpId,
+          points: cp ? Number(cp.points) || 0 : 0,
+          cumulativeSeconds: undefined,
+          legSplitSeconds: undefined,
+        });
+      }
+
+      // Hitung Finish Cumulative & Finish Leg Split (dari pos terakhir ke garis Finish)
+      const finishMs = sess.finishedAt ? Date.parse(sess.finishedAt) : undefined;
+      const validFinishMs =
+        finishMs !== undefined && !Number.isNaN(finishMs) ? finishMs : undefined;
+      const finishCumulativeSeconds =
+        sess.status === SessionStatus.FINISHED
+          ? sess.durationSeconds ??
+            (validStartMs !== undefined && validFinishMs !== undefined
+              ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1000))
+              : undefined)
+          : undefined;
+
+      let finishSplitSeconds: number | undefined;
+      if (sess.status === SessionStatus.FINISHED) {
+        if (validFinishMs !== undefined && prevEventMs !== undefined) {
+          finishSplitSeconds = Math.max(
+            0,
+            Math.floor((validFinishMs - prevEventMs) / 1000)
+          );
+        } else if (
+          finishCumulativeSeconds !== undefined &&
+          orderedSplits.length > 0 &&
+          orderedSplits[orderedSplits.length - 1].cumulativeSeconds !== undefined
+        ) {
+          finishSplitSeconds = Math.max(
+            0,
+            finishCumulativeSeconds -
+              (orderedSplits[orderedSplits.length - 1].cumulativeSeconds || 0)
+          );
+        } else {
+          finishSplitSeconds = finishCumulativeSeconds;
+        }
+      }
+
+      const entryTimestamp = sess.startedAt || sess.loadedAt;
+      const entryDateParts = formatEntryDateTimeParts(entryTimestamp);
+
       return {
         sessionId: sess.id,
         bibNumber: participant?.bibNumber || '-',
         participantName: participant?.name || 'Peserta',
-        teamName: participant?.teamName || '-',
+        teamName: participant?.teamName || participant?.name || '-',
+        gender: participant?.gender || 'Other',
+        ageGroup: participant?.ageGroup || 'Semua Umur',
         courseId: sess.courseId,
         courseName: course?.name || sess.courseId,
         attemptNumber: sess.attemptNumber || 1,
@@ -643,11 +893,29 @@ export default function OrganizerDashboard({
         penaltyPoints,
         totalScore: netScore,
         durationSeconds: liveDurationSec,
+        entryDateLabel: entryDateParts.dateLabel,
+        entryTimeLabel: entryDateParts.timeLabel,
+        splits: orderedSplits,
+        finishCumulativeSeconds,
+        finishSplitSeconds,
         lastLocationAt: sess.lastLocation?.measuredAt,
       };
     });
 
-    return enriched
+    const filteredByCategory = enriched.filter((item) => {
+      if (
+        resultGenderFilter !== 'ALL' &&
+        item.gender.toLowerCase() !== resultGenderFilter.toLowerCase()
+      ) {
+        return false;
+      }
+      if (resultAgeGroupFilter !== 'ALL' && item.ageGroup !== resultAgeGroupFilter) {
+        return false;
+      }
+      return true;
+    });
+
+    return filteredByCategory
       .sort((a, b) => {
         const wDiff = statusWeight(b.status) - statusWeight(a.status);
         if (wDiff !== 0) return wDiff;
@@ -660,7 +928,24 @@ export default function OrganizerDashboard({
         ...item,
         rank: idx + 1,
       }));
-  }, [dashboard, selectedCourse, effectiveSelectedCourse, nowTick]);
+  }, [
+    dashboard,
+    selectedCourse,
+    effectiveSelectedCourse,
+    nowTick,
+    resultGenderFilter,
+    resultAgeGroupFilter,
+  ]);
+
+  // Jumlah kolom pos (#1..#N) untuk mode Dengan Split (Detail)
+  const splitColumnCount = useMemo(() => {
+    const courseCpCount = selectedCourse?.checkpoints.length || 0;
+    const maxVisitedInRows = leaderboardRows.reduce(
+      (max, r) => Math.max(max, r.splits.length),
+      0
+    );
+    return Math.max(courseCpCount, maxVisitedInRows);
+  }, [selectedCourse?.checkpoints.length, leaderboardRows]);
 
   // Create Unified Course (Location optional, clean number strings, duration & penalty)
   const handleCreateCourse = async (e: React.FormEvent) => {
@@ -696,10 +981,7 @@ export default function OrganizerDashboard({
       if (!res.ok) throw new Error(data.error || 'Gagal membuat Course baru');
       const created: Course = data.course;
       if (created?.id) {
-        const existingBackup = loadOrganizerCoursesBackup().filter(
-          (c) => c.id !== created.id
-        );
-        saveOrganizerCoursesBackup([...existingBackup, created]);
+        mergeAndSaveOrganizerVaultBackup({ courses: [created] });
       }
       setNewCourseName('');
       setNewCourseDescription('');
@@ -832,7 +1114,7 @@ export default function OrganizerDashboard({
     }
   };
 
-  // Register Participant by Organizer (Nama Tim wajib)
+  // Register Participant by Organizer (Nama Tim wajib + Gender & Kelompok Umur Orienteering)
   const handleCreateParticipant = async (e: React.FormEvent) => {
     e.preventDefault();
     setPartStatusMsg(null);
@@ -853,6 +1135,8 @@ export default function OrganizerDashboard({
         body: JSON.stringify({
           name: partName,
           teamName: partTeam,
+          gender: partGender,
+          ageGroup: partAgeGroup,
           phone: partPhone,
           pin: partPin,
         }),
@@ -862,16 +1146,45 @@ export default function OrganizerDashboard({
         setPartStatusMsg(data.error || 'Gagal mendaftarkan peserta.');
         return;
       }
+      if (data.participantBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          participants: [data.participantBackup],
+        });
+      }
       setPartName('');
       setPartTeam('');
+      setPartGender('Other');
+      setPartAgeGroup('Semua Umur');
       setPartPhone('');
       setPartPin('');
       setPartStatusMsg(
-        `Peserta ${data.participant.bibNumber} (Tim: ${data.participant.teamName}) berhasil didaftarkan.`
+        `Peserta ${data.participant.bibNumber} (Tim: ${data.participant.teamName} • ${data.participant.gender || 'Other'} • ${data.participant.ageGroup || 'Semua Umur'}) berhasil didaftarkan.`
       );
       await fetchDashboard();
     } catch {
       setPartStatusMsg('Kesalahan jaringan saat mendaftarkan peserta.');
+    }
+  };
+
+  // Hapus Sesi Hasil Lomba dari Tabel Result
+  const handleDeleteSessionResult = async (sessionId: string) => {
+    if (!token) return;
+    try {
+      removeSessionFromVaultBackup(sessionId);
+      const res = await fetch(`/api/organizer/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(err.error || 'Gagal menghapus hasil sesi peserta.');
+        return;
+      }
+      setConfirmDeleteSessionId(null);
+      await fetchDashboard();
+      showTemporarySuccess('Data hasil sesi peserta berhasil dihapus.');
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat menghapus sesi peserta.');
     }
   };
 
@@ -905,6 +1218,11 @@ export default function OrganizerDashboard({
         setOrgManageMsg(data.error || 'Gagal membuat akun Organizer.');
         return;
       }
+      if (data.organizerBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          organizers: [data.organizerBackup],
+        });
+      }
       setOrgNameInput('');
       setOrgUsernameInput('');
       setOrgOrganizationInput('');
@@ -934,6 +1252,11 @@ export default function OrganizerDashboard({
       if (!res.ok) {
         setErrorMsg(data.error || 'Gagal mengubah status Organizer.');
         return;
+      }
+      if (data.organizerBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          organizers: [data.organizerBackup],
+        });
       }
       showTemporarySuccess(
         `Status Organizer "${org.name}" diubah menjadi ${
@@ -966,6 +1289,11 @@ export default function OrganizerDashboard({
         setErrorMsg(data.error || 'Gagal mereset PIN Organizer.');
         return;
       }
+      if (data.organizerBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          organizers: [data.organizerBackup],
+        });
+      }
       setResetPinOrgId(null);
       setResetPinValue('');
       showTemporarySuccess('PIN Organizer berhasil diperbarui.');
@@ -979,6 +1307,7 @@ export default function OrganizerDashboard({
   const handleDeleteOrganizerAccount = async (org: OrganizerPublic) => {
     if (!token) return;
     try {
+      removeOrganizerFromVaultBackup(org.id);
       const res = await fetch(`/api/organizer/accounts/${org.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
@@ -995,46 +1324,79 @@ export default function OrganizerDashboard({
     }
   };
 
-  // Export CSV Leaderboard (termasuk Attempt, Poin Kotor, Penalti Terlambat, dan Total Skor Bersih)
+  // Export CSV Leaderboard (mendukung mode Hide Split maupun Show Split #1..#N)
   const handleExportCsv = () => {
+    const splitHeaders: string[] = [];
+    if (showResultSplits) {
+      for (let i = 1; i <= splitColumnCount; i++) {
+        splitHeaders.push(`#${i} Pos (Poin)`, `#${i} Kumulatif`, `#${i} Split`);
+      }
+      splitHeaders.push('Finish Kumulatif', 'Finish Split');
+    }
+
     const headers = [
       'Rank',
       'BIB',
       'Nama Peserta',
       'Nama Tim',
+      'Gender',
+      'Kelompok Umur',
       'Course',
       'Percobaan (Attempt)',
       'Status',
-      'CP Valid',
-      'Total CP',
-      'Poin Pos (Gross)',
+      'Pos Valid',
+      'Total Pos',
+      'Poin Pos',
       'Menit Terlambat',
-      'Penalti Terlambat',
-      'Total Skor Akhir (Net)',
+      'Penalti Waktu',
+      'Total Skor Akhir',
       'Waktu Tempuh',
-      'Update Lokasi Terakhir',
+      ...splitHeaders,
     ];
+
     const csvLines = [
       headers.join(','),
-      ...leaderboardRows.map((r) =>
-        [
+      ...leaderboardRows.map((r) => {
+        const splitCells: string[] = [];
+        if (showResultSplits) {
+          for (let i = 0; i < splitColumnCount; i++) {
+            const sp = r.splits[i];
+            if (sp) {
+              splitCells.push(
+                `"${sp.shortCode} (${sp.points})"`,
+                `"${formatElapsedSeconds(sp.cumulativeSeconds)}"`,
+                `"${formatElapsedSeconds(sp.legSplitSeconds)}"`
+              );
+            } else {
+              splitCells.push('"-"', '"-"', '"-"');
+            }
+          }
+          splitCells.push(
+            `"${formatElapsedSeconds(r.finishCumulativeSeconds)}"`,
+            `"${formatElapsedSeconds(r.finishSplitSeconds)}"`
+          );
+        }
+
+        return [
           r.rank,
           `"${r.bibNumber}"`,
           `"${r.participantName}"`,
           `"${r.teamName}"`,
+          `"${r.gender}"`,
+          `"${r.ageGroup}"`,
           `"${r.courseName}"`,
-          `"Attempt #${r.attemptNumber || 1}"`,
+          r.attemptNumber,
           r.status,
           r.checkpointsCompleted,
           r.totalCheckpoints,
           r.grossScore,
           r.overtimeMinutes,
-          r.penaltyPoints,
+          `-${r.penaltyPoints}`,
           r.totalScore,
           `"${formatElapsedSeconds(r.durationSeconds)}"`,
-          `"${r.lastLocationAt || '-'}"`,
-        ].join(',')
-      ),
+          ...splitCells,
+        ].join(',');
+      }),
     ];
     const blob = new Blob([csvLines.join('\n')], {
       type: 'text/csv;charset=utf-8;',
@@ -1042,7 +1404,7 @@ export default function OrganizerDashboard({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `baraka-result-${
+    link.download = `baraka-result-${showResultSplits ? 'split' : 'summary'}-${
       selectedCourse?.name.toLowerCase().replace(/\s+/g, '-') || 'all'
     }.csv`;
     link.click();
@@ -1517,6 +1879,42 @@ export default function OrganizerDashboard({
                     className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
                   />
                 </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Gender (Opsional)
+                    </label>
+                    <select
+                      value={partGender}
+                      onChange={(e) => setPartGender(e.target.value)}
+                      className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                    >
+                      {ORIENTEERING_GENDER_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Kelompok Umur
+                    </label>
+                    <select
+                      value={partAgeGroup}
+                      onChange={(e) => setPartAgeGroup(e.target.value)}
+                      className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                    >
+                      {ORIENTEERING_AGE_GROUPS.map((ag) => (
+                        <option key={ag} value={ag}>
+                          {ag === 'Semua Umur'
+                            ? 'Semua Umur (Tanpa Kelompok)'
+                            : ag}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
                 <div>
                   <label className="block text-slate-300 mb-1">
                     No. WhatsApp / Telepon (Opsional)
@@ -1568,18 +1966,21 @@ export default function OrganizerDashboard({
                   {dashboard.participants.map((p: ParticipantPublic) => (
                     <div
                       key={p.id}
-                      className="px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-800 flex items-center justify-between text-xs"
+                      className="px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-xs"
                     >
-                      <div>
+                      <div className="truncate">
                         <span className="font-mono font-bold text-amber-400 mr-2">
                           {p.bibNumber}
                         </span>
-                        <span className="text-slate-200 font-medium">
-                          {p.name}
+                        <span className="text-emerald-300 font-bold">
+                          {p.teamName}
+                        </span>
+                        <span className="text-slate-400 ml-1.5 text-[11px]">
+                          ({p.name})
                         </span>
                       </div>
-                      <span className="text-[11px] text-emerald-300 font-medium">
-                        {p.teamName}
+                      <span className="text-[10px] font-mono text-slate-300 bg-slate-800 px-1.5 py-0.5 rounded shrink-0">
+                        {p.gender || 'Other'} • {p.ageGroup || 'Semua Umur'}
                       </span>
                     </div>
                   ))}
@@ -2695,7 +3096,7 @@ export default function OrganizerDashboard({
         </div>
       )}
 
-      {/* TAB 4: RESULT & LEADERBOARD */}
+      {/* TAB 4: RESULT & LEADERBOARD (TETAP SEPERTI TABEL ASLI APLIKASI + OPSI SHOW SPLIT / HIDE SPLIT) */}
       {activeTab === 'RESULT' && dashboard && (
         <div className="space-y-6">
           <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
@@ -2715,96 +3116,326 @@ export default function OrganizerDashboard({
                 </p>
               </div>
 
-              <button
-                onClick={handleExportCsv}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                Export Hasil (CSV)
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Opsi Show Split / Hide Split */}
+                <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setShowResultSplits(false)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                      !showResultSplits
+                        ? 'bg-amber-500 text-slate-950 shadow'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Hide Split
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowResultSplits(true)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                      showResultSplits
+                        ? 'bg-amber-500 text-slate-950 shadow'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Show Split (#1..#{splitColumnCount || 1})
+                  </button>
+                </div>
+
+                <button
+                  onClick={handleExportCsv}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  Export Hasil (CSV)
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Gender & Kelompok Umur */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400 font-medium">
+                    Filter Gender:
+                  </span>
+                  <select
+                    value={resultGenderFilter}
+                    onChange={(e) => setResultGenderFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
+                  >
+                    <option value="ALL">Semua Gender</option>
+                    {ORIENTEERING_GENDER_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400 font-medium">
+                    Filter Kelompok Umur:
+                  </span>
+                  <select
+                    value={resultAgeGroupFilter}
+                    onChange={(e) => setResultAgeGroupFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
+                  >
+                    <option value="ALL">Semua Kategori Umur</option>
+                    {ORIENTEERING_AGE_GROUPS.map((ag) => (
+                      <option key={ag} value={ag}>
+                        {ag === 'Semua Umur'
+                          ? 'Semua Umur (Tanpa Kelompok Umur)'
+                          : `Kelompok ${ag}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {(resultGenderFilter !== 'ALL' ||
+                  resultAgeGroupFilter !== 'ALL') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResultGenderFilter('ALL');
+                      setResultAgeGroupFilter('ALL');
+                    }}
+                    className="text-amber-400 hover:underline font-medium"
+                  >
+                    Reset Filter
+                  </button>
+                )}
+              </div>
+
+              <div className="text-[11px] text-slate-400">
+                Menampilkan{' '}
+                <strong className="text-white">{leaderboardRows.length}</strong>{' '}
+                hasil sesi
+                {showResultSplits && (
+                  <span className="ml-2 text-slate-400">
+                    • Format Split: <strong className="text-amber-300">Pos (Poin)</strong> |{' '}
+                    <strong className="text-white">Waktu Kumulatif</strong> |{' '}
+                    <span className="text-slate-400">Waktu Split Antar-Pos</span>
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
-                    <th className="py-3 px-3">Rank</th>
-                    <th className="py-3 px-3">BIB &amp; Peserta</th>
-                    <th className="py-3 px-3">Nama Tim</th>
-                    <th className="py-3 px-3">Course</th>
-                    <th className="py-3 px-3">Status</th>
-                    <th className="py-3 px-3">Pos Valid</th>
-                    <th className="py-3 px-3">Poin Pos</th>
-                    <th className="py-3 px-3">Penalti Waktu</th>
-                    <th className="py-3 px-3">Total Skor Akhir</th>
-                    <th className="py-3 px-3">Waktu Tempuh</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Rank</th>
+                    <th className="py-3 px-3 whitespace-nowrap">BIB &amp; Peserta</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Nama Tim</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Gender</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Kelompok Umur</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Course</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Status</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Pos Valid</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Poin Pos</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Penalti Waktu</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Total Skor Akhir</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Waktu Tempuh</th>
+                    {showResultSplits &&
+                      Array.from({ length: splitColumnCount }, (_, idx) => (
+                        <th
+                          key={`split-col-${idx + 1}`}
+                          className="py-3 px-3 text-center whitespace-nowrap bg-slate-900/70 border-l border-slate-800 text-amber-300"
+                        >
+                          #{idx + 1}
+                        </th>
+                      ))}
+                    {showResultSplits && (
+                      <th className="py-3 px-3 text-center whitespace-nowrap bg-slate-900/70 border-l border-slate-800 text-emerald-300">
+                        Finish Split
+                      </th>
+                    )}
+                    <th className="py-3 px-3 text-right whitespace-nowrap">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {leaderboardRows.map((row) => (
-                    <tr key={row.sessionId} className="hover:bg-slate-900/40">
-                      <td className="py-3 px-3 font-mono font-bold text-amber-400">
-                        #{row.rank}
-                      </td>
-                      <td className="py-3 px-3">
-                        <span className="font-mono font-bold text-slate-300 mr-2">
-                          {row.bibNumber}
-                        </span>
-                        <span className="font-semibold text-white">
-                          {row.participantName}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-emerald-300 font-medium">
-                        {row.teamName}
-                      </td>
-                      <td className="py-3 px-3 text-slate-300">
-                        <div>{row.courseName}</div>
-                        {row.attemptNumber && row.attemptNumber > 1 ? (
-                          <span className="inline-block mt-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                            Attempt #{row.attemptNumber} (Re-run)
-                          </span>
-                        ) : (
-                          <span className="inline-block mt-0.5 text-[10px] font-mono text-slate-500">
-                            Attempt #1 (Utama)
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-3">
-                        <span
-                          className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
-                            row.status === SessionStatus.FINISHED
-                              ? 'bg-amber-500/20 text-amber-300'
-                              : row.status === SessionStatus.ACTIVE
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {row.status}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-slate-200">
-                        {row.checkpointsCompleted} / {row.totalCheckpoints} CP
-                      </td>
-                      <td className="py-3 px-3 font-mono text-slate-300">
-                        {row.grossScore} pts
-                      </td>
-                      <td className="py-3 px-3 font-mono">
-                        {row.overtimeMinutes > 0 ? (
-                          <span className="text-rose-400 font-semibold">
-                            -{row.penaltyPoints} pts ({row.overtimeMinutes}m)
-                          </span>
-                        ) : (
-                          <span className="text-slate-500">0</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm">
-                        {row.totalScore} pts
-                      </td>
-                      <td className="py-3 px-3 font-mono font-bold text-white">
-                        {formatElapsedSeconds(row.durationSeconds)}
+                  {leaderboardRows.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={
+                          13 + (showResultSplits ? splitColumnCount + 1 : 0)
+                        }
+                        className="py-8 text-center text-slate-400 text-xs"
+                      >
+                        Belum ada data hasil lomba untuk filter yang dipilih.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    leaderboardRows.map((row) => (
+                      <tr key={row.sessionId} className="hover:bg-slate-900/40">
+                        <td className="py-3 px-3 font-mono font-bold text-amber-400 whitespace-nowrap">
+                          #{row.rank}
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className="font-mono font-bold text-slate-300 mr-2">
+                            {row.bibNumber}
+                          </span>
+                          <span className="font-semibold text-white">
+                            {row.participantName}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-emerald-300 font-medium whitespace-nowrap">
+                          {row.teamName}
+                        </td>
+                        <td className="py-3 px-3 text-slate-300 whitespace-nowrap">
+                          {row.gender}
+                        </td>
+                        <td className="py-3 px-3 text-slate-300 font-mono whitespace-nowrap">
+                          {row.ageGroup}
+                        </td>
+                        <td className="py-3 px-3 text-slate-300 whitespace-nowrap">
+                          <div>{row.courseName}</div>
+                          {row.attemptNumber && row.attemptNumber > 1 ? (
+                            <span className="inline-block mt-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                              Attempt #{row.attemptNumber} (Re-run)
+                            </span>
+                          ) : (
+                            <span className="inline-block mt-0.5 text-[10px] font-mono text-slate-500">
+                              Attempt #1 (Utama)
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span
+                            className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
+                              row.status === SessionStatus.FINISHED
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : row.status === SessionStatus.ACTIVE
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {row.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">
+                          {row.checkpointsCompleted} / {row.totalCheckpoints} CP
+                        </td>
+                        <td className="py-3 px-3 font-mono text-slate-300 whitespace-nowrap">
+                          {row.grossScore} pts
+                        </td>
+                        <td className="py-3 px-3 font-mono whitespace-nowrap">
+                          {row.overtimeMinutes > 0 ? (
+                            <span className="text-rose-400 font-semibold">
+                              -{row.penaltyPoints} pts ({row.overtimeMinutes}m)
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">0</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm whitespace-nowrap">
+                          {row.totalScore} pts
+                        </td>
+                        <td className="py-3 px-3 font-mono font-bold text-white whitespace-nowrap">
+                          {formatElapsedSeconds(row.durationSeconds)}
+                        </td>
+
+                        {/* Kolom Split Detail #1 .. #N (Hanya muncul saat Show Split aktif) */}
+                        {showResultSplits &&
+                          Array.from(
+                            { length: splitColumnCount },
+                            (_, splitIdx) => {
+                              const sp = row.splits[splitIdx];
+                              if (!sp) {
+                                return (
+                                  <td
+                                    key={`cell-${row.sessionId}-${splitIdx}`}
+                                    className="py-2.5 px-3 text-center font-mono text-slate-600 whitespace-nowrap bg-slate-950/40 border-l border-slate-800/70"
+                                  >
+                                    -
+                                  </td>
+                                );
+                              }
+                              return (
+                                <td
+                                  key={`cell-${row.sessionId}-${splitIdx}`}
+                                  className="py-2 px-3 text-center whitespace-nowrap leading-tight bg-slate-950/40 border-l border-slate-800/70"
+                                >
+                                  <div>
+                                    <strong className="font-mono font-bold text-amber-300">
+                                      {sp.shortCode}
+                                    </strong>{' '}
+                                    <em className="text-emerald-400 not-italic font-mono text-[11px]">
+                                      ({sp.points})
+                                    </em>
+                                  </div>
+                                  <div className="font-mono text-white text-[11px] mt-0.5">
+                                    {formatElapsedSeconds(sp.cumulativeSeconds)}
+                                  </div>
+                                  <div className="font-mono text-[10px] text-slate-400">
+                                    {formatElapsedSeconds(sp.legSplitSeconds)}
+                                  </div>
+                                </td>
+                              );
+                            }
+                          )}
+
+                        {/* Kolom Finish Split (Hanya muncul saat Show Split aktif) */}
+                        {showResultSplits && (
+                          <td className="py-2 px-3 text-center whitespace-nowrap leading-tight bg-slate-950/40 border-l border-slate-800/70">
+                            {row.status === SessionStatus.FINISHED ? (
+                              <>
+                                <div className="font-mono font-bold text-emerald-300 text-[11px]">
+                                  {formatElapsedSeconds(
+                                    row.finishCumulativeSeconds ??
+                                      row.durationSeconds
+                                  )}
+                                </div>
+                                <div className="font-mono text-[10px] text-slate-400 mt-0.5">
+                                  {formatElapsedSeconds(row.finishSplitSeconds)}
+                                </div>
+                              </>
+                            ) : (
+                              <span className="font-mono text-slate-600">-</span>
+                            )}
+                          </td>
+                        )}
+
+                        {/* Tombol Hapus Hasil Sesi */}
+                        <td className="py-2.5 px-3 whitespace-nowrap text-right">
+                          {confirmDeleteSessionId === row.sessionId ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleDeleteSessionResult(row.sessionId)
+                                }
+                                className="px-2 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold cursor-pointer"
+                              >
+                                Hapus
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteSessionId(null)}
+                                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-medium cursor-pointer"
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setConfirmDeleteSessionId(row.sessionId)
+                              }
+                              className="p-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition cursor-pointer"
+                              title="Hapus hasil sesi ini"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

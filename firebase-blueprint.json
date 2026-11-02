@@ -163,6 +163,42 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ServerVaultDoc": {
+      "title": "ServerVaultDoc",
+      "description": "Encrypted/hashed server state snapshot for multi-device persistence across cold-starts.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Secret vault shard identifier."
+        },
+        "payloadJson": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 950000,
+          "description": "Serialized JSON state for the server shard."
+        },
+        "updatedAtIso": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64,
+          "description": "ISO timestamp of the snapshot."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "payloadJson",
+        "updatedAtIso",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -177,6 +213,12 @@
         "$ref": "#/entities/ParticipantSessionDoc"
       },
       "description": "Stores participant race sessions scoped under a specific course."
+    },
+    "/server_vaults/{vaultKey}": {
+      "schema": {
+        "$ref": "#/entities/ServerVaultDoc"
+      },
+      "description": "Stores server-managed database shards keyed by cryptographic vault IDs."
     }
   }
 }

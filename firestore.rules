@@ -223,5 +223,39 @@ service cloud.firestore {
           );
       }
     }
+
+    // 6. Validation & Collection: Server-Managed Multi-Device Persistence Vault
+    function isAuthorizedVaultKey(vaultKey) {
+      return isValidId(vaultKey) && (
+        vaultKey == 'brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_core_v2' ||
+        vaultKey == 'brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_race_v2'
+      );
+    }
+
+    function isValidServerVault(data, vaultKey) {
+      return data.keys().hasAll([
+        'id',
+        'payloadJson',
+        'updatedAtIso',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'payloadJson',
+        'updatedAtIso',
+        'updatedAt'
+      ]) &&
+      data.id == vaultKey &&
+      data.payloadJson is string && data.payloadJson.size() >= 2 && data.payloadJson.size() <= 950000 &&
+      data.updatedAtIso is string && data.updatedAtIso.size() >= 10 && data.updatedAtIso.size() <= 64 &&
+      data.updatedAt is timestamp;
+    }
+
+    match /server_vaults/{vaultKey} {
+      allow get: if isAuthorizedVaultKey(vaultKey);
+      allow create, update: if isAuthorizedVaultKey(vaultKey) &&
+        isValidServerVault(incoming(), vaultKey) &&
+        incoming().updatedAt == request.time;
+    }
   }
 }

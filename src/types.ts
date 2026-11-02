@@ -100,10 +100,42 @@ export interface Course {
   checkpoints: Checkpoint[];
 }
 
+export const ORIENTEERING_GENDER_OPTIONS = [
+  { value: 'Male', label: 'Male (Putra)' },
+  { value: 'Female', label: 'Female (Putri)' },
+  { value: 'Other', label: 'Other (Campuran / Umum)' },
+] as const;
+
+export const ORIENTEERING_AGE_GROUPS = [
+  'Semua Umur',
+  '<10',
+  '10-12',
+  '13-14',
+  '15-16',
+  '17-18',
+  '19-20',
+  '21-24',
+  '25-29',
+  '30-34',
+  '35-39',
+  '40-44',
+  '45-49',
+  '50-54',
+  '55-59',
+  '60-64',
+  '65-69',
+  '70-74',
+  '75-79',
+  '80-84',
+  '85+',
+] as const;
+
 export interface ParticipantPublic {
   id: string;
   name: string;
-  teamName: string; // Wajib diisi
+  teamName: string; // Wajib diisi (ditampilkan utama di Result menggantikan User name)
+  gender?: string;  // Contoh: 'Male' | 'Female' | 'Other'
+  ageGroup?: string; // Kelompok umur kompetisi orienteering atau 'Semua Umur'
   phone?: string;
   bibNumber: string;
   registeredAt: string;
@@ -159,3 +191,25 @@ export interface ParticipantSession {
   durationSeconds?: number;
   lastLocation?: LastKnownLocation; // Hanya menyimpan 1 posisi terakhir (bukan riwayat rute lengkap)
 }
+
+export interface OrganizerBackupRecord extends OrganizerPublic {
+  pinHash: string;
+  pinSalt: string;
+}
+
+export interface ParticipantBackupRecord extends ParticipantPublic {
+  pinHash: string;
+  pinSalt: string;
+}
+
+export interface OrganizerVaultBackup {
+  organizers: OrganizerBackupRecord[];
+  deletedOrganizerIds: string[];
+  courses: Course[];
+  deletedCourseIds: string[];
+  participants: ParticipantBackupRecord[];
+  sessions: ParticipantSession[];
+  reports: CheckpointReport[];
+  updatedAt?: string;
+}
+
