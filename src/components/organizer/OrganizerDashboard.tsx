@@ -45,6 +45,7 @@ import {
   clearPersistedParticipantState,
   loadOrganizerVaultBackup,
   mergeAndSaveOrganizerVaultBackup,
+  mergeSessionMonotonically,
   removeCourseFromOrganizerBackup,
   removeOrganizerFromVaultBackup,
   removeSessionFromVaultBackup,
@@ -58,6 +59,7 @@ interface DashboardApiData {
   courses: Course[];
   participants: ParticipantPublic[];
   sessions: ParticipantSession[];
+  deletedSessionIds?: string[];
   reports: CheckpointReport[];
   vaultSnapshot?: OrganizerVaultBackup;
 }
@@ -344,11 +346,37 @@ export default function OrganizerDashboard({
       const localVault = loadOrganizerVaultBackup();
       const isSuperAdmin = Boolean(data.currentOrganizer?.isSuperAdmin);
       const currentOrgId = data.currentOrganizer?.id;
+      const deletedSessionSet = new Set<string>([
+        ...(localVault.deletedSessionIds || []),
+        ...(data.deletedSessionIds || []),
+        ...(data.vaultSnapshot?.deletedSessionIds || []),
+      ]);
+      const deletedCourseSet = new Set<string>([
+        ...(localVault.deletedCourseIds || []),
+        ...(data.vaultSnapshot?.deletedCourseIds || []),
+      ]);
+
+      const visibleCourseIdSet = new Set<string>(
+        data.courses.map((c) => c.id)
+      );
+      for (const bc of localVault.courses) {
+        if (
+          bc &&
+          bc.id &&
+          !deletedCourseSet.has(bc.id) &&
+          (isSuperAdmin ||
+            !bc.createdByOrganizerId ||
+            bc.createdByOrganizerId === currentOrgId)
+        ) {
+          visibleCourseIdSet.add(bc.id);
+        }
+      }
 
       const missingCourses = localVault.courses.filter(
         (bc) =>
           bc &&
           bc.id &&
+          !deletedCourseSet.has(bc.id) &&
           (isSuperAdmin || !bc.createdByOrganizerId || bc.createdByOrganizerId === currentOrgId) &&
           !data.courses.some((sc) => sc.id === bc.id)
       );
@@ -368,10 +396,43 @@ export default function OrganizerDashboard({
           !data.participants.some((sp) => sp.id === bp.id)
       );
 
+      // Cek apakah ada sesi di Vault lokal yang hilang atau lebih maju (skor/status/pos lebih tinggi)
+      // dibandingkan respons instance server yang baru saja menjawab polling 6 detik
+      const aheadOrMissingSessions = localVault.sessions.filter((ls) => {
+        if (
+          !ls ||
+          !ls.id ||
+          deletedSessionSet.has(ls.id) ||
+          deletedCourseSet.has(ls.courseId) ||
+          !visibleCourseIdSet.has(ls.courseId)
+        ) {
+          return false;
+        }
+        const srvSess = data.sessions.find((ss) => ss.id === ls.id);
+        if (!srvSess) return true;
+        if (
+          ls.status === SessionStatus.FINISHED &&
+          srvSess.status !== SessionStatus.FINISHED
+        ) {
+          return true;
+        }
+        if (
+          (ls.validatedCheckpointIds?.length || 0) >
+          (srvSess.validatedCheckpointIds?.length || 0)
+        ) {
+          return true;
+        }
+        if ((ls.totalScore || 0) > (srvSess.totalScore || 0)) {
+          return true;
+        }
+        return false;
+      });
+
       if (
         missingCourses.length > 0 ||
         missingOrganizers.length > 0 ||
-        missingParticipants.length > 0
+        missingParticipants.length > 0 ||
+        aheadOrMissingSessions.length > 0
       ) {
         const syncRes = await fetch('/api/organizer/courses/sync-backup', {
           method: 'POST',
@@ -401,13 +462,78 @@ export default function OrganizerDashboard({
         }
       }
 
-      if (data.vaultSnapshot) {
-        mergeAndSaveOrganizerVaultBackup(data.vaultSnapshot);
-      } else {
-        saveOrganizerCoursesBackup(data.courses);
-      }
+      const mergedVault = data.vaultSnapshot
+        ? mergeAndSaveOrganizerVaultBackup(data.vaultSnapshot)
+        : mergeAndSaveOrganizerVaultBackup({
+            courses: data.courses,
+            sessions: data.sessions,
+            deletedSessionIds: data.deletedSessionIds,
+            reports: data.reports,
+          });
 
-      setDashboard(data);
+      // Gabungkan sesi dan laporan secara Monotonik dengan state sebelumnya & Vault lokal
+      // agar skor akhir maupun waktu tempuh TIDAK PERNAH berkedip mundur saat polling tiap 6 detik
+      setDashboard((prev) => {
+        const finalCourseIds = new Set(data.courses.map((c) => c.id));
+        const sessionMap = new Map<string, ParticipantSession>();
+
+        const seedSessions = [
+          ...(prev?.sessions || []),
+          ...mergedVault.sessions,
+          ...data.sessions,
+        ];
+
+        for (const s of seedSessions) {
+          if (
+            !s ||
+            !s.id ||
+            deletedSessionSet.has(s.id) ||
+            deletedCourseSet.has(s.courseId) ||
+            (!isSuperAdmin && !finalCourseIds.has(s.courseId))
+          ) {
+            continue;
+          }
+          const existing = sessionMap.get(s.id);
+          sessionMap.set(
+            s.id,
+            existing ? mergeSessionMonotonically(existing, s) : s
+          );
+        }
+
+        const reportMap = new Map<string, CheckpointReport>();
+        const seedReports = [
+          ...(prev?.reports || []),
+          ...mergedVault.reports,
+          ...data.reports,
+        ];
+        for (const r of seedReports) {
+          if (
+            !r ||
+            !r.reportId ||
+            deletedSessionSet.has(r.sessionId) ||
+            deletedCourseSet.has(r.courseId) ||
+            (!isSuperAdmin && !finalCourseIds.has(r.courseId))
+          ) {
+            continue;
+          }
+          const prevRep = reportMap.get(r.reportId);
+          reportMap.set(r.reportId, {
+            ...(prevRep || {}),
+            ...r,
+            pointsAwarded: Math.max(
+              Number(prevRep?.pointsAwarded) || 0,
+              Number(r.pointsAwarded) || 0
+            ),
+          });
+        }
+
+        return {
+          ...data,
+          sessions: Array.from(sessionMap.values()),
+          reports: Array.from(reportMap.values()),
+        };
+      });
+
       setSelectedCourseId((prev) => {
         if (prev && data.courses.some((c: Course) => c.id === prev)) return prev;
         return data.courses[0]?.id || '';
@@ -717,47 +843,13 @@ export default function OrganizerDashboard({
           ? effectiveSelectedCourse
           : baseCourse;
 
-      const liveDurationSec =
-        sess.status === SessionStatus.FINISHED
-          ? sess.durationSeconds
-          : sess.status === SessionStatus.ACTIVE && sess.startedAt
-          ? Math.max(0, Math.floor((nowTick - Date.parse(sess.startedAt)) / 1000))
-          : undefined;
-
-      const grossScore = course
-        ? course.scoringEnabled
-          ? sess.validatedCheckpointIds.reduce((sum, cpId) => {
-              const cp = course.checkpoints.find((c) => c.id === cpId);
-              return sum + (cp ? Number(cp.points) || 0 : 0);
-            }, 0)
-          : 0
-        : sess.grossScore ?? sess.totalScore;
-
-      let overtimeMinutes = 0;
-      let penaltyPoints = 0;
-
-      if (
-        course &&
-        course.durationMinutes &&
-        course.durationMinutes > 0 &&
-        liveDurationSec !== undefined &&
-        liveDurationSec > course.durationMinutes * 60
-      ) {
-        const overSec = liveDurationSec - course.durationMinutes * 60;
-        overtimeMinutes = Math.ceil(overSec / 60);
-        if (course.overtimePenaltyEnabled) {
-          penaltyPoints =
-            overtimeMinutes *
-            Math.max(0, Number(course.overtimePenaltyPointsPerMinute) || 0);
-        }
-      }
-
-      const netScore = Math.max(0, grossScore - penaltyPoints);
-
       // Hitung Split per Pos (#1, #2, ..., #N) secara kronologis berdasarkan waktu kunjungan peserta
       const startMs = sess.startedAt ? Date.parse(sess.startedAt) : undefined;
       const validStartMs =
         startMs !== undefined && !Number.isNaN(startMs) ? startMs : undefined;
+      const finishMs = sess.finishedAt ? Date.parse(sess.finishedAt) : undefined;
+      const validFinishMs =
+        finishMs !== undefined && !Number.isNaN(finishMs) ? finishMs : undefined;
 
       const sessionCpReports = dashboard.reports
         .filter(
@@ -838,17 +930,82 @@ export default function OrganizerDashboard({
         });
       }
 
-      // Hitung Finish Cumulative & Finish Leg Split (dari pos terakhir ke garis Finish)
-      const finishMs = sess.finishedAt ? Date.parse(sess.finishedAt) : undefined;
-      const validFinishMs =
-        finishMs !== undefined && !Number.isNaN(finishMs) ? finishMs : undefined;
-      const finishCumulativeSeconds =
-        sess.status === SessionStatus.FINISHED
-          ? sess.durationSeconds ??
-            (validStartMs !== undefined && validFinishMs !== undefined
-              ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1000))
-              : undefined)
+      // Durasi tempuh yang terkunci stabil (tidak pernah mundur ke angka yang lebih kecil)
+      const lastSplitCumulativeSec =
+        orderedSplits.length > 0
+          ? orderedSplits[orderedSplits.length - 1].cumulativeSeconds
           : undefined;
+
+      const computedFinishDurationSec =
+        validStartMs !== undefined && validFinishMs !== undefined
+          ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1000))
+          : undefined;
+
+      const liveDurationSec =
+        sess.status === SessionStatus.FINISHED
+          ? sess.durationSeconds && sess.durationSeconds > 0
+            ? sess.durationSeconds
+            : computedFinishDurationSec ?? lastSplitCumulativeSec
+          : sess.status === SessionStatus.ACTIVE && validStartMs !== undefined
+          ? Math.max(
+              sess.durationSeconds || 0,
+              lastSplitCumulativeSec || 0,
+              Math.floor((nowTick - validStartMs) / 1000)
+            )
+          : sess.durationSeconds;
+
+      // Skor kotor (grossScore) dihitung dari pos tervalidasi, laporan resmi, dan skor resmi sesi
+      // menggunakan nilai tertinggi yang sah agar tidak pernah berkedip menjadi 0 pts
+      const cpMatchedGross = course
+        ? course.scoringEnabled
+          ? sess.validatedCheckpointIds.reduce((sum, cpId) => {
+              const cp = course.checkpoints.find((c) => c.id === cpId);
+              return sum + (cp ? Number(cp.points) || 0 : 0);
+            }, 0)
+          : 0
+        : 0;
+
+      const splitsGross = orderedSplits.reduce(
+        (sum, sp) => sum + (Number(sp.points) || 0),
+        0
+      );
+
+      const sessionStoredGross =
+        typeof sess.grossScore === 'number'
+          ? sess.grossScore
+          : typeof sess.totalScore === 'number'
+          ? sess.totalScore
+          : 0;
+
+      const grossScore =
+        course && !course.scoringEnabled
+          ? 0
+          : Math.max(cpMatchedGross, splitsGross, sessionStoredGross);
+
+      let overtimeMinutes = 0;
+      let penaltyPoints = 0;
+
+      if (
+        course &&
+        course.durationMinutes &&
+        course.durationMinutes > 0 &&
+        liveDurationSec !== undefined &&
+        liveDurationSec > course.durationMinutes * 60
+      ) {
+        const overSec = liveDurationSec - course.durationMinutes * 60;
+        overtimeMinutes = Math.ceil(overSec / 60);
+        if (course.overtimePenaltyEnabled) {
+          penaltyPoints =
+            overtimeMinutes *
+            Math.max(0, Number(course.overtimePenaltyPointsPerMinute) || 0);
+        }
+      }
+
+      const netScore = Math.max(0, grossScore - penaltyPoints);
+
+      // Hitung Finish Cumulative & Finish Leg Split (dari pos terakhir ke garis Finish)
+      const finishCumulativeSeconds =
+        sess.status === SessionStatus.FINISHED ? liveDurationSec : undefined;
 
       let finishSplitSeconds: number | undefined;
       if (sess.status === SessionStatus.FINISHED) {
@@ -859,13 +1016,11 @@ export default function OrganizerDashboard({
           );
         } else if (
           finishCumulativeSeconds !== undefined &&
-          orderedSplits.length > 0 &&
-          orderedSplits[orderedSplits.length - 1].cumulativeSeconds !== undefined
+          lastSplitCumulativeSec !== undefined
         ) {
           finishSplitSeconds = Math.max(
             0,
-            finishCumulativeSeconds -
-              (orderedSplits[orderedSplits.length - 1].cumulativeSeconds || 0)
+            finishCumulativeSeconds - lastSplitCumulativeSec
           );
         } else {
           finishSplitSeconds = finishCumulativeSeconds;
@@ -886,7 +1041,10 @@ export default function OrganizerDashboard({
         courseName: course?.name || sess.courseId,
         attemptNumber: sess.attemptNumber || 1,
         status: sess.status,
-        checkpointsCompleted: sess.validatedCheckpointIds.length,
+        checkpointsCompleted: Math.max(
+          sess.validatedCheckpointIds.length,
+          orderedSplits.length
+        ),
         totalCheckpoints: course?.checkpoints.length || 0,
         grossScore,
         overtimeMinutes,
@@ -1171,6 +1329,17 @@ export default function OrganizerDashboard({
     if (!token) return;
     try {
       removeSessionFromVaultBackup(sessionId);
+      setDashboard((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          sessions: prev.sessions.filter((s) => s.id !== sessionId),
+          deletedSessionIds: Array.from(
+            new Set([...(prev.deletedSessionIds || []), sessionId])
+          ),
+          reports: prev.reports.filter((r) => r.sessionId !== sessionId),
+        };
+      });
       const res = await fetch(`/api/organizer/sessions/${sessionId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },

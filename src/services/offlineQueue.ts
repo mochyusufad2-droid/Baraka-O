@@ -219,8 +219,151 @@ function createEmptyVaultBackup(): OrganizerVaultBackup {
     deletedCourseIds: [],
     participants: [],
     sessions: [],
+    deletedSessionIds: [],
     reports: [],
     updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Menggabungkan dua snapshot sesi peserta secara monotonik (Monotonic Session Progress Lock):
+ * Sesi yang sudah lebih maju (mis. FINISHED, skor lebih tinggi, pos tervalidasi lebih banyak,
+ * atau durasi tempuh resmi sudah tercatat) TIDAK AKAN PERNAH mundur ke snapshot lama.
+ */
+export function mergeSessionMonotonically(
+  current: ParticipantSession,
+  incoming: ParticipantSession
+): ParticipantSession {
+  const statusRank = (st: SessionStatus): number => {
+    if (st === SessionStatus.FINISHED) return 3;
+    if (st === SessionStatus.ACTIVE) return 2;
+    return 1;
+  };
+
+  const curRank = statusRank(current.status);
+  const incRank = statusRank(incoming.status);
+  const winningStatus = curRank >= incRank ? current.status : incoming.status;
+
+  // Gabungkan seluruh ID checkpoint yang sudah tervalidasi dengan tetap menjaga urutan kronologis
+  const mergedCpIds: string[] = [];
+  const primaryCpList =
+    (incoming.validatedCheckpointIds?.length || 0) >=
+    (current.validatedCheckpointIds?.length || 0)
+      ? incoming.validatedCheckpointIds || []
+      : current.validatedCheckpointIds || [];
+  const secondaryCpList =
+    primaryCpList === (incoming.validatedCheckpointIds || [])
+      ? current.validatedCheckpointIds || []
+      : incoming.validatedCheckpointIds || [];
+
+  for (const cpId of [...primaryCpList, ...secondaryCpList]) {
+    if (cpId && !mergedCpIds.includes(cpId)) {
+      mergedCpIds.push(cpId);
+    }
+  }
+
+  // Pilih waktu mulai paling awal yang valid
+  const startedAt = (() => {
+    if (current.startedAt && incoming.startedAt) {
+      const cMs = Date.parse(current.startedAt);
+      const iMs = Date.parse(incoming.startedAt);
+      if (!Number.isNaN(cMs) && !Number.isNaN(iMs)) {
+        return cMs <= iMs ? current.startedAt : incoming.startedAt;
+      }
+    }
+    return incoming.startedAt || current.startedAt;
+  })();
+
+  const finishedAt = incoming.finishedAt || current.finishedAt;
+
+  // Durasi resmi: jika sudah FINISHED, utamakan durasi dari snapshot yang berstatus FINISHED
+  let durationSeconds: number | undefined;
+  if (winningStatus === SessionStatus.FINISHED) {
+    if (
+      incRank === 3 &&
+      typeof incoming.durationSeconds === 'number' &&
+      incoming.durationSeconds > 0
+    ) {
+      durationSeconds = incoming.durationSeconds;
+    } else if (
+      curRank === 3 &&
+      typeof current.durationSeconds === 'number' &&
+      current.durationSeconds > 0
+    ) {
+      durationSeconds = current.durationSeconds;
+    } else if (startedAt && finishedAt) {
+      const diff = Math.round(
+        (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000
+      );
+      if (!Number.isNaN(diff) && diff >= 0) {
+        durationSeconds = diff;
+      }
+    }
+  }
+  if (durationSeconds === undefined) {
+    const cDur =
+      typeof current.durationSeconds === 'number' ? current.durationSeconds : undefined;
+    const iDur =
+      typeof incoming.durationSeconds === 'number' ? incoming.durationSeconds : undefined;
+    if (cDur !== undefined && iDur !== undefined) {
+      durationSeconds = Math.max(cDur, iDur);
+    } else {
+      durationSeconds = iDur ?? cDur;
+    }
+  }
+
+  const curGross =
+    typeof current.grossScore === 'number'
+      ? current.grossScore
+      : current.totalScore || 0;
+  const incGross =
+    typeof incoming.grossScore === 'number'
+      ? incoming.grossScore
+      : incoming.totalScore || 0;
+  const grossScore = Math.max(curGross, incGross);
+
+  const curTotal = typeof current.totalScore === 'number' ? current.totalScore : 0;
+  const incTotal = typeof incoming.totalScore === 'number' ? incoming.totalScore : 0;
+  const totalScore = Math.max(curTotal, incTotal);
+
+  const overtimeMinutes = Math.max(
+    current.overtimeMinutes || 0,
+    incoming.overtimeMinutes || 0
+  );
+  const penaltyPoints = Math.max(
+    current.penaltyPoints || 0,
+    incoming.penaltyPoints || 0
+  );
+
+  // Pilih lokasi terakhir yang paling baru diukur
+  const lastLocation = (() => {
+    if (current.lastLocation && incoming.lastLocation) {
+      const cLocMs = Date.parse(current.lastLocation.measuredAt);
+      const iLocMs = Date.parse(incoming.lastLocation.measuredAt);
+      if (!Number.isNaN(cLocMs) && !Number.isNaN(iLocMs)) {
+        return iLocMs >= cLocMs ? incoming.lastLocation : current.lastLocation;
+      }
+    }
+    return incoming.lastLocation || current.lastLocation;
+  })();
+
+  return {
+    ...current,
+    ...incoming,
+    attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
+    status: winningStatus,
+    loadedAt: current.loadedAt || incoming.loadedAt,
+    startedAt,
+    startedReceivedAt: incoming.startedReceivedAt || current.startedReceivedAt,
+    finishedAt,
+    finishedReceivedAt: incoming.finishedReceivedAt || current.finishedReceivedAt,
+    validatedCheckpointIds: mergedCpIds,
+    grossScore,
+    overtimeMinutes,
+    penaltyPoints,
+    totalScore,
+    durationSeconds,
+    lastLocation,
   };
 }
 
@@ -257,6 +400,10 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       ? parsed.deletedOrganizerIds
       : [];
     const deletedOrganizerSet = new Set(deletedOrganizerIds);
+    const deletedSessionIds = Array.isArray(parsed.deletedSessionIds)
+      ? parsed.deletedSessionIds
+      : [];
+    const deletedSessionSet = new Set(deletedSessionIds);
 
     const courseMap = new Map<string, Course>();
     for (const c of legacyCourses) {
@@ -282,13 +429,21 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
 
     const sessions = Array.isArray(parsed.sessions)
       ? parsed.sessions.filter(
-          (s) => s && s.id && !deletedCourseSet.has(s.courseId)
+          (s) =>
+            s &&
+            s.id &&
+            !deletedCourseSet.has(s.courseId) &&
+            !deletedSessionSet.has(s.id)
         )
       : [];
 
     const reports = Array.isArray(parsed.reports)
       ? parsed.reports.filter(
-          (r) => r && r.reportId && !deletedCourseSet.has(r.courseId)
+          (r) =>
+            r &&
+            r.reportId &&
+            !deletedCourseSet.has(r.courseId) &&
+            !deletedSessionSet.has(r.sessionId)
         )
       : [];
 
@@ -299,6 +454,7 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       deletedCourseIds,
       participants,
       sessions,
+      deletedSessionIds,
       reports,
       updatedAt: parsed.updatedAt || new Date().toISOString(),
     };
@@ -327,6 +483,10 @@ export function mergeAndSaveOrganizerVaultBackup(
   const deletedCourseSet = new Set<string>([
     ...current.deletedCourseIds,
     ...(incoming.deletedCourseIds || []),
+  ]);
+  const deletedSessionSet = new Set<string>([
+    ...(current.deletedSessionIds || []),
+    ...(incoming.deletedSessionIds || []),
   ]);
 
   // 1. Merge Organizers by ID
@@ -386,17 +546,28 @@ export function mergeAndSaveOrganizerVaultBackup(
     }
   }
 
-  // 4. Merge Sessions by ID
+  // 4. Merge Sessions by ID secara Monotonik (mencegah skor & durasi mundur ke angka lama)
   const sessionMap = new Map<string, ParticipantSession>();
   for (const s of current.sessions) {
-    if (s && s.id && !deletedCourseSet.has(s.courseId)) {
+    if (
+      s &&
+      s.id &&
+      !deletedCourseSet.has(s.courseId) &&
+      !deletedSessionSet.has(s.id)
+    ) {
       sessionMap.set(s.id, s);
     }
   }
   if (Array.isArray(incoming.sessions)) {
     for (const s of incoming.sessions) {
-      if (s && s.id && !deletedCourseSet.has(s.courseId)) {
-        sessionMap.set(s.id, s);
+      if (
+        s &&
+        s.id &&
+        !deletedCourseSet.has(s.courseId) &&
+        !deletedSessionSet.has(s.id)
+      ) {
+        const prev = sessionMap.get(s.id);
+        sessionMap.set(s.id, prev ? mergeSessionMonotonically(prev, s) : s);
       }
     }
   }
@@ -404,14 +575,32 @@ export function mergeAndSaveOrganizerVaultBackup(
   // 5. Merge Reports by reportId
   const reportMap = new Map<string, CheckpointReport>();
   for (const r of current.reports) {
-    if (r && r.reportId && !deletedCourseSet.has(r.courseId)) {
+    if (
+      r &&
+      r.reportId &&
+      !deletedCourseSet.has(r.courseId) &&
+      !deletedSessionSet.has(r.sessionId)
+    ) {
       reportMap.set(r.reportId, r);
     }
   }
   if (Array.isArray(incoming.reports)) {
     for (const r of incoming.reports) {
-      if (r && r.reportId && !deletedCourseSet.has(r.courseId)) {
-        reportMap.set(r.reportId, r);
+      if (
+        r &&
+        r.reportId &&
+        !deletedCourseSet.has(r.courseId) &&
+        !deletedSessionSet.has(r.sessionId)
+      ) {
+        const prevRep = reportMap.get(r.reportId);
+        reportMap.set(r.reportId, {
+          ...(prevRep || {}),
+          ...r,
+          pointsAwarded: Math.max(
+            Number(prevRep?.pointsAwarded) || 0,
+            Number(r.pointsAwarded) || 0
+          ),
+        });
       }
     }
   }
@@ -423,6 +612,7 @@ export function mergeAndSaveOrganizerVaultBackup(
     deletedCourseIds: Array.from(deletedCourseSet),
     participants: Array.from(partMap.values()),
     sessions: Array.from(sessionMap.values()),
+    deletedSessionIds: Array.from(deletedSessionSet),
     reports: Array.from(reportMap.values()),
     updatedAt: new Date().toISOString(),
   };
@@ -502,12 +692,16 @@ export function removeOrganizerFromVaultBackup(organizerId: string): void {
 
 export function removeSessionFromVaultBackup(sessionId: string): void {
   const current = loadOrganizerVaultBackup();
+  const nextDeletedSessions = Array.from(
+    new Set([...(current.deletedSessionIds || []), sessionId])
+  );
   const filteredSessions = current.sessions.filter((s) => s.id !== sessionId);
   const filteredReports = current.reports.filter((r) => r.sessionId !== sessionId);
 
   const updated: OrganizerVaultBackup = {
     ...current,
     sessions: filteredSessions,
+    deletedSessionIds: nextDeletedSessions,
     reports: filteredReports,
     updatedAt: new Date().toISOString(),
   };

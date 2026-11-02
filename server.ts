@@ -212,6 +212,7 @@ interface DatabaseSchema {
   deletedCourseIds?: string[];
   participants: StoredParticipant[];
   sessions: ParticipantSession[];
+  deletedSessionIds?: string[];
   reports: CheckpointReport[];
 }
 
@@ -402,6 +403,7 @@ function createInitialDatabase(): DatabaseSchema {
     ],
     deletedCourseIds: [],
     deletedOrganizerIds: [],
+    deletedSessionIds: [],
     organizers: [],
     sessions: [],
     reports: [],
@@ -447,6 +449,9 @@ function parseAndMigrateDbContent(raw: string): DatabaseSchema | null {
     }
     if (!Array.isArray(parsed.deletedOrganizerIds)) {
       parsed.deletedOrganizerIds = [];
+    }
+    if (!Array.isArray(parsed.deletedSessionIds)) {
+      parsed.deletedSessionIds = [];
     }
     if (!Array.isArray(parsed.organizers)) {
       parsed.organizers = [];
@@ -584,14 +589,19 @@ interface CoreVaultPayload {
 
 interface RaceVaultPayload {
   sessions?: ParticipantSession[];
+  deletedSessionIds?: string[];
   reports?: CheckpointReport[];
 }
 
 let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let isPushingToCloud = false;
 let isCloudHydrated = false;
+let lastCloudHydratedAt = 0;
 let cloudHydrationPromise: Promise<void> | null = null;
+const CLOUD_HYDRATE_TTL_MS = 2500;
 
 async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
+  isPushingToCloud = true;
   try {
     const nowIso = new Date().toISOString();
     const corePayload: CoreVaultPayload = {
@@ -604,6 +614,7 @@ async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
     };
     const racePayload: RaceVaultPayload = {
       sessions: dbSnapshot.sessions || [],
+      deletedSessionIds: dbSnapshot.deletedSessionIds || [],
       reports: dbSnapshot.reports || [],
     };
 
@@ -628,8 +639,11 @@ async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
           })
         : Promise.resolve(),
     ]);
+    lastCloudHydratedAt = Date.now();
   } catch {
     // Tetap berjalan lancar menggunakan penyimpanan lokal jika jaringan/cloud offline sementara
+  } finally {
+    isPushingToCloud = false;
   }
 }
 
@@ -640,7 +654,145 @@ function scheduleCloudSync(dbToSync: DatabaseSchema): void {
   cloudSyncTimer = setTimeout(() => {
     cloudSyncTimer = null;
     void pushDbToCloudNow(dbToSync);
-  }, 250);
+  }, 180);
+}
+
+/**
+ * Menggabungkan dua snapshot sesi peserta secara monotonik:
+ * Sesi yang sudah lebih maju (mis. FINISHED, skor lebih tinggi, pos tervalidasi lebih banyak,
+ * atau durasi tempuh resmi sudah tercatat) tidak akan pernah mundur ke snapshot lama.
+ */
+function mergeSessionMonotonicallyServer(
+  current: ParticipantSession,
+  incoming: ParticipantSession
+): ParticipantSession {
+  const statusRank = (st: SessionStatusType): number => {
+    if (st === SessionStatus.FINISHED) return 3;
+    if (st === SessionStatus.ACTIVE) return 2;
+    return 1;
+  };
+
+  const curRank = statusRank(current.status);
+  const incRank = statusRank(incoming.status);
+  const winningStatus = curRank >= incRank ? current.status : incoming.status;
+
+  const mergedCpIds: string[] = [];
+  const primaryCpList =
+    (incoming.validatedCheckpointIds?.length || 0) >=
+    (current.validatedCheckpointIds?.length || 0)
+      ? incoming.validatedCheckpointIds || []
+      : current.validatedCheckpointIds || [];
+  const secondaryCpList =
+    primaryCpList === (incoming.validatedCheckpointIds || [])
+      ? current.validatedCheckpointIds || []
+      : incoming.validatedCheckpointIds || [];
+
+  for (const cpId of [...primaryCpList, ...secondaryCpList]) {
+    if (cpId && !mergedCpIds.includes(cpId)) {
+      mergedCpIds.push(cpId);
+    }
+  }
+
+  const startedAt = (() => {
+    if (current.startedAt && incoming.startedAt) {
+      const cMs = Date.parse(current.startedAt);
+      const iMs = Date.parse(incoming.startedAt);
+      if (!Number.isNaN(cMs) && !Number.isNaN(iMs)) {
+        return cMs <= iMs ? current.startedAt : incoming.startedAt;
+      }
+    }
+    return incoming.startedAt || current.startedAt;
+  })();
+
+  const finishedAt = incoming.finishedAt || current.finishedAt;
+
+  let durationSeconds: number | undefined;
+  if (winningStatus === SessionStatus.FINISHED) {
+    if (
+      incRank === 3 &&
+      typeof incoming.durationSeconds === 'number' &&
+      incoming.durationSeconds > 0
+    ) {
+      durationSeconds = incoming.durationSeconds;
+    } else if (
+      curRank === 3 &&
+      typeof current.durationSeconds === 'number' &&
+      current.durationSeconds > 0
+    ) {
+      durationSeconds = current.durationSeconds;
+    } else if (startedAt && finishedAt) {
+      const diff = Math.round(
+        (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000
+      );
+      if (!Number.isNaN(diff) && diff >= 0) {
+        durationSeconds = diff;
+      }
+    }
+  }
+  if (durationSeconds === undefined) {
+    const cDur =
+      typeof current.durationSeconds === 'number' ? current.durationSeconds : undefined;
+    const iDur =
+      typeof incoming.durationSeconds === 'number' ? incoming.durationSeconds : undefined;
+    if (cDur !== undefined && iDur !== undefined) {
+      durationSeconds = Math.max(cDur, iDur);
+    } else {
+      durationSeconds = iDur ?? cDur;
+    }
+  }
+
+  const curGross =
+    typeof current.grossScore === 'number'
+      ? current.grossScore
+      : current.totalScore || 0;
+  const incGross =
+    typeof incoming.grossScore === 'number'
+      ? incoming.grossScore
+      : incoming.totalScore || 0;
+  const grossScore = Math.max(curGross, incGross);
+
+  const curTotal = typeof current.totalScore === 'number' ? current.totalScore : 0;
+  const incTotal = typeof incoming.totalScore === 'number' ? incoming.totalScore : 0;
+  const totalScore = Math.max(curTotal, incTotal);
+
+  const overtimeMinutes = Math.max(
+    current.overtimeMinutes || 0,
+    incoming.overtimeMinutes || 0
+  );
+  const penaltyPoints = Math.max(
+    current.penaltyPoints || 0,
+    incoming.penaltyPoints || 0
+  );
+
+  const lastLocation = (() => {
+    if (current.lastLocation && incoming.lastLocation) {
+      const cLocMs = Date.parse(current.lastLocation.measuredAt);
+      const iLocMs = Date.parse(incoming.lastLocation.measuredAt);
+      if (!Number.isNaN(cLocMs) && !Number.isNaN(iLocMs)) {
+        return iLocMs >= cLocMs ? incoming.lastLocation : current.lastLocation;
+      }
+    }
+    return incoming.lastLocation || current.lastLocation;
+  })();
+
+  return {
+    ...current,
+    ...incoming,
+    attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
+    status: winningStatus,
+    loadedAt: current.loadedAt || incoming.loadedAt,
+    startedAt,
+    startedReceivedAt: incoming.startedReceivedAt || current.startedReceivedAt,
+    finishedAt,
+    finishedReceivedAt: incoming.finishedReceivedAt || current.finishedReceivedAt,
+    validatedCheckpointIds: mergedCpIds,
+    grossScore,
+    overtimeMinutes,
+    penaltyPoints,
+    totalScore,
+    durationSeconds,
+    lastLocation,
+  };
 }
 
 /**
@@ -657,6 +809,7 @@ function smartMergeIntoServerDb(
     deletedCourseIds?: string[];
     participants?: StoredParticipant[];
     sessions?: ParticipantSession[];
+    deletedSessionIds?: string[];
     reports?: CheckpointReport[];
   },
   authScope?: OrganizerAuthContext
@@ -682,7 +835,16 @@ function smartMergeIntoServerDb(
     changed = true;
   }
 
-  // Bersihkan course/organizer di targetDb jika masuk daftar hapus
+  const deletedSessionSet = new Set<string>([
+    ...(targetDb.deletedSessionIds || []),
+    ...(incoming.deletedSessionIds || []),
+  ]);
+  if (deletedSessionSet.size !== (targetDb.deletedSessionIds || []).length) {
+    targetDb.deletedSessionIds = Array.from(deletedSessionSet);
+    changed = true;
+  }
+
+  // Bersihkan course/organizer/session/report di targetDb jika masuk daftar hapus
   const beforeCoursesLen = targetDb.courses.length;
   targetDb.courses = targetDb.courses.filter((c) => !deletedCourseSet.has(c.id));
   if (targetDb.courses.length !== beforeCoursesLen) changed = true;
@@ -691,6 +853,18 @@ function smartMergeIntoServerDb(
   const beforeOrgsLen = targetDb.organizers.length;
   targetDb.organizers = targetDb.organizers.filter((o) => !deletedOrganizerSet.has(o.id));
   if (targetDb.organizers.length !== beforeOrgsLen) changed = true;
+
+  const beforeSessionsLen = targetDb.sessions.length;
+  targetDb.sessions = targetDb.sessions.filter(
+    (s) => !deletedCourseSet.has(s.courseId) && !deletedSessionSet.has(s.id)
+  );
+  if (targetDb.sessions.length !== beforeSessionsLen) changed = true;
+
+  const beforeReportsLen = targetDb.reports.length;
+  targetDb.reports = targetDb.reports.filter(
+    (r) => !deletedCourseSet.has(r.courseId) && !deletedSessionSet.has(r.sessionId)
+  );
+  if (targetDb.reports.length !== beforeReportsLen) changed = true;
 
   // 2. OrganizerAuth (Superadmin PIN hash) jika dari Cloud
   if (
@@ -832,40 +1006,58 @@ function smartMergeIntoServerDb(
     }
   }
 
-  // 7. Smart Merge Sessions berdasarkan ID
-  if (Array.isArray(incoming.sessions)) {
-    for (const rawSess of incoming.sessions) {
-      if (!rawSess || !rawSess.id || deletedCourseSet.has(rawSess.courseId)) continue;
-      const existingIdx = targetDb.sessions.findIndex((s) => s.id === rawSess.id);
-      if (existingIdx === -1) {
-        targetDb.sessions.push(rawSess);
+  // 7. Smart Merge Reports berdasarkan reportId terlebih dahulu agar siap dipakai rekalkulasi sesi
+  if (Array.isArray(incoming.reports)) {
+    for (const rawRep of incoming.reports) {
+      if (
+        !rawRep ||
+        !rawRep.reportId ||
+        deletedCourseSet.has(rawRep.courseId) ||
+        deletedSessionSet.has(rawRep.sessionId)
+      ) {
+        continue;
+      }
+      const existingRepIdx = targetDb.reports.findIndex(
+        (r) => r.reportId === rawRep.reportId
+      );
+      if (existingRepIdx === -1) {
+        targetDb.reports.push(rawRep);
         changed = true;
       } else {
-        const current = targetDb.sessions[existingIdx];
+        const prevRep = targetDb.reports[existingRepIdx];
         if (
-          rawSess.validatedCheckpointIds &&
-          rawSess.validatedCheckpointIds.length > current.validatedCheckpointIds.length
+          (Number(rawRep.pointsAwarded) || 0) >
+          (Number(prevRep.pointsAwarded) || 0)
         ) {
-          targetDb.sessions[existingIdx] = rawSess;
-          changed = true;
-        } else if (
-          current.status !== SessionStatus.FINISHED &&
-          rawSess.status === SessionStatus.FINISHED
-        ) {
-          targetDb.sessions[existingIdx] = rawSess;
+          prevRep.pointsAwarded = rawRep.pointsAwarded;
           changed = true;
         }
       }
     }
   }
 
-  // 8. Smart Merge Reports berdasarkan reportId
-  if (Array.isArray(incoming.reports)) {
-    for (const rawRep of incoming.reports) {
-      if (!rawRep || !rawRep.reportId || deletedCourseSet.has(rawRep.courseId)) continue;
-      if (!targetDb.reports.some((r) => r.reportId === rawRep.reportId)) {
-        targetDb.reports.push(rawRep);
+  // 8. Smart Merge Sessions berdasarkan ID secara Monotonik
+  if (Array.isArray(incoming.sessions)) {
+    for (const rawSess of incoming.sessions) {
+      if (
+        !rawSess ||
+        !rawSess.id ||
+        deletedCourseSet.has(rawSess.courseId) ||
+        deletedSessionSet.has(rawSess.id)
+      ) {
+        continue;
+      }
+      const existingIdx = targetDb.sessions.findIndex((s) => s.id === rawSess.id);
+      if (existingIdx === -1) {
+        targetDb.sessions.push(rawSess);
         changed = true;
+      } else {
+        const current = targetDb.sessions[existingIdx];
+        const mergedSess = mergeSessionMonotonicallyServer(current, rawSess);
+        if (JSON.stringify(current) !== JSON.stringify(mergedSess)) {
+          targetDb.sessions[existingIdx] = mergedSess;
+          changed = true;
+        }
       }
     }
   }
@@ -906,8 +1098,14 @@ function saveDb(dbToSave: DatabaseSchema): void {
 
 const db: DatabaseSchema = loadDb();
 
-async function hydrateDbFromCloud(): Promise<void> {
-  if (isCloudHydrated) return;
+async function hydrateDbFromCloud(force = false): Promise<void> {
+  if (!force && isCloudHydrated && Date.now() - lastCloudHydratedAt < CLOUD_HYDRATE_TTL_MS) {
+    return;
+  }
+  if (cloudSyncTimer || isPushingToCloud) {
+    // Jangan menimpa memori lokal saat sedang ada antrean penulisan baru ke Cloud
+    return;
+  }
   try {
     const [coreSnap, raceSnap] = await Promise.all([
       firestoreGetDoc(firestoreDoc(cloudFirestore, 'server_vaults', CORE_VAULT_KEY)),
@@ -940,28 +1138,38 @@ async function hydrateDbFromCloud(): Promise<void> {
     }
 
     if (mergedFromCloud) {
+      db.courses.forEach((course) => {
+        db.sessions
+          .filter((s) => s.courseId === course.id)
+          .forEach((s) => recalculateSessionScore(s, course));
+      });
       saveDbToDiskOnly(db);
     }
 
     // Jika Cloud masih kosong pada saat pertama kali diaktifkan, langsung unggah data awal server ke Cloud
-    if (!cloudHasData) {
+    if (!cloudHasData && !isCloudHydrated) {
       await pushDbToCloudNow(db);
     }
   } catch {
     // Jika offline sementara, lanjutkan dengan database lokal
   } finally {
     isCloudHydrated = true;
+    lastCloudHydratedAt = Date.now();
   }
 }
 
 async function ensureCloudHydrated(): Promise<void> {
-  if (isCloudHydrated) return;
+  const needsRefresh =
+    !isCloudHydrated || Date.now() - lastCloudHydratedAt >= CLOUD_HYDRATE_TTL_MS;
+  if (!needsRefresh) return;
   if (!cloudHydrationPromise) {
-    cloudHydrationPromise = hydrateDbFromCloud();
+    cloudHydrationPromise = hydrateDbFromCloud().finally(() => {
+      cloudHydrationPromise = null;
+    });
   }
   await Promise.race([
     cloudHydrationPromise,
-    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    new Promise<void>((resolve) => setTimeout(resolve, 2500)),
   ]);
 }
 
@@ -1132,19 +1340,73 @@ function isSetupQrPayload(qr?: string, course?: Course): boolean {
 /**
  * Menghitung ulang skor kotor (grossScore), menit keterlambatan (overtimeMinutes),
  * potongan penalti (penaltyPoints), dan skor bersih akhir (totalScore) pada sesi peserta.
+ * Dilengkapi pelindung anti-nol (fallback ke laporan checkpoint resmi & skor sesi sebelumnya)
+ * agar skor tidak pernah berkedip ke 0 pts ketika ada sinkronisasi lintas instance.
  */
 function recalculateSessionScore(session: ParticipantSession, course: Course): void {
-  // Pastikan hanya checkpoint yang masih ada di course yang dihitung
-  session.validatedCheckpointIds = session.validatedCheckpointIds.filter((cpId) =>
-    course.checkpoints.some((c) => c.id === cpId)
+  const acceptedSessionCpReports = db.reports.filter(
+    (r) =>
+      r.sessionId === session.id &&
+      r.reportType === 'CHECKPOINT' &&
+      r.syncStatus === SyncStatus.ACCEPTED_SERVER
   );
 
-  const grossScore = course.scoringEnabled
+  // Pastikan seluruh checkpoint dari laporan sah juga tercatat di validatedCheckpointIds
+  for (const rep of acceptedSessionCpReports) {
+    if (
+      rep.checkpointId &&
+      !session.validatedCheckpointIds.includes(rep.checkpointId)
+    ) {
+      session.validatedCheckpointIds.push(rep.checkpointId);
+    }
+  }
+
+  // Hitung poin berdasarkan kecocokan ID pos di course
+  const cpMatchedGross = course.scoringEnabled
     ? session.validatedCheckpointIds.reduce((sum, cpId) => {
         const cp = course.checkpoints.find((c) => c.id === cpId);
         return sum + (cp ? Number(cp.points) || 0 : 0);
       }, 0)
     : 0;
+
+  // Hitung poin berdasarkan laporan checkpoint resmi (antisipasi jika ID checkpoint sempat berubah/diedit)
+  const seenReportCpIds = new Set<string>();
+  let reportsGross = 0;
+  if (course.scoringEnabled) {
+    for (const rep of acceptedSessionCpReports) {
+      if (!rep.checkpointId || seenReportCpIds.has(rep.checkpointId)) continue;
+      seenReportCpIds.add(rep.checkpointId);
+      const cp = course.checkpoints.find((c) => c.id === rep.checkpointId);
+      const pts = cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0;
+      reportsGross += pts;
+    }
+  }
+
+  const prevGross =
+    typeof session.grossScore === 'number'
+      ? session.grossScore
+      : typeof session.totalScore === 'number'
+      ? session.totalScore
+      : 0;
+
+  const grossScore = course.scoringEnabled
+    ? Math.max(cpMatchedGross, reportsGross, prevGross)
+    : 0;
+
+  // Pastikan durasi tempuh sesi yang sudah FINISHED selalu terkunci stabil
+  if (
+    session.status === SessionStatus.FINISHED &&
+    (session.durationSeconds === undefined || session.durationSeconds <= 0) &&
+    session.startedAt &&
+    session.finishedAt
+  ) {
+    const diffSec = Math.round(
+      (Date.parse(session.finishedAt) - Date.parse(session.startedAt)) / 1000
+    );
+    if (!Number.isNaN(diffSec) && diffSec >= 0) {
+      session.durationSeconds = diffSec;
+    }
+  }
 
   let overtimeMinutes = 0;
   let penaltyPoints = 0;
@@ -1176,7 +1438,13 @@ function recalculateSessionScore(session: ParticipantSession, course: Course): v
       r.syncStatus === SyncStatus.ACCEPTED_SERVER
     ) {
       const cp = course.checkpoints.find((c) => c.id === r.checkpointId);
-      r.pointsAwarded = course.scoringEnabled && cp ? Number(cp.points) || 0 : 0;
+      if (course.scoringEnabled) {
+        if (cp) {
+          r.pointsAwarded = Number(cp.points) || 0;
+        }
+      } else {
+        r.pointsAwarded = 0;
+      }
     }
   });
 }
@@ -2404,6 +2672,9 @@ app.post('/api/participant/login', (req, res) => {
       processSingleReport(item, participantId)
     );
 
+    // Segera dorong pembaruan sesi & skor ke Cloud Firestore agar semua instance server langsung sinkron
+    void pushDbToCloudNow(db);
+
     const latestSession =
       results[results.length - 1]?.session ||
       db.sessions.find((s) => s.participantId === participantId) ||
@@ -2612,6 +2883,7 @@ app.post('/api/participant/login', (req, res) => {
       deletedCourseIds: db.deletedCourseIds || [],
       participants: visibleStoredParticipants,
       sessions: visibleSessions,
+      deletedSessionIds: db.deletedSessionIds || [],
       reports: visibleReports,
       updatedAt: new Date().toISOString(),
     };
@@ -2625,6 +2897,7 @@ app.post('/api/participant/login', (req, res) => {
       courses: visibleCourses,
       participants: visibleParticipants,
       sessions: visibleSessions,
+      deletedSessionIds: db.deletedSessionIds || [],
       reports: visibleReports,
       vaultSnapshot,
     });
@@ -2810,6 +3083,7 @@ app.post('/api/participant/login', (req, res) => {
         deletedCourseIds: body.deletedCourseIds,
         participants: body.participants,
         sessions: body.sessions,
+        deletedSessionIds: body.deletedSessionIds,
         reports: body.reports,
       },
       auth
@@ -2823,6 +3097,7 @@ app.post('/api/participant/login', (req, res) => {
           .forEach((s) => recalculateSessionScore(s, course));
       });
       saveDb(db);
+      void pushDbToCloudNow(db);
     }
 
     const visibleCourses = db.courses.filter((c) => canAccessCourse(c, auth));
@@ -3100,22 +3375,28 @@ app.post('/api/participant/login', (req, res) => {
     const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const sessionId = req.params.sessionId;
     const targetSession = db.sessions.find((s) => s.id === sessionId);
-    if (!targetSession) {
-      res.json({ deletedSessionId: sessionId });
-      return;
+
+    if (targetSession) {
+      const course = db.courses.find((c) => c.id === targetSession.courseId);
+      if (course && !canAccessCourse(course, auth)) {
+        res.status(403).json({
+          error: 'Anda hanya dapat menghapus hasil sesi pada Course yang Anda kelola.',
+        });
+        return;
+      }
     }
 
-    const course = db.courses.find((c) => c.id === targetSession.courseId);
-    if (course && !canAccessCourse(course, auth)) {
-      res.status(403).json({
-        error: 'Anda hanya dapat menghapus hasil sesi pada Course yang Anda kelola.',
-      });
-      return;
+    if (!Array.isArray(db.deletedSessionIds)) {
+      db.deletedSessionIds = [];
+    }
+    if (!db.deletedSessionIds.includes(sessionId)) {
+      db.deletedSessionIds.push(sessionId);
     }
 
     db.sessions = db.sessions.filter((s) => s.id !== sessionId);
     db.reports = db.reports.filter((r) => r.sessionId !== sessionId);
     saveDb(db);
+    void pushDbToCloudNow(db);
 
     res.json({
       deletedSessionId: sessionId,
