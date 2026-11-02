@@ -73,6 +73,26 @@ function formatStopwatchSeconds(totalSeconds?: number): string {
   ].join(':');
 }
 
+function calculateClientHaversineMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 /**
  * Umpan balik suara (Beep) & getar instan menggunakan Web Audio API (100% bekerja offline)
  * agar peserta yang sedang berlari langsung tahu hasil scan tanpa harus membaca teks kecil.
@@ -280,7 +300,16 @@ export default function ParticipantView({
     }
   }, [token, participant, onAuthenticated]);
 
-  // Tampilkan toast instan selama 2,6 detik
+  // Otomatis hilangkan banner pemberitahuan setelah 4 detik (Auto-Dismiss)
+  useEffect(() => {
+    if (!feedbackBanner) return;
+    const timer = window.setTimeout(() => {
+      setFeedbackBanner(null);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [feedbackBanner]);
+
+  // Tampilkan toast instan (2,6 detik untuk sukses, 3,8 detik untuk peringatan/error)
   const showRunnerToast = useCallback(
     (
       type: 'success' | 'error' | 'warning',
@@ -288,11 +317,12 @@ export default function ParticipantView({
       subtitle: string
     ) => {
       setInstantScanToast({ type, title, subtitle });
+      const durationMs = type === 'success' ? 2600 : 3800;
       window.setTimeout(() => {
         setInstantScanToast((prev) =>
           prev && prev.title === title ? null : prev
         );
-      }, 2600);
+      }, durationMs);
     },
     []
   );
@@ -370,6 +400,23 @@ export default function ParticipantView({
 
   const isSessionActivelyRunning =
     sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer;
+
+  // Daftar ID checkpoint yang sudah tervalidasi di sesi ini (gabungan server + lokal yang sah)
+  const effectiveValidatedCheckpointIds = useMemo(() => {
+    const ids = new Set<string>(activeSession?.validatedCheckpointIds || []);
+    for (const r of localReports) {
+      if (
+        r.reportType === 'CHECKPOINT' &&
+        r.syncStatus !== SyncStatus.REJECTED_SERVER &&
+        r.checkpointId &&
+        r.checkpointId !== 'START' &&
+        r.checkpointId !== 'FINISH'
+      ) {
+        ids.add(r.checkpointId);
+      }
+    }
+    return Array.from(ids);
+  }, [activeSession?.validatedCheckpointIds, localReports]);
 
   // Gabungkan sesi dari server tanpa pernah menurunkan (downgrade) status ACTIVE/FINISHED lokal
   const mergeServerSessionSafely = useCallback(
@@ -860,6 +907,27 @@ export default function ParticipantView({
           activeSession: nextSessionState,
           simulatedOffline,
         });
+      } else if (params.reportType === 'CHECKPOINT') {
+        const existingValidated = Array.isArray(
+          activeSession.validatedCheckpointIds
+        )
+          ? activeSession.validatedCheckpointIds
+          : [];
+        const updatedValidated = existingValidated.includes(params.checkpointId)
+          ? existingValidated
+          : [...existingValidated, params.checkpointId];
+        nextSessionState = {
+          ...activeSession,
+          validatedCheckpointIds: updatedValidated,
+        };
+        setActiveSession(nextSessionState);
+        savePersistedParticipantState({
+          token,
+          participant,
+          activeCourse,
+          activeSession: nextSessionState,
+          simulatedOffline,
+        });
       }
 
       const timeStr = new Date(measuredAt).toLocaleTimeString('id-ID');
@@ -903,6 +971,334 @@ export default function ParticipantView({
       simulatedOffline,
       showRunnerToast,
       triggerSyncQueue,
+    ]
+  );
+
+  /**
+   * Validasi Instan di Sisi Peserta SEBELUM menyimpan laporan Checkpoint:
+   * Memastikan Urutan Pos (enforceOrder), Duplikat Pos, serta Aturan Validasi Course
+   * (QR_ONLY, QR_AND_GPS + Radius, GPS_AUTO + Radius, QR_OR_GPS) langsung diperiksa detik itu juga.
+   */
+  const validateCheckpointBeforeRecord = useCallback(
+    (params: {
+      checkpoint: Checkpoint;
+      scannedQr?: string;
+      coords?: { latitude: number; longitude: number; accuracy: number } | null;
+    }):
+      | { ok: true }
+      | {
+          ok: false;
+          severity: 'error' | 'warning';
+          title: string;
+          message: string;
+        } => {
+      if (!activeCourse || !activeSession) {
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'BELUM MEMUAT COURSE',
+          message: 'Silakan pindai Setup QR Course terlebih dahulu.',
+        };
+      }
+
+      if (!sessionCanRecordCheckpoints) {
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'BELUM SCAN START!',
+          message:
+            'Silakan scan Start QR terlebih dahulu sebelum memindai Pos Checkpoint!',
+        };
+      }
+
+      if (sessionMarkedFinishedLocallyOrServer) {
+        return {
+          ok: false,
+          severity: 'warning',
+          title: 'SESI SUDAH FINISH',
+          message:
+            'Sesi lari Anda sudah selesai (Finished). Tidak dapat menambah pos baru.',
+        };
+      }
+
+      const { checkpoint, scannedQr, coords } = params;
+      const sortedCheckpoints = [...activeCourse.checkpoints].sort(
+        (a, b) => a.orderIndex - b.orderIndex
+      );
+
+      // 1. Cek apakah pos ini sudah pernah tervalidasi sebelumnya
+      if (effectiveValidatedCheckpointIds.includes(checkpoint.id)) {
+        const nextUnvisited = sortedCheckpoints.find(
+          (c) => !effectiveValidatedCheckpointIds.includes(c.id)
+        );
+        const nextHint = nextUnvisited
+          ? ` Silakan lanjut ke Pos #${nextUnvisited.orderIndex} (${nextUnvisited.code}).`
+          : ' Semua pos telah selesai, silakan menuju FINISH.';
+        return {
+          ok: false,
+          severity: 'warning',
+          title: `POS ${checkpoint.code} SUDAH TERCATAT`,
+          message: `Pos ${checkpoint.code} sudah tercatat sebelumnya (tidak dihitung ganda).${nextHint}`,
+        };
+      }
+
+      // 2. Cek aturan Wajib Urut (enforceOrder)
+      if (activeCourse.enforceOrder) {
+        const expectedCp = sortedCheckpoints.find(
+          (c) => !effectiveValidatedCheckpointIds.includes(c.id)
+        );
+        if (expectedCp && expectedCp.id !== checkpoint.id) {
+          const expectedLabel = expectedCp.name
+            ? `${expectedCp.code} (${expectedCp.name})`
+            : expectedCp.code;
+          const scannedLabel = checkpoint.name
+            ? `${checkpoint.code} (${checkpoint.name})`
+            : checkpoint.code;
+          return {
+            ok: false,
+            severity: 'error',
+            title: 'URUTAN POS TIDAK SESUAI!',
+            message: `Course ini wajib berurutan! Anda harus memindai Pos #${expectedCp.orderIndex} (${expectedLabel}) terlebih dahulu sebelum Pos #${checkpoint.orderIndex} (${scannedLabel}).`,
+          };
+        }
+      }
+
+      // 3. Evaluasi kecocokan QR dan jarak Radius GPS sesuai Metode Validasi Course
+      const cleanQr = (scannedQr || '').trim();
+      const upperQr = cleanQr.toUpperCase();
+      const expectedCpPrefix =
+        `BARAKA:CP:${activeCourse.id}:${checkpoint.code}`.toUpperCase();
+      const qrMatch =
+        Boolean(cleanQr) &&
+        (cleanQr === checkpoint.qrSecret ||
+          upperQr === expectedCpPrefix ||
+          upperQr.startsWith(`${expectedCpPrefix}:`));
+
+      const allowedRadius =
+        checkpoint.radiusMeters || activeCourse.defaultGpsRadiusMeters || 35;
+      const maxAcceptableAccuracy = 150;
+      let distanceMeters: number | null = null;
+      let accuracyOk = true;
+      let gpsMatch = false;
+
+      if (
+        coords &&
+        typeof coords.latitude === 'number' &&
+        typeof coords.longitude === 'number' &&
+        !Number.isNaN(coords.latitude) &&
+        !Number.isNaN(coords.longitude)
+      ) {
+        distanceMeters = Math.round(
+          calculateClientHaversineMeters(
+            checkpoint.latitude,
+            checkpoint.longitude,
+            coords.latitude,
+            coords.longitude
+          )
+        );
+        accuracyOk =
+          coords.accuracy === undefined ||
+          coords.accuracy <= maxAcceptableAccuracy;
+        gpsMatch = distanceMeters <= allowedRadius && accuracyOk;
+      }
+
+      switch (activeCourse.validationMethod) {
+        case ValidationMethod.QR_ONLY:
+          if (!qrMatch) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'QR POS TIDAK COCOK!',
+              message: `Kode QR yang dipindai tidak sesuai dengan Pos ${checkpoint.code}. Pastikan memindai QR resmi Pos ${checkpoint.code}.`,
+            };
+          }
+          break;
+
+        case ValidationMethod.QR_AND_GPS:
+          if (!qrMatch) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'QR POS TIDAK COCOK!',
+              message: `Wajib QR + GPS: Kode QR yang dipindai tidak sesuai dengan Pos ${checkpoint.code}.`,
+            };
+          }
+          if (distanceMeters === null) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'GPS BELUM TERBACA!',
+              message: `Course ini mewajibkan QR + GPS! Sinyal GPS perangkat belum aktif/terbaca. Aktifkan lokasi GPS lalu scan ulang di Pos ${checkpoint.code}.`,
+            };
+          }
+          if (!accuracyOk) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'AKURASI GPS RENDAH!',
+              message: `Wajib QR + GPS: Akurasi GPS terlalu rendah (±${Math.round(
+                coords?.accuracy || 0
+              )}m, batas maksimal ${maxAcceptableAccuracy}m). Tunggu sinyal GPS stabil lalu scan ulang.`,
+            };
+          }
+          if (!gpsMatch) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'DI LUAR RADIUS GPS!',
+              message: `Wajib QR + GPS: Kode QR cocok, tetapi posisi GPS Anda berjarak ${distanceMeters}m dari Pos ${checkpoint.code} (Batas radius: ${allowedRadius}m). Dekati titik pos lalu scan ulang!`,
+            };
+          }
+          break;
+
+        case ValidationMethod.GPS_AUTO:
+          if (distanceMeters === null) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'GPS BELUM TERBACA!',
+              message:
+                'Course ini menggunakan validasi GPS! Aktifkan lokasi GPS perangkat Anda terlebih dahulu.',
+            };
+          }
+          if (!accuracyOk) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'AKURASI GPS RENDAH!',
+              message: `Akurasi GPS terlalu rendah (±${Math.round(
+                coords?.accuracy || 0
+              )}m > batas ${maxAcceptableAccuracy}m).`,
+            };
+          }
+          if (!gpsMatch) {
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'DI LUAR RADIUS GPS!',
+              message: `Posisi GPS Anda berada di luar radius Pos ${checkpoint.code} (Jarak Anda: ${distanceMeters}m, Batas radius: ${allowedRadius}m). Dekati titik pos terlebih dahulu!`,
+            };
+          }
+          break;
+
+        case ValidationMethod.QR_OR_GPS:
+          if (!qrMatch && !gpsMatch) {
+            if (distanceMeters !== null && !accuracyOk) {
+              return {
+                ok: false,
+                severity: 'error',
+                title: 'QR / AKURASI GPS GAGAL!',
+                message: `Kode QR tidak cocok dan akurasi GPS terlalu rendah (±${Math.round(
+                  coords?.accuracy || 0
+                )}m > ${maxAcceptableAccuracy}m).`,
+              };
+            }
+            if (distanceMeters !== null) {
+              return {
+                ok: false,
+                severity: 'error',
+                title: 'DI LUAR RADIUS GPS!',
+                message: `Metode QR atau GPS: Kode QR tidak cocok dan jarak GPS Anda (${distanceMeters}m) di luar radius Pos ${checkpoint.code} (Batas radius: ${allowedRadius}m).`,
+              };
+            }
+            return {
+              ok: false,
+              severity: 'error',
+              title: 'QR POS TIDAK COCOK!',
+              message: `Kode QR tidak sesuai dengan Pos ${checkpoint.code} dan posisi GPS belum terbaca (Batas radius: ${allowedRadius}m).`,
+            };
+          }
+          break;
+      }
+
+      return { ok: true };
+    },
+    [
+      activeCourse,
+      activeSession,
+      sessionCanRecordCheckpoints,
+      sessionMarkedFinishedLocallyOrServer,
+      effectiveValidatedCheckpointIds,
+    ]
+  );
+
+  /**
+   * Validasi Instan sebelum menyimpan laporan FINISH:
+   * Memastikan sudah Start, kode QR Finish sesuai Course, dan jika Course Wajib Urut (enforceOrder)
+   * maka seluruh pos harus sudah selesai sebelum bisa Finish.
+   */
+  const validateFinishBeforeRecord = useCallback(
+    (
+      scannedFinishQr: string
+    ):
+      | { ok: true }
+      | {
+          ok: false;
+          severity: 'error' | 'warning';
+          title: string;
+          message: string;
+        } => {
+      if (!activeCourse || !activeSession) {
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'BELUM MEMUAT COURSE',
+          message: 'Silakan pindai Setup QR Course terlebih dahulu.',
+        };
+      }
+
+      if (!sessionCanRecordCheckpoints) {
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'BELUM SCAN START!',
+          message:
+            'Anda belum melakukan Scan Start QR! Silakan scan Start QR terlebih dahulu.',
+        };
+      }
+
+      const clean = scannedFinishQr.trim();
+      const upper = clean.toUpperCase();
+      const expectedFinishCode =
+        `BARAKA:FINISH:${activeCourse.id}`.toUpperCase();
+
+      if (upper !== expectedFinishCode && clean !== activeCourse.finishQrCode) {
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'BUKAN QR FINISH!',
+          message: `QR yang dipindai bukan kode FINISH untuk "${activeCourse.name}".`,
+        };
+      }
+
+      if (
+        activeCourse.enforceOrder &&
+        effectiveValidatedCheckpointIds.length < activeCourse.checkpoints.length
+      ) {
+        const sortedCheckpoints = [...activeCourse.checkpoints].sort(
+          (a, b) => a.orderIndex - b.orderIndex
+        );
+        const missingCp = sortedCheckpoints.find(
+          (c) => !effectiveValidatedCheckpointIds.includes(c.id)
+        );
+        const missingLabel = missingCp
+          ? `Pos #${missingCp.orderIndex} (${missingCp.code})`
+          : 'seluruh pos';
+        return {
+          ok: false,
+          severity: 'error',
+          title: 'POS BELUM LENGKAP!',
+          message: `Course ini wajib berurutan (${effectiveValidatedCheckpointIds.length}/${activeCourse.checkpoints.length} pos selesai). Selesaikan ${missingLabel} terlebih dahulu sebelum Scan Finish!`,
+        };
+      }
+
+      return { ok: true };
+    },
+    [
+      activeCourse,
+      activeSession,
+      sessionCanRecordCheckpoints,
+      effectiveValidatedCheckpointIds,
     ]
   );
 
@@ -1065,22 +1461,18 @@ export default function ParticipantView({
           cameraActiveFor === 'FINISH';
 
         if (isFinishQr && !upperScanned.startsWith('BARAKA:CP:')) {
-          if (!sessionCanRecordCheckpoints) {
+          const finishCheck = validateFinishBeforeRecord(scanned);
+          if (!finishCheck.ok) {
             triggerRunnerFeedback('error');
-            const msg =
-              'Anda belum melakukan Scan Start QR! Silakan scan Start QR terlebih dahulu.';
-            setFeedbackBanner({ type: 'error', text: msg });
-            showRunnerToast('error', 'BELUM START!', msg);
-            return;
-          }
-          if (
-            upperScanned !== expectedFinishCode &&
-            scanned !== activeCourse.finishQrCode
-          ) {
-            triggerRunnerFeedback('error');
-            const msg = `QR yang dipindai bukan kode FINISH untuk "${activeCourse.name}".`;
-            setFeedbackBanner({ type: 'error', text: msg });
-            showRunnerToast('error', 'BUKAN QR FINISH!', msg);
+            setFeedbackBanner({
+              type: finishCheck.severity,
+              text: finishCheck.message,
+            });
+            showRunnerToast(
+              finishCheck.severity,
+              finishCheck.title,
+              finishCheck.message
+            );
             return;
           }
           await recordAndQueueReport({
@@ -1123,7 +1515,8 @@ export default function ParticipantView({
             (c) =>
               upperScanned.includes(`:${c.code.toUpperCase()}:`) ||
               upperScanned.endsWith(`:${c.code.toUpperCase()}`) ||
-              upperScanned === c.code.toUpperCase()
+              upperScanned === c.code.toUpperCase() ||
+              scanned === c.qrSecret
           );
         }
 
@@ -1142,13 +1535,31 @@ export default function ParticipantView({
           return;
         }
 
-        // Jika Course membutuhkan GPS (QR_AND_GPS), ambil GPS otomatis di latar belakang tanpa merepotkan peserta
+        // Jika Course membutuhkan GPS (QR_AND_GPS / GPS_AUTO / QR_OR_GPS), ambil GPS otomatis di latar belakang
         let coordsToUse = gpsCoords;
         if (
           activeCourse.validationMethod === ValidationMethod.QR_AND_GPS ||
-          activeCourse.validationMethod === ValidationMethod.GPS_AUTO
+          activeCourse.validationMethod === ValidationMethod.GPS_AUTO ||
+          activeCourse.validationMethod === ValidationMethod.QR_OR_GPS
         ) {
           coordsToUse = await getQuickGpsCoordinates();
+        }
+
+        // VALIDASI INSTAN SEBELUM MENYIMPAN (Urutan Pos, Duplikat, Radius GPS, Kecocokan QR)
+        const cpCheck = validateCheckpointBeforeRecord({
+          checkpoint: matchedCp,
+          scannedQr: scanned,
+          coords: coordsToUse,
+        });
+
+        if (!cpCheck.ok) {
+          triggerRunnerFeedback('error');
+          setFeedbackBanner({
+            type: cpCheck.severity,
+            text: cpCheck.message,
+          });
+          showRunnerToast(cpCheck.severity, cpCheck.title, cpCheck.message);
+          return;
         }
 
         const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' = coordsToUse
@@ -1198,6 +1609,8 @@ export default function ParticipantView({
       selectedCheckpointId,
       sessionCanRecordCheckpoints,
       showRunnerToast,
+      validateCheckpointBeforeRecord,
+      validateFinishBeforeRecord,
     ]
   );
 
@@ -1631,12 +2044,29 @@ export default function ParticipantView({
       return;
     }
 
-    const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' =
-      trimmedQr && coordsToUse ? 'QR_AND_GPS' : coordsToUse ? 'GPS' : 'QR';
-
     const cpObj = activeCourse.checkpoints.find(
       (c) => c.id === selectedCheckpointId
     );
+    if (!cpObj) return;
+
+    const cpCheck = validateCheckpointBeforeRecord({
+      checkpoint: cpObj,
+      scannedQr: trimmedQr || undefined,
+      coords: coordsToUse,
+    });
+
+    if (!cpCheck.ok) {
+      triggerRunnerFeedback('error');
+      setFeedbackBanner({
+        type: cpCheck.severity,
+        text: cpCheck.message,
+      });
+      showRunnerToast(cpCheck.severity, cpCheck.title, cpCheck.message);
+      return;
+    }
+
+    const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' =
+      trimmedQr && coordsToUse ? 'QR_AND_GPS' : coordsToUse ? 'GPS' : 'QR';
 
     await recordAndQueueReport({
       checkpointId: selectedCheckpointId,
@@ -1646,11 +2076,7 @@ export default function ParticipantView({
       latitude: coordsToUse?.latitude,
       longitude: coordsToUse?.longitude,
       accuracyMeters: coordsToUse?.accuracy,
-      displayLabel: cpObj
-        ? cpObj.name
-          ? `${cpObj.code} (${cpObj.name})`
-          : cpObj.code
-        : 'CHECKPOINT',
+      displayLabel: cpObj.name ? `${cpObj.code} (${cpObj.name})` : cpObj.code,
     });
 
     setCheckpointQrInput('');
@@ -1679,6 +2105,21 @@ export default function ParticipantView({
 
     if (checkAccidentalSetupQrScan(trimmed)) {
       setFinishQrInput('');
+      return;
+    }
+
+    const finishCheck = validateFinishBeforeRecord(trimmed);
+    if (!finishCheck.ok) {
+      triggerRunnerFeedback('error');
+      setFeedbackBanner({
+        type: finishCheck.severity,
+        text: finishCheck.message,
+      });
+      showRunnerToast(
+        finishCheck.severity,
+        finishCheck.title,
+        finishCheck.message
+      );
       return;
     }
 

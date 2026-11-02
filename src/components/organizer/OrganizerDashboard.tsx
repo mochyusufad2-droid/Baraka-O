@@ -189,6 +189,23 @@ export default function OrganizerDashboard({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [bulkPrintCourse, setBulkPrintCourse] = useState<Course | null>(null);
 
+  // Otomatis hilangkan banner pemberitahuan setelah 4 detik (Auto-Dismiss)
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = window.setTimeout(() => {
+      setSuccessMsg(null);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
+
+  useEffect(() => {
+    if (!errorMsg) return;
+    const timer = window.setTimeout(() => {
+      setErrorMsg(null);
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [errorMsg]);
+
   // ==========================================================================
   // STATE FORM BUAT COURSE BARU (Input angka disimpan sebagai string agar bersih saat dihapus)
   // ==========================================================================

@@ -6,6 +6,7 @@ import {
   ParticipantBackupRecord,
   ParticipantPublic,
   ParticipantSession,
+  SessionStatus,
   SyncStatus,
 } from '../types';
 
