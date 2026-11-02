@@ -948,6 +948,56 @@ export default function ParticipantView({
         });
       }
 
+      // Dual-Trigger: Setiap kali peserta scan QR (Start, CP, Finish), langsung perbarui posisi secara instan
+      let instantLat = params.latitude;
+      let instantLng = params.longitude;
+      let instantAcc = params.accuracyMeters;
+
+      if (instantLat === undefined || instantLng === undefined) {
+        if (params.reportType === 'CHECKPOINT') {
+          const cp = activeCourse.checkpoints.find(
+            (c) => c.id === params.checkpointId
+          );
+          if (cp) {
+            instantLat = cp.latitude;
+            instantLng = cp.longitude;
+            instantAcc = cp.radiusMeters || 15;
+          }
+        } else if (params.reportType === 'START' && activeCourse.startLocation) {
+          instantLat = activeCourse.startLocation.latitude;
+          instantLng = activeCourse.startLocation.longitude;
+          instantAcc = 15;
+        } else if (params.reportType === 'FINISH' && activeCourse.finishLocation) {
+          instantLat = activeCourse.finishLocation.latitude;
+          instantLng = activeCourse.finishLocation.longitude;
+          instantAcc = 15;
+        }
+      }
+
+      if (instantLat !== undefined && instantLng !== undefined) {
+        const instantLocPayload: PendingLocationPayload = {
+          sessionId: activeSession.id,
+          participantId: participant.id,
+          latitude: instantLat,
+          longitude: instantLng,
+          accuracyMeters: instantAcc || 15,
+          measuredAt,
+        };
+        nextSessionState = {
+          ...nextSessionState,
+          lastLocation: {
+            ...instantLocPayload,
+            receivedAt: measuredAt,
+          },
+        };
+        setActiveSession(nextSessionState);
+        void sendLastLocationToServer({
+          token,
+          payload: instantLocPayload,
+          isOfflineSimulated: simulatedOffline,
+        });
+      }
+
       const timeStr = new Date(measuredAt).toLocaleTimeString('id-ID');
       const label = params.displayLabel || params.reportType;
 

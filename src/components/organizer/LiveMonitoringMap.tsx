@@ -157,7 +157,7 @@ export function resolveSessionPositionOnCourse(
   course?: Course | null,
   nowMs: number = Date.now()
 ): ResolvedRunnerPosition | null {
-  // 1. Prioritas utama: Posisi GPS terakhir dari telemetri berkala (~5 menit) atau saat scan pos
+  // 1. Prioritas utama: Posisi GPS terakhir dari telemetri berkala (tiap 2 menit) atau saat scan pos
   if (
     sess.lastLocation &&
     typeof sess.lastLocation.latitude === 'number' &&
@@ -168,13 +168,13 @@ export function resolveSessionPositionOnCourse(
     const ageMs = sess.lastLocation.measuredAt
       ? nowMs - Date.parse(sess.lastLocation.measuredAt)
       : 0;
-    const isStale = ageMs > 6 * 60 * 1000;
+    const isStale = ageMs > 3 * 60 * 1000;
     return {
       sessionId: sess.id,
       latitude: sess.lastLocation.latitude,
       longitude: sess.lastLocation.longitude,
       accuracyMeters: sess.lastLocation.accuracyMeters,
-      sourceLabel: 'GPS Real-Time (~5 Menit)',
+      sourceLabel: 'GPS Real-Time (Tiap 2 Menit / Scan)',
       measuredAt: sess.lastLocation.measuredAt,
       isStale,
     };

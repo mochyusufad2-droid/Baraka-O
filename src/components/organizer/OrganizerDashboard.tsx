@@ -23,6 +23,7 @@ import {
   X,
   Check,
   Timer,
+  Maximize2,
 } from 'lucide-react';
 import {
   Course,
@@ -44,6 +45,7 @@ import {
   LiveMonitoringMap,
   resolveSessionPositionOnCourse,
 } from './LiveMonitoringMap';
+import { SpectatorLiveLeaderboardModal } from './SpectatorLiveLeaderboardModal';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
@@ -277,6 +279,7 @@ export default function OrganizerDashboard({
   const [resultGenderFilter, setResultGenderFilter] = useState<string>('ALL');
   const [resultAgeGroupFilter, setResultAgeGroupFilter] = useState<string>('ALL');
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
+  const [isSpectatorFullscreen, setIsSpectatorFullscreen] = useState<boolean>(false);
 
   // Form States for Superadmin Organizer Account Creation & Management
   const [orgNameInput, setOrgNameInput] = useState('');
@@ -3406,6 +3409,16 @@ export default function OrganizerDashboard({
                 </div>
 
                 <button
+                  type="button"
+                  onClick={() => setIsSpectatorFullscreen(true)}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-bold text-xs shadow-md shadow-amber-500/20 transition cursor-pointer"
+                  title="Tampilkan layar penuh khusus penonton & TV arena (tanpa tombol admin)"
+                >
+                  <Maximize2 className="w-4 h-4" />
+                  Layar Penuh Penonton (Live TV)
+                </button>
+
+                <button
                   onClick={handleExportCsv}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition cursor-pointer"
                 >
@@ -4010,6 +4023,17 @@ export default function OrganizerDashboard({
         <BulkQrPrintModal
           course={bulkPrintCourse}
           onClose={() => setBulkPrintCourse(null)}
+        />
+      )}
+
+      {/* Fullscreen Spectator Arena Live Leaderboard Modal */}
+      {isSpectatorFullscreen && dashboard && (
+        <SpectatorLiveLeaderboardModal
+          courses={dashboard.courses}
+          sessions={dashboard.sessions}
+          participants={dashboard.participants}
+          initialCourseId={selectedCourse?.id}
+          onClose={() => setIsSpectatorFullscreen(false)}
         />
       )}
     </div>

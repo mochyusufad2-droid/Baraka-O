@@ -1599,6 +1599,27 @@ function processSingleReport(
     session.startedAt = safeMeasuredAt;
     session.startedReceivedAt = serverNow;
 
+    const startLat =
+      typeof payload.latitude === 'number' && !Number.isNaN(payload.latitude)
+        ? payload.latitude
+        : course.startLocation?.latitude;
+    const startLng =
+      typeof payload.longitude === 'number' && !Number.isNaN(payload.longitude)
+        ? payload.longitude
+        : course.startLocation?.longitude;
+
+    if (startLat !== undefined && startLng !== undefined) {
+      session.lastLocation = {
+        participantId: session.participantId,
+        sessionId: session.id,
+        latitude: startLat,
+        longitude: startLng,
+        accuracyMeters: payload.accuracyMeters ?? 15,
+        measuredAt: safeMeasuredAt,
+        receivedAt: serverNow,
+      };
+    }
+
     const acceptedStart: CheckpointReport = {
       ...payload,
       measuredAt: safeMeasuredAt,
@@ -1789,22 +1810,27 @@ function processSingleReport(
     const points = course.scoringEnabled ? checkpoint.points : 0;
     recalculateSessionScore(session, course);
 
-    if (
-      typeof payload.latitude === 'number' &&
-      typeof payload.longitude === 'number' &&
-      !Number.isNaN(payload.latitude) &&
-      !Number.isNaN(payload.longitude)
-    ) {
-      session.lastLocation = {
-        participantId: session.participantId,
-        sessionId: session.id,
-        latitude: payload.latitude,
-        longitude: payload.longitude,
-        accuracyMeters: payload.accuracyMeters ?? 15,
-        measuredAt: safeMeasuredAt,
-        receivedAt: serverNow,
-      };
-    }
+    const finalCpLat =
+      typeof payload.latitude === 'number' && !Number.isNaN(payload.latitude)
+        ? payload.latitude
+        : checkpoint.latitude;
+    const finalCpLng =
+      typeof payload.longitude === 'number' && !Number.isNaN(payload.longitude)
+        ? payload.longitude
+        : checkpoint.longitude;
+
+    session.lastLocation = {
+      participantId: session.participantId,
+      sessionId: session.id,
+      latitude: finalCpLat,
+      longitude: finalCpLng,
+      accuracyMeters:
+        typeof payload.accuracyMeters === 'number'
+          ? payload.accuracyMeters
+          : checkpoint.radiusMeters || 15,
+      measuredAt: safeMeasuredAt,
+      receivedAt: serverNow,
+    };
 
     const acceptedCp: CheckpointReport = {
       ...payload,
@@ -1889,6 +1915,27 @@ function processSingleReport(
         session.durationSeconds = diffSec;
       }
       recalculateSessionScore(session, course);
+    }
+
+    const finishLat =
+      typeof payload.latitude === 'number' && !Number.isNaN(payload.latitude)
+        ? payload.latitude
+        : course.finishLocation?.latitude;
+    const finishLng =
+      typeof payload.longitude === 'number' && !Number.isNaN(payload.longitude)
+        ? payload.longitude
+        : course.finishLocation?.longitude;
+
+    if (finishLat !== undefined && finishLng !== undefined) {
+      session.lastLocation = {
+        participantId: session.participantId,
+        sessionId: session.id,
+        latitude: finishLat,
+        longitude: finishLng,
+        accuracyMeters: payload.accuracyMeters ?? 15,
+        measuredAt: safeMeasuredAt,
+        receivedAt: serverNow,
+      };
     }
 
     const acceptedFinish: CheckpointReport = {

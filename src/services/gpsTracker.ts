@@ -1,7 +1,7 @@
 import { LastKnownLocation, LocationFreshness } from '../types';
 
-export const GPS_INTERVAL_MS = 5 * 60 * 1000; // Target operasional: sekitar 5 menit (300.000 ms)
-export const STALE_LOCATION_THRESHOLD_MS = 6 * 60 * 1000; // Dianggap terlambat (stale) jika > 6 menit
+export const GPS_INTERVAL_MS = 2 * 60 * 1000; // Target operasional: 2 menit (120.000 ms)
+export const STALE_LOCATION_THRESHOLD_MS = 3 * 60 * 1000; // Dianggap terlambat (stale) jika > 3 menit
 
 const LS_PENDING_LAST_LOCATION_KEY = 'baraka_pending_last_location_only_v1';
 
