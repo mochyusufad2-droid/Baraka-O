@@ -794,6 +794,8 @@ function mergeSessionMonotonicallyServer(
     ...incoming,
     attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
     status: winningStatus,
+    isDnf: Boolean(incoming.isDnf || current.isDnf),
+    dnfReason: incoming.dnfReason || current.dnfReason,
     loadedAt: current.loadedAt || incoming.loadedAt,
     startedAt,
     startedReceivedAt: incoming.startedReceivedAt || current.startedReceivedAt,
@@ -2501,13 +2503,12 @@ app.post('/api/participant/login', (req, res) => {
   saveDb(db);
 
   const activeSessions = db.sessions.filter((s) => s.participantId === found.id);
-  // Prioritaskan sesi yang sedang berjalan (ACTIVE / NOT_STARTED) jika ada, atau sesi terakhir
+  // Prioritaskan sesi yang sedang berjalan (ACTIVE / NOT_STARTED) jika ada.
+  // Jika semua sesi sebelumnya sudah FINISHED (termasuk DNF), kembalikan null agar peserta langsung masuk ke Langkah 2: Scan Setup QR baru dari 00:00:00
   const unfinishedSession = [...activeSessions]
     .reverse()
     .find((s) => s.status !== SessionStatus.FINISHED);
-  const latestSession =
-    unfinishedSession ||
-    (activeSessions.length > 0 ? activeSessions[activeSessions.length - 1] : null);
+  const latestSession = unfinishedSession || null;
   const matchedCourse = latestSession
     ? db.courses.find((c) => c.id === latestSession.courseId) || null
     : null;
@@ -2841,6 +2842,61 @@ app.post('/api/participant/login', (req, res) => {
     res.json({
       status: 'ok',
       lastLocation,
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // ALUR PESERTA: KELUAR / ABANDON SESI AKTIF (DNF - Did Not Finish)
+  // Menyetop timer stopwatch dan menandai sesi selesai dengan status DNF (Gugur)
+  // --------------------------------------------------------------------------
+  app.post('/api/participant/abandon-session', requireParticipant, (req, res) => {
+    const participantId = (req as Request & { participantId: string }).participantId;
+    const { sessionId, reason } = req.body as {
+      sessionId?: string;
+      reason?: string;
+    };
+
+    let session = sessionId
+      ? db.sessions.find(
+          (s) => s.id === sessionId && s.participantId === participantId
+        )
+      : null;
+
+    if (!session) {
+      session = db.sessions.find(
+        (s) => s.participantId === participantId && s.status === SessionStatus.ACTIVE
+      );
+    }
+
+    if (!session) {
+      res.status(404).json({ error: 'Sesi aktif tidak ditemukan.' });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    session.status = SessionStatus.FINISHED;
+    session.isDnf = true;
+    session.dnfReason =
+      reason || 'Peserta menekan Keluar saat lomba berjalan (DNF)';
+    session.finishedAt = session.finishedAt || nowIso;
+    session.finishedReceivedAt = nowIso;
+
+    if (session.startedAt) {
+      const elapsedMs = Math.max(
+        0,
+        Date.parse(session.finishedAt) - Date.parse(session.startedAt)
+      );
+      session.durationSeconds = Math.round(elapsedMs / 1000);
+    } else {
+      session.durationSeconds = 0;
+    }
+
+    saveDb(db);
+    void pushDbToCloudNow(db);
+
+    res.json({
+      message: 'Sesi telah ditandai DNF (Tidak Menyelesaikan Course).',
+      session,
     });
   });
 
@@ -3595,6 +3651,14 @@ app.post('/api/participant/login', (req, res) => {
 // VITE MIDDLEWARE (DEVELOPMENT) ATAU STATIC FILES (NON-VERCEL STANDALONE)
 // --------------------------------------------------------------------------
 async function startServer() {
+  // Cegah API 404 mengembalikan HTML index.html (mencegah error Unexpected token '<') di mode DEV maupun PROD
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     process.env.DISABLE_HMR = 'true';
     const { createServer: createViteServer } = await import('vite');
@@ -3634,14 +3698,6 @@ async function startServer() {
   } else {
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath, { maxAge: '1d' }));
-
-    // Cegah API 404 mengembalikan HTML index.html (mencegah error Unexpected token '<')
-    app.all('/api/*', (req, res) => {
-      res.status(404).json({
-        error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
-        timestamp: new Date().toISOString(),
-      });
-    });
 
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

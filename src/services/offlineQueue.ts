@@ -354,6 +354,8 @@ export function mergeSessionMonotonically(
     ...incoming,
     attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
     status: winningStatus,
+    isDnf: Boolean(incoming.isDnf || current.isDnf),
+    dnfReason: incoming.dnfReason || current.dnfReason,
     loadedAt: current.loadedAt || incoming.loadedAt,
     startedAt,
     startedReceivedAt: incoming.startedReceivedAt || current.startedReceivedAt,

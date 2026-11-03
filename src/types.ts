@@ -190,6 +190,8 @@ export interface ParticipantSession {
   totalScore: number;          // Skor akhir bersih (Net Score = max(0, grossScore - penaltyPoints))
   durationSeconds?: number;
   lastLocation?: LastKnownLocation; // Hanya menyimpan 1 posisi terakhir (bukan riwayat rute lengkap)
+  isDnf?: boolean;                  // True jika sesi dihentikan / dinyatakan Tidak Menyelesaikan Course
+  dnfReason?: string;               // Alasan DNF (misal: Peserta menekan Keluar saat lomba berjalan)
 }
 
 export interface OrganizerBackupRecord extends OrganizerPublic {

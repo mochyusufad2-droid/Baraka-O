@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import jsQR from 'jsqr';
 import {
   AlertCircle,
+  AlertTriangle,
   Camera,
   CheckCircle2,
   ChevronDown,
@@ -281,6 +282,8 @@ export default function ParticipantView({
   // Daftar laporan lokal & status antrean
   const [localReports, setLocalReports] = useState<CheckpointReport[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [showDnfLogoutModal, setShowDnfLogoutModal] = useState(false);
+  const [isSubmittingDnf, setIsSubmittingDnf] = useState(false);
   const [feedbackBanner, setFeedbackBanner] = useState<{
     type: 'success' | 'warning' | 'error';
     text: string;
@@ -1981,6 +1984,15 @@ export default function ParticipantView({
   }
 
   function handleLogout() {
+    // Jika peserta sedang berada dalam sesi lomba yang aktif (ACTIVE), tampilkan peringatan DNF
+    if (activeSession && activeSession.status === SessionStatus.ACTIVE) {
+      setShowDnfLogoutModal(true);
+      return;
+    }
+    executeCleanLogout();
+  }
+
+  function executeCleanLogout() {
     setToken(null);
     setParticipant(null);
     setActiveCourse(null);
@@ -1989,6 +2001,34 @@ export default function ParticipantView({
     clearPersistedParticipantState();
     setFeedbackBanner(null);
     onLogout?.();
+  }
+
+  async function handleConfirmDnfLogout() {
+    if (!activeSession) {
+      setShowDnfLogoutModal(false);
+      executeCleanLogout();
+      return;
+    }
+    setIsSubmittingDnf(true);
+    try {
+      if (token) {
+        await fetch('/api/participant/abandon-session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            sessionId: activeSession.id,
+            reason: 'Peserta menekan Keluar saat lomba berjalan (DNF)',
+          }),
+        }).catch(() => {});
+      }
+    } finally {
+      setIsSubmittingDnf(false);
+      setShowDnfLogoutModal(false);
+      executeCleanLogout();
+    }
   }
 
   async function handleRestartFromBeginning() {
@@ -2675,6 +2715,76 @@ export default function ParticipantView({
           </div>
         </div>
       </div>
+
+      {/* ====================================================================
+          MODAL PERINGATAN DNF SAAT PESERTA MENEKAN KELUAR DI TENGAH LOMBA
+         ==================================================================== */}
+      {showDnfLogoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm select-none">
+          <div className="w-full max-w-md rounded-2xl border-2 border-rose-500/80 bg-slate-900 p-5 shadow-2xl shadow-rose-950/70 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-3 border-b border-rose-500/30 pb-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/40">
+                <AlertTriangle className="h-6 w-6 animate-pulse" />
+              </div>
+              <div>
+                <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-rose-400">
+                  PERINGATAN RESMI LOMBA
+                </span>
+                <h3 className="text-base font-extrabold text-white">
+                  Lomba Sedang Berjalan!
+                </h3>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-rose-950/40 border border-rose-500/30 p-3.5 space-y-2 text-xs text-rose-200">
+              <p className="font-semibold text-white">
+                Jika Anda memilih <span className="text-rose-400 underline decoration-rose-500">Keluar Sekarang</span>:
+              </p>
+              <ul className="list-disc pl-4 space-y-1.5 text-rose-200/90 text-[11px] leading-relaxed">
+                <li>
+                  Sesi lomba ini langsung <strong>dihentikan</strong> dan Anda dinyatakan <strong>Tidak Menyelesaikan Course (DNF / Gugur)</strong>.
+                </li>
+                <li>
+                  Stopwatch waktu lari Anda akan <strong>berhenti</strong> dan status DNF dicatat di papan klasemen panitia.
+                </li>
+                <li>
+                  Sisa pos checkpoint tidak dapat lagi diambil untuk sesi ini.
+                </li>
+                <li>
+                  Saat Anda login kembali nanti, Anda harus <strong>mengulang dari awal</strong> (Scan Setup QR &amp; Start QR baru, stopwatch mulai dari <strong>00:00:00</strong> sebagai attempt baru).
+                </li>
+              </ul>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDnfLogoutModal(false)}
+                disabled={isSubmittingDnf}
+                className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-3 px-4 text-xs font-extrabold text-white shadow-lg shadow-emerald-950/50 transition cursor-pointer order-2 sm:order-1"
+              >
+                Lanjut Lari / Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmDnfLogout()}
+                disabled={isSubmittingDnf}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-500/60 bg-rose-600/25 hover:bg-rose-600/40 active:scale-[0.98] py-3 px-4 text-xs font-bold text-rose-200 hover:text-white transition cursor-pointer order-1 sm:order-2"
+              >
+                {isSubmittingDnf ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Memproses...
+                  </>
+                ) : (
+                  <>
+                    <LogOut className="h-4 w-4" /> Ya, Keluar &amp; DNF
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* BANNER NOTIFIKASI STATUS / ERROR */}
       {feedbackBanner && (

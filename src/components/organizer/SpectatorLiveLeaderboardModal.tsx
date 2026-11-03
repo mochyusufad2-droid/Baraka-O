@@ -66,6 +66,8 @@ interface LeaderboardItem {
   splits: SplitStep[];
   finishCumulativeSeconds?: number;
   finishSplitSeconds?: number;
+  isDnf?: boolean;
+  dnfReason?: string;
 }
 
 function formatElapsedSeconds(totalSeconds?: number): string {
@@ -88,15 +90,11 @@ function formatElapsedSeconds(totalSeconds?: number): string {
   );
 }
 
-function statusWeight(status: SessionStatus): number {
-  switch (status) {
-    case SessionStatus.FINISHED:
-      return 3;
-    case SessionStatus.ACTIVE:
-      return 2;
-    default:
-      return 1;
-  }
+function statusWeight(status: SessionStatus, isDnf?: boolean): number {
+  if (status === SessionStatus.FINISHED && !isDnf) return 4;
+  if (status === SessionStatus.ACTIVE) return 3;
+  if (status === SessionStatus.FINISHED && isDnf) return 2;
+  return 1;
 }
 
 export function SpectatorLiveLeaderboardModal({
@@ -309,6 +307,8 @@ export function SpectatorLiveLeaderboardModal({
         durationSeconds: liveDurationSec,
         splits,
         finishCumulativeSeconds: liveDurationSec,
+        isDnf: sess.isDnf,
+        dnfReason: sess.dnfReason,
       };
     });
 
@@ -327,7 +327,7 @@ export function SpectatorLiveLeaderboardModal({
 
     return filtered
       .sort((a, b) => {
-        const wDiff = statusWeight(b.status) - statusWeight(a.status);
+        const wDiff = statusWeight(b.status, b.isDnf) - statusWeight(a.status, a.isDnf);
         if (wDiff !== 0) return wDiff;
         if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
         const aDur = a.durationSeconds ?? Number.MAX_SAFE_INTEGER;
@@ -788,7 +788,14 @@ export function SpectatorLiveLeaderboardModal({
 
                         {/* Status */}
                         <td className="py-3.5 px-3 whitespace-nowrap">
-                          {row.status === SessionStatus.FINISHED ? (
+                          {row.isDnf ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                              title={row.dnfReason || 'Tidak Menyelesaikan Course (DNF)'}
+                            >
+                              DNF (Gugur)
+                            </span>
+                          ) : row.status === SessionStatus.FINISHED ? (
                             <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40">
                               <Flag className="w-3 h-3" /> FINISHED
                             </span>

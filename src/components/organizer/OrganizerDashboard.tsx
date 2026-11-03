@@ -978,9 +978,10 @@ export default function OrganizerDashboard({
         !selectedCourse || s.courseId === selectedCourse.id
     );
 
-    const statusWeight = (status: SessionStatus) => {
-      if (status === SessionStatus.FINISHED) return 3;
-      if (status === SessionStatus.ACTIVE) return 2;
+    const statusWeight = (status: SessionStatus, isDnf?: boolean) => {
+      if (status === SessionStatus.FINISHED && !isDnf) return 4;
+      if (status === SessionStatus.ACTIVE) return 3;
+      if (status === SessionStatus.FINISHED && isDnf) return 2;
       return 1;
     };
 
@@ -1210,6 +1211,8 @@ export default function OrganizerDashboard({
         finishCumulativeSeconds,
         finishSplitSeconds,
         lastLocationAt: sess.lastLocation?.measuredAt,
+        isDnf: sess.isDnf,
+        dnfReason: sess.dnfReason,
       };
     });
 
@@ -1228,7 +1231,7 @@ export default function OrganizerDashboard({
 
     return filteredByCategory
       .sort((a, b) => {
-        const wDiff = statusWeight(b.status) - statusWeight(a.status);
+        const wDiff = statusWeight(b.status, b.isDnf) - statusWeight(a.status, a.isDnf);
         if (wDiff !== 0) return wDiff;
         if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
         const aDur = a.durationSeconds ?? Number.MAX_SAFE_INTEGER;
@@ -3795,17 +3798,26 @@ export default function OrganizerDashboard({
                           )}
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <span
-                            className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
-                              row.status === SessionStatus.FINISHED
-                                ? 'bg-amber-500/20 text-amber-300'
-                                : row.status === SessionStatus.ACTIVE
-                                ? 'bg-emerald-500/20 text-emerald-300'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {row.status}
-                          </span>
+                          {row.isDnf ? (
+                            <span
+                              className="text-[11px] font-mono px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                              title={row.dnfReason || 'Tidak Menyelesaikan Course (Keluar saat lomba)'}
+                            >
+                              DNF (Gugur)
+                            </span>
+                          ) : (
+                            <span
+                              className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
+                                row.status === SessionStatus.FINISHED
+                                  ? 'bg-amber-500/20 text-amber-300'
+                                  : row.status === SessionStatus.ACTIVE
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {row.status}
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">
                           {row.checkpointsCompleted} / {row.totalCheckpoints} CP
