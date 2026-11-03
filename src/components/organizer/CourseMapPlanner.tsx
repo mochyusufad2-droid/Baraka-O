@@ -31,6 +31,11 @@ interface CourseMapPlannerProps {
   onUpdateStartLocation: (loc: GeoPointLocation | null) => Promise<void>;
   onUpdateFinishLocation: (loc: GeoPointLocation | null) => Promise<void>;
   onSelectCheckpointForEdit: (cp: Checkpoint) => void;
+  onDragCheckpointCoordinates?: (
+    cp: Checkpoint,
+    lat: number,
+    lng: number
+  ) => Promise<void>;
 }
 
 const TILE_LAYERS: Record<
@@ -191,6 +196,7 @@ export function CourseMapPlanner({
   onUpdateStartLocation,
   onUpdateFinishLocation,
   onSelectCheckpointForEdit,
+  onDragCheckpointCoordinates,
 }: CourseMapPlannerProps) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -382,46 +388,96 @@ export function CourseMapPlanner({
   const usesGpsRadius = course.validationMethod !== ValidationMethod.QR_ONLY;
 
   // Render ulang simbol IOF (Start 🔺, CP ⭕ + Radius, Finish ◎, Garis Rute, dan Preview CP 🎯)
+  // Dilengkapi fitur Drag & Drop langsung di peta dengan pembaruan lingkaran radius & garis rute real-time
   useEffect(() => {
     const group = overlayGroupRef.current;
     if (!group) return;
     group.clearLayers();
 
-    const routeCoords: L.LatLngExpression[] = [];
-
-    // 1. Titik START (Segitiga 🔺)
-    if (course.startLocation) {
-      const startLatLng: [number, number] = [
-        course.startLocation.latitude,
-        course.startLocation.longitude,
-      ];
-      routeCoords.push(startLatLng);
-
-      const startMarker = L.marker(startLatLng, {
-        icon: createStartTriangleIcon(),
-      });
-      startMarker.bindTooltip(
-        `<strong>🔺 TITIK START</strong><br/>${course.startLocation.latitude.toFixed(
-          5
-        )}, ${course.startLocation.longitude.toFixed(5)}`,
-        { direction: 'top', offset: [0, -14] }
-      );
-      startMarker.addTo(group);
-    }
-
-    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS jika mode validasi memakai GPS)
     const sortedCps = [...course.checkpoints].sort(
       (a, b) => a.orderIndex - b.orderIndex
     );
 
+    // Menyimpan titik rute secara berurutan agar polyline ikut bergeser mulus saat marker di-drag
+    const liveStartCoord: [number, number] | null = course.startLocation
+      ? [course.startLocation.latitude, course.startLocation.longitude]
+      : null;
+    const liveCpCoords: Map<string, [number, number]> = new Map(
+      sortedCps.map((cp) => [cp.id, [cp.latitude, cp.longitude]])
+    );
+    const liveFinishCoord: [number, number] | null = course.finishLocation
+      ? [course.finishLocation.latitude, course.finishLocation.longitude]
+      : null;
+
+    let routePolyline: L.Polyline | null = null;
+    const buildCurrentRouteLatLngs = (): L.LatLngExpression[] => {
+      const pts: L.LatLngExpression[] = [];
+      if (liveStartCoord) pts.push(liveStartCoord);
+      sortedCps.forEach((cp) => {
+        const c = liveCpCoords.get(cp.id);
+        if (c) pts.push(c);
+      });
+      if (liveFinishCoord) pts.push(liveFinishCoord);
+      return pts;
+    };
+
+    const initialRouteCoords = buildCurrentRouteLatLngs();
+    if (course.enforceOrder && initialRouteCoords.length >= 2) {
+      routePolyline = L.polyline(initialRouteCoords, {
+        color: '#d946ef',
+        weight: 3,
+        opacity: 0.85,
+        dashArray: '8 6',
+      }).addTo(group);
+    }
+
+    const refreshPolyline = () => {
+      if (routePolyline) {
+        routePolyline.setLatLngs(buildCurrentRouteLatLngs());
+      }
+    };
+
+    // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung)
+    if (course.startLocation && liveStartCoord) {
+      const startMarker = L.marker(liveStartCoord, {
+        icon: createStartTriangleIcon(),
+        draggable: true,
+      });
+      startMarker.bindTooltip(
+        `<strong>🔺 TITIK START</strong><br/>${course.startLocation.latitude.toFixed(
+          5
+        )}, ${course.startLocation.longitude.toFixed(
+          5
+        )}<br/><em>Geser (Drag) simbol ini untuk memindahkan posisi Start</em>`,
+        { direction: 'top', offset: [0, -14] }
+      );
+      startMarker.on('drag', () => {
+        const pos = startMarker.getLatLng();
+        liveStartCoord[0] = pos.lat;
+        liveStartCoord[1] = pos.lng;
+        refreshPolyline();
+      });
+      startMarker.on('dragend', () => {
+        const pos = startMarker.getLatLng();
+        const roundedLat = Number(pos.lat.toFixed(6));
+        const roundedLng = Number(pos.lng.toFixed(6));
+        void onUpdateStartLocation({
+          latitude: roundedLat,
+          longitude: roundedLng,
+          name: course.startLocation?.name || 'Titik Start',
+        });
+      });
+      startMarker.addTo(group);
+    }
+
+    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag Langsung)
     sortedCps.forEach((cp) => {
       const isEditingThis = editingCheckpointId === cp.id;
       const cpLatLng: [number, number] = [cp.latitude, cp.longitude];
-      routeCoords.push(cpLatLng);
 
-      // Lingkaran toleransi radius GPS hanya muncul jika Course menggunakan opsi validasi dengan GPS
+      let cpCircle: L.Circle | null = null;
       if (usesGpsRadius) {
-        L.circle(cpLatLng, {
+        cpCircle = L.circle(cpLatLng, {
           radius: cp.radiusMeters || course.defaultGpsRadiusMeters || 35,
           color: isEditingThis ? '#f59e0b' : '#d946ef',
           weight: 1.5,
@@ -433,6 +489,7 @@ export function CourseMapPlanner({
 
       const cpMarker = L.marker(cpLatLng, {
         icon: createCheckpointCircleIcon(cp, isEditingThis),
+        draggable: true,
       });
 
       const titleStr = cp.name ? `${cp.code} — ${cp.name}` : cp.code;
@@ -443,7 +500,7 @@ export function CourseMapPlanner({
       cpMarker.bindTooltip(
         `<strong>⭕ Pos #${cp.orderIndex}: ${titleStr}</strong><br/>Poin: ${
           cp.points
-        } pts • ${radiusOrQrInfo}<br/><em>Klik simbol ini untuk mengedit pos</em>`,
+        } pts • ${radiusOrQrInfo}<br/><em>Klik untuk edit detail • Geser (Drag) untuk pindah posisi</em>`,
         { direction: 'top', offset: [0, -14] }
       );
 
@@ -452,17 +509,32 @@ export function CourseMapPlanner({
         onSelectCheckpointForEdit(cp);
       });
 
+      cpMarker.on('drag', () => {
+        const pos = cpMarker.getLatLng();
+        if (cpCircle) {
+          cpCircle.setLatLng(pos);
+        }
+        liveCpCoords.set(cp.id, [pos.lat, pos.lng]);
+        refreshPolyline();
+      });
+
+      cpMarker.on('dragend', () => {
+        const pos = cpMarker.getLatLng();
+        const roundedLat = Number(pos.lat.toFixed(6));
+        const roundedLng = Number(pos.lng.toFixed(6));
+        if (onDragCheckpointCoordinates) {
+          void onDragCheckpointCoordinates(cp, roundedLat, roundedLng);
+        } else {
+          onSelectCheckpointForEdit(cp);
+          onPickCpCoordinates(roundedLat, roundedLng);
+        }
+      });
+
       cpMarker.addTo(group);
     });
 
-    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎)
-    if (course.finishLocation) {
-      const finishLatLng: [number, number] = [
-        course.finishLocation.latitude,
-        course.finishLocation.longitude,
-      ];
-      routeCoords.push(finishLatLng);
-
+    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag Langsung)
+    if (course.finishLocation && liveFinishCoord) {
       const isSameAsStart = Boolean(
         course.startLocation &&
           Math.abs(
@@ -473,30 +545,38 @@ export function CourseMapPlanner({
           ) < 0.00005
       );
 
-      const finishMarker = L.marker(finishLatLng, {
+      const finishMarker = L.marker(liveFinishCoord, {
         icon: createFinishDoubleCircleIcon(isSameAsStart),
+        draggable: true,
       });
       finishMarker.bindTooltip(
         `<strong>◎ TITIK FINISH</strong><br/>${course.finishLocation.latitude.toFixed(
           5
-        )}, ${course.finishLocation.longitude.toFixed(5)}`,
+        )}, ${course.finishLocation.longitude.toFixed(
+          5
+        )}<br/><em>Geser (Drag) simbol ini untuk memindahkan posisi Finish</em>`,
         { direction: 'top', offset: [0, -14] }
       );
+      finishMarker.on('drag', () => {
+        const pos = finishMarker.getLatLng();
+        liveFinishCoord[0] = pos.lat;
+        liveFinishCoord[1] = pos.lng;
+        refreshPolyline();
+      });
+      finishMarker.on('dragend', () => {
+        const pos = finishMarker.getLatLng();
+        const roundedLat = Number(pos.lat.toFixed(6));
+        const roundedLng = Number(pos.lng.toFixed(6));
+        void onUpdateFinishLocation({
+          latitude: roundedLat,
+          longitude: roundedLng,
+          name: course.finishLocation?.name || 'Titik Finish',
+        });
+      });
       finishMarker.addTo(group);
     }
 
-    // 4. Garis Rute Penghubung (START -> CP1 -> CP2 -> ... -> FINISH)
-    // Hanya muncul jika pengaturan Course memilih Wajib Urut (enforceOrder === true)
-    if (course.enforceOrder && routeCoords.length >= 2) {
-      L.polyline(routeCoords, {
-        color: '#d946ef',
-        weight: 3,
-        opacity: 0.85,
-        dashArray: '8 6',
-      }).addTo(group);
-    }
-
-    // 5. Titik Preview / Calon Pos (Draft CP) saat panitia klik di peta
+    // 4. Titik Preview / Calon Pos (Draft CP) saat panitia klik di peta — Bisa Di-drag Juga
     const parsedDraftLat = parseFloat(draftCpLat);
     const parsedDraftLng = parseFloat(draftCpLng);
     if (!Number.isNaN(parsedDraftLat) && !Number.isNaN(parsedDraftLng)) {
@@ -509,13 +589,14 @@ export function CourseMapPlanner({
 
       if (!matchesExistingUnedited) {
         const draftLatLng: [number, number] = [parsedDraftLat, parsedDraftLng];
+        let draftCircle: L.Circle | null = null;
         if (usesGpsRadius) {
           const previewRadius =
             draftCpRadiusMeters > 0
               ? draftCpRadiusMeters
               : course.defaultGpsRadiusMeters || 35;
 
-          L.circle(draftLatLng, {
+          draftCircle = L.circle(draftLatLng, {
             radius: previewRadius,
             color: '#fbbf24',
             weight: 2,
@@ -525,9 +606,24 @@ export function CourseMapPlanner({
           }).addTo(group);
         }
 
-        L.marker(draftLatLng, {
+        const draftMarker = L.marker(draftLatLng, {
           icon: createDraftCpIcon(draftCpCode, Boolean(editingCheckpointId)),
-        }).addTo(group);
+          draggable: true,
+        });
+        draftMarker.on('drag', () => {
+          const pos = draftMarker.getLatLng();
+          if (draftCircle) {
+            draftCircle.setLatLng(pos);
+          }
+        });
+        draftMarker.on('dragend', () => {
+          const pos = draftMarker.getLatLng();
+          onPickCpCoordinates(
+            Number(pos.lat.toFixed(6)),
+            Number(pos.lng.toFixed(6))
+          );
+        });
+        draftMarker.addTo(group);
       }
     }
   }, [
@@ -539,6 +635,10 @@ export function CourseMapPlanner({
     draftCpRadiusMeters,
     editingCheckpointId,
     onSelectCheckpointForEdit,
+    onDragCheckpointCoordinates,
+    onPickCpCoordinates,
+    onUpdateStartLocation,
+    onUpdateFinishLocation,
   ]);
 
   // Pencarian Lokasi Peta via OpenStreetMap Nominatim (Tanpa harus ke lapangan)
@@ -816,27 +916,27 @@ export function CourseMapPlanner({
           className="h-[390px] sm:h-[440px] w-full bg-slate-900 z-0 cursor-crosshair"
         />
 
-        {/* Banner Mode Klik Aktif di Sudut Atas Peta */}
-        <div className="pointer-events-none absolute top-3 right-3 z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg backdrop-blur-sm">
+        {/* Banner Mode Klik & Drag Aktif di Sudut Atas Peta */}
+        <div className="pointer-events-none absolute top-3 right-3 left-3 sm:left-auto z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg backdrop-blur-sm">
           {clickMode === 'CP' ? (
             <span>
               Mode Aktif:{' '}
               <strong className="text-fuchsia-300">
-                ⭕ Klik peta untuk mengisi koordinat Pos ({draftCpCode || 'CP'})
+                ⭕ Klik peta untuk tambah ({draftCpCode || 'CP'}) • Geser (Drag) simbol 🔺/⭕/◎ untuk pindah posisi
               </strong>
             </span>
           ) : clickMode === 'START' ? (
             <span>
               Mode Aktif:{' '}
               <strong className="text-emerald-300">
-                🔺 Klik peta untuk menempatkan Segitiga START
+                🔺 Klik atau Geser (Drag) untuk menempatkan Segitiga START
               </strong>
             </span>
           ) : (
             <span>
               Mode Aktif:{' '}
               <strong className="text-sky-300">
-                ◎ Klik peta untuk menempatkan Lingkaran Ganda FINISH
+                ◎ Klik atau Geser (Drag) untuk menempatkan Lingkaran Ganda FINISH
               </strong>
             </span>
           )}

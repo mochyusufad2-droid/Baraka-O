@@ -1,4 +1,5 @@
 import {
+  Checkpoint,
   CheckpointReport,
   Course,
   OrganizerBackupRecord,
@@ -511,7 +512,7 @@ export function mergeAndSaveOrganizerVaultBackup(
     }
   }
 
-  // 2. Merge Courses by ID
+  // 2. Merge Courses by ID & Checkpoints secara Monotonik
   const courseMap = new Map<string, Course>();
   for (const c of current.courses) {
     if (c && c.id && !deletedCourseSet.has(c.id)) {
@@ -521,7 +522,30 @@ export function mergeAndSaveOrganizerVaultBackup(
   if (Array.isArray(incoming.courses)) {
     for (const c of incoming.courses) {
       if (c && c.id && !deletedCourseSet.has(c.id)) {
-        courseMap.set(c.id, c);
+        const existing = courseMap.get(c.id);
+        if (!existing) {
+          courseMap.set(c.id, c);
+        } else {
+          // Gabungkan checkpoints secara aman agar CP yang baru dibuat tidak hilang
+          const cpMap = new Map<string, Checkpoint>();
+          for (const cp of existing.checkpoints || []) {
+            if (cp && cp.id) cpMap.set(cp.id, cp);
+          }
+          for (const cp of c.checkpoints || []) {
+            if (cp && cp.id) {
+              const prevCp = cpMap.get(cp.id);
+              cpMap.set(cp.id, { ...(prevCp || {}), ...cp });
+            }
+          }
+          const mergedCps = Array.from(cpMap.values()).sort(
+            (a, b) => a.orderIndex - b.orderIndex
+          );
+          courseMap.set(c.id, {
+            ...existing,
+            ...c,
+            checkpoints: mergedCps,
+          });
+        }
       }
     }
   }

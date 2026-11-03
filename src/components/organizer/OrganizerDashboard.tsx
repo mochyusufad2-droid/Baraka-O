@@ -518,10 +518,44 @@ export default function OrganizerDashboard({
             reports: data.reports,
           });
 
-      // Gabungkan sesi dan laporan secara Monotonik dengan state sebelumnya & Vault lokal
-      // agar skor akhir maupun waktu tempuh TIDAK PERNAH berkedip mundur saat polling tiap 6 detik
+      // Gabungkan course, checkpoints, sesi, dan laporan secara Monotonik
+      // agar CP yang baru dibuat maupun skor peserta TIDAK PERNAH berkedip/hilang saat polling tiap 6 detik
       setDashboard((prev) => {
-        const finalCourseIds = new Set(data.courses.map((c) => c.id));
+        const courseMap = new Map<string, Course>();
+        for (const c of prev?.courses || []) {
+          if (c && c.id && !deletedCourseSet.has(c.id)) {
+            courseMap.set(c.id, c);
+          }
+        }
+        for (const c of data.courses || []) {
+          if (c && c.id && !deletedCourseSet.has(c.id)) {
+            const existing = courseMap.get(c.id);
+            if (!existing) {
+              courseMap.set(c.id, c);
+            } else {
+              const cpMap = new Map<string, Checkpoint>();
+              for (const cp of existing.checkpoints || []) {
+                if (cp && cp.id) cpMap.set(cp.id, cp);
+              }
+              for (const cp of c.checkpoints || []) {
+                if (cp && cp.id) {
+                  const prevCp = cpMap.get(cp.id);
+                  cpMap.set(cp.id, { ...(prevCp || {}), ...cp });
+                }
+              }
+              const mergedCps = Array.from(cpMap.values()).sort(
+                (a, b) => a.orderIndex - b.orderIndex
+              );
+              courseMap.set(c.id, {
+                ...existing,
+                ...c,
+                checkpoints: mergedCps,
+              });
+            }
+          }
+        }
+
+        const finalCourseIds = new Set(Array.from(courseMap.keys()));
         const sessionMap = new Map<string, ParticipantSession>();
 
         const seedSessions = [
@@ -576,6 +610,7 @@ export default function OrganizerDashboard({
 
         return {
           ...data,
+          courses: Array.from(courseMap.values()),
           sessions: Array.from(sessionMap.values()),
           reports: Array.from(reportMap.values()),
         };
@@ -865,6 +900,75 @@ export default function OrganizerDashboard({
     setCpPointsInput('100');
     setCpRadiusInput(String(selectedCourse?.defaultGpsRadiusMeters || 35));
   }, [selectedCourse]);
+
+  // Geser (Drag & Drop) Posisi Pos CP Langsung di Peta -> Simpan Instan 1 Langkah
+  const handleDragCheckpointCoordinates = useCallback(
+    async (cp: Checkpoint, lat: number, lng: number) => {
+      if (!selectedCourse || !token) return;
+      const roundedLat = Number(lat.toFixed(6));
+      const roundedLng = Number(lng.toFixed(6));
+
+      // Jika pos ini sedang dibuka di form edit, ikut perbarui angka di kolom input
+      if (editingCheckpointId === cp.id) {
+        setCpLat(String(roundedLat));
+        setCpLng(String(roundedLng));
+      }
+
+      // Optimistic UI update agar posisi tidak melompat balik saat dilepas
+      const optimisticCourse: Course = {
+        ...selectedCourse,
+        checkpoints: selectedCourse.checkpoints.map((item) =>
+          item.id === cp.id
+            ? { ...item, latitude: roundedLat, longitude: roundedLng }
+            : item
+        ),
+      };
+      applyUpdatedCourseLocally(optimisticCourse);
+
+      try {
+        const res = await fetch(
+          `/api/organizer/courses/${selectedCourse.id}/checkpoints/${cp.id}`,
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              latitude: roundedLat,
+              longitude: roundedLng,
+            }),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok)
+          throw new Error(data.error || 'Gagal memindahkan posisi checkpoint');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
+        await fetchDashboard();
+        showTemporarySuccess(
+          `⭕ Posisi ${cp.code} berhasil digeser ke (${roundedLat.toFixed(
+            5
+          )}, ${roundedLng.toFixed(5)})`
+        );
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : 'Gagal menyimpan posisi baru checkpoint'
+        );
+      }
+    },
+    [
+      selectedCourse,
+      token,
+      editingCheckpointId,
+      applyUpdatedCourseLocally,
+      fetchDashboard,
+      showTemporarySuccess,
+    ]
+  );
 
   // Compute Leaderboard rows with live / finished Overtime Penalty + Split Legs (#1..#N & Finish Split)
   const leaderboardRows = useMemo(() => {
@@ -1815,21 +1919,21 @@ export default function OrganizerDashboard({
 
   return (
     <div className="space-y-6">
-      {/* Sub-header Organizer Controls */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+      {/* Sub-header Organizer Controls (Responsif Mobile & Desktop Tanpa Overflow) */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4 overflow-hidden">
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
             <Shield className="w-5 h-5" />
           </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-bold text-white text-sm">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              <span className="font-bold text-white text-xs sm:text-sm truncate">
                 {dashboard?.currentOrganizer?.isSuperAdmin
                   ? 'PUSAT KENDALI SUPERADMIN'
                   : `DASHBOARD ORGANIZER: ${dashboard?.currentOrganizer?.name || 'Panitia'}`}
               </span>
               <span
-                className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
+                className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${
                   dashboard?.currentOrganizer?.isSuperAdmin
                     ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
                     : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
@@ -1840,7 +1944,7 @@ export default function OrganizerDashboard({
                   : `${dashboard?.currentOrganizer?.code || 'ORGANIZER'} • TERISOLASI`}
               </span>
             </div>
-            <p className="text-xs text-slate-400">
+            <p className="text-[11px] sm:text-xs text-slate-400 leading-snug mt-0.5">
               {dashboard?.currentOrganizer?.isSuperAdmin
                 ? 'Akses penuh seluruh Course, Peserta, dan pembuatan akun login Organizer'
                 : 'Hanya menampilkan Course yang Anda buat & peserta yang ikut di Course Anda'}
@@ -1848,9 +1952,9 @@ export default function OrganizerDashboard({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto min-w-0">
           {dashboard && dashboard.courses.length > 0 && (
-            <div className="flex items-center gap-2 bg-slate-950 border border-slate-700/80 rounded-lg px-2.5 py-1.5">
+            <div className="flex items-center gap-2 bg-slate-950 border border-slate-700/80 rounded-lg px-2.5 py-1.5 flex-1 sm:flex-initial min-w-0 max-w-full sm:max-w-[260px]">
               <MapIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <select
                 value={selectedCourse?.id || ''}
@@ -1859,7 +1963,7 @@ export default function OrganizerDashboard({
                   setIsEditingCourse(false);
                   setEditingCheckpointId(null);
                 }}
-                className="bg-transparent text-xs text-slate-200 focus:outline-none font-medium"
+                className="bg-transparent text-xs text-slate-200 focus:outline-none font-medium w-full min-w-0 truncate"
               >
                 {dashboard.courses.map((c: Course) => (
                   <option
@@ -1878,20 +1982,22 @@ export default function OrganizerDashboard({
             </div>
           )}
 
-          <button
-            onClick={fetchDashboard}
-            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
-            title="Muat Ulang Data"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Keluar</span>
-          </button>
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <button
+              onClick={fetchDashboard}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition shrink-0"
+              title="Muat Ulang Data"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition shrink-0"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Keluar</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2979,6 +3085,7 @@ export default function OrganizerDashboard({
                 onUpdateStartLocation={handleUpdateStartLocation}
                 onUpdateFinishLocation={handleUpdateFinishLocation}
                 onSelectCheckpointForEdit={handleSelectCheckpointForEdit}
+                onDragCheckpointCoordinates={handleDragCheckpointCoordinates}
               />
 
               {/* Form Tambah / Edit Checkpoint (Nama Lokasi Pos Opsional, Poin & Radius Tanpa Sisa 0) */}

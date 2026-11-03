@@ -1,0 +1,17 @@
+---
+deployment:
+  tasks:
+    # 1. Tentukan folder root aplikasi Node.js Anda di cPanel
+    # Ganti 'username' dan 'baraka' sesuai username cPanel & folder aplikasi Anda
+    - export DEPLOYPATH=/home/$USER/baraka/
+    - /bin/mkdir -p $DEPLOYPATH
+    - /bin/mkdir -p $DEPLOYPATH/dist
+    - /bin/mkdir -p $DEPLOYPATH/data
+    - /bin/mkdir -p $DEPLOYPATH/tmp
+    # 2. Salin aset statis hasil build dan file server
+    - /bin/cp -R dist/* $DEPLOYPATH/dist/
+    - /bin/cp server.js $DEPLOYPATH/
+    - /bin/cp package.json $DEPLOYPATH/
+    - /bin/cp .htaccess $DEPLOYPATH/ 2>/dev/null || :
+    # 3. Trigger Auto-Restart Passenger Node.js (Aplikasi otomatis restart tanpa klik tombol manual)
+    - /bin/touch $DEPLOYPATH/tmp/restart.txt

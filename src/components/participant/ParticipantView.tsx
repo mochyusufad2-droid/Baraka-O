@@ -2659,18 +2659,6 @@ export default function ParticipantView({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setSimulatedOffline((prev) => !prev)}
-              className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition border ${
-                simulatedOffline
-                  ? 'bg-amber-500 text-slate-950 border-amber-400'
-                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-              }`}
-            >
-              {simulatedOffline ? 'Offline: ON' : 'Simulasi Offline'}
-            </button>
-
             {activeSession && (
               <button
                 type="button"
@@ -2913,9 +2901,9 @@ export default function ParticipantView({
             <button
               type="button"
               onClick={handleLogout}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 shrink-0"
             >
-              <LogOut className="h-3.5 w-3.5" /> Ganti Akun
+              <LogOut className="h-3.5 w-3.5" /> Keluar
             </button>
           </div>
 

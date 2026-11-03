@@ -69,13 +69,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Indikator Peran Aktif (Hanya teks status, bukan tombol pindah dashboard) */}
-          {authenticatedRole === UserRole.PARTICIPANT && (
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
-              <Smartphone className="h-3.5 w-3.5" />
-              Mode Peserta
-            </span>
-          )}
+          {/* Indikator Peran Aktif khusus Organizer */}
           {authenticatedRole === UserRole.ORGANIZER && (
             <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
               <Shield className="h-3.5 w-3.5" />

@@ -964,8 +964,29 @@ function smartMergeIntoServerDb(
         (!authScope || canAccessCourse(targetDb.courses[existingIdx], authScope)) &&
         JSON.stringify(targetDb.courses[existingIdx]) !== JSON.stringify(normalized)
       ) {
-        targetDb.courses[existingIdx] = normalized;
-        changed = true;
+        const currentCourse = targetDb.courses[existingIdx];
+        const cpMap = new Map<string, Checkpoint>();
+        for (const cp of currentCourse.checkpoints || []) {
+          if (cp && cp.id) cpMap.set(cp.id, cp);
+        }
+        for (const cp of normalized.checkpoints || []) {
+          if (cp && cp.id) {
+            const prevCp = cpMap.get(cp.id);
+            cpMap.set(cp.id, { ...(prevCp || {}), ...cp });
+          }
+        }
+        const mergedCheckpoints = Array.from(cpMap.values()).sort(
+          (a, b) => a.orderIndex - b.orderIndex
+        );
+        const mergedCourse = {
+          ...currentCourse,
+          ...normalized,
+          checkpoints: mergedCheckpoints,
+        };
+        if (JSON.stringify(currentCourse) !== JSON.stringify(mergedCourse)) {
+          targetDb.courses[existingIdx] = mergedCourse;
+          changed = true;
+        }
       }
     }
   }
@@ -3302,6 +3323,7 @@ app.post('/api/participant/login', (req, res) => {
 
       course.checkpoints.push(newCp);
       saveDb(db);
+      void pushDbToCloudNow(db);
       res.status(201).json({ checkpoint: newCp, course });
     }
   );
@@ -3364,6 +3386,7 @@ app.post('/api/participant/login', (req, res) => {
         .forEach((s) => recalculateSessionScore(s, course));
 
       saveDb(db);
+      void pushDbToCloudNow(db);
       res.json({ checkpoint: cp, course });
     }
   );
@@ -3395,6 +3418,7 @@ app.post('/api/participant/login', (req, res) => {
         .forEach((s) => recalculateSessionScore(s, course));
 
       saveDb(db);
+      void pushDbToCloudNow(db);
       res.json({ course });
     }
   );

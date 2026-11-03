@@ -1,0 +1,52 @@
+# ==============================================================================
+# BARAKA ADVENTURE - cPanel .htaccess Configuration
+# ==============================================================================
+
+# 1. PAKSA KONEKSI HTTPS (WAJIB untuk Kamera Scanner QR & Geolocation GPS)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
+# 2. PENANGANAN ROUTING CLIENT-SIDE (REACT SPA FALLBACK — ANTI ERROR 404)
+# Memastikan saat pengguna me-refresh URL seperti /participant atau /organizer,
+# server tidak mengembalikan error 404, melainkan mengembalikan index.html.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # A. Jika request mengarah ke file atau direktori fisik nyata (js, css, gambar, svg), sajikan langsung
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # B. Jangan arahkan request API (/api/*) ke index.html agar data JSON tidak tertimpa HTML
+    RewriteCond %{REQUEST_URI} ^/api/ [NC]
+    RewriteRule ^ - [L]
+
+    # C. Semua rute navigasi browser lainnya dialihkan ke index.html untuk ditangani React Router
+    RewriteRule ^ index.html [L]
+</IfModule>
+
+# 3. KOMPRESI GZIP (Menghemat kuota data seluler peserta di lapangan)
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css application/javascript application/json image/svg+xml
+</IfModule>
+
+# 4. BROWSER CACHING (Aset JavaScript dan CSS di-cache agar loading berikutnya instan)
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType image/svg+xml "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType text/html "access plus 0 seconds"
+</IfModule>
+
+# 5. KEAMANAN HEADER (Security Headers)
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set X-XSS-Protection "1; mode=block"
+</IfModule>
