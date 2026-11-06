@@ -286,6 +286,7 @@ export default function OrganizerDashboard({
 
   // Full Database Backup & Restore States (Migrasi Mandiri)
   const [isExportingDb, setIsExportingDb] = useState<boolean>(false);
+  const [isDownloadingCpanelBundle, setIsDownloadingCpanelBundle] = useState<boolean>(false);
   const [isRestoringDb, setIsRestoringDb] = useState<boolean>(false);
   const [pendingRestoreData, setPendingRestoreData] = useState<any | null>(null);
   const [restoreStats, setRestoreStats] = useState<{
@@ -1675,6 +1676,37 @@ export default function OrganizerDashboard({
       setErrorMsg('Kesalahan jaringan saat mengunduh database.');
     } finally {
       setIsExportingDb(false);
+    }
+  };
+
+  // Superadmin: Download Paket Siap Upload cPanel (.zip berisi cpanel-server.cjs + dist/ + cpanel_dist/ + data/)
+  const handleDownloadCpanelBundle = async () => {
+    if (!token) return;
+    setIsDownloadingCpanelBundle(true);
+    try {
+      const res = await fetch('/api/organizer/cpanel-bundle', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(err.error || 'Gagal menyiapkan paket bundel cPanel.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      link.download = `baraka-cpanel-ready-${dateStr}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+      showTemporarySuccess(
+        'Paket Siap Upload cPanel (.zip) berhasil diunduh! Langsung unggah & Extract di File Manager cPanel.'
+      );
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat mengunduh paket bundel cPanel.');
+    } finally {
+      setIsDownloadingCpanelBundle(false);
     }
   };
 
@@ -4213,6 +4245,20 @@ export default function OrganizerDashboard({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isDownloadingCpanelBundle}
+                    onClick={handleDownloadCpanelBundle}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-emerald-500/20"
+                  >
+                    <Download
+                      className={`w-4 h-4 ${isDownloadingCpanelBundle ? 'animate-bounce' : ''}`}
+                    />
+                    {isDownloadingCpanelBundle
+                      ? 'Menyiapkan Bundel...'
+                      : 'Download Paket Siap Upload cPanel (.zip)'}
+                  </button>
+
                   <button
                     type="button"
                     disabled={isExportingDb}

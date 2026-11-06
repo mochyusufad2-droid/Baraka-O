@@ -1,9 +1,11 @@
+import { execSync } from 'child_process';
 import crypto from 'crypto';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import zlib from 'zlib';
 import { initializeApp as initializeFirebaseApp, getApps as getFirebaseApps } from 'firebase/app';
 import {
   getFirestore as getCloudFirestore,
@@ -3679,6 +3681,165 @@ app.post('/api/participant/login', (req, res) => {
     });
   });
 
+  // ==========================================================================
+  // BUNDEL SIAP UPLOAD CPANEL (.ZIP TANPA NPM INSTALL)
+  // ==========================================================================
+  const crc32Table = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function computeCrc32(buf: Buffer): number {
+    let crc = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) {
+      crc = crc32Table[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function createZipArchiveBuffer(files: Array<{ zipPath: string; content: Buffer }>): Buffer {
+    const localParts: Buffer[] = [];
+    const centralParts: Buffer[] = [];
+    let offset = 0;
+
+    for (const file of files) {
+      const nameBuf = Buffer.from(file.zipPath.replace(/\\/g, '/'), 'utf-8');
+      const uncompressed = file.content;
+      const compressed = zlib.deflateRawSync(uncompressed);
+      const crc = computeCrc32(uncompressed);
+
+      const localHeader = Buffer.alloc(30);
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0, 6);
+      localHeader.writeUInt16LE(8, 8);
+      localHeader.writeUInt16LE(0, 10);
+      localHeader.writeUInt16LE(0, 12);
+      localHeader.writeUInt32LE(crc, 14);
+      localHeader.writeUInt32LE(compressed.length, 18);
+      localHeader.writeUInt32LE(uncompressed.length, 22);
+      localHeader.writeUInt16LE(nameBuf.length, 26);
+      localHeader.writeUInt16LE(0, 28);
+
+      localParts.push(localHeader, nameBuf, compressed);
+
+      const centralHeader = Buffer.alloc(46);
+      centralHeader.writeUInt32LE(0x02014b50, 0);
+      centralHeader.writeUInt16LE(20, 4);
+      centralHeader.writeUInt16LE(20, 6);
+      centralHeader.writeUInt16LE(0, 8);
+      centralHeader.writeUInt16LE(8, 10);
+      centralHeader.writeUInt16LE(0, 12);
+      centralHeader.writeUInt16LE(0, 14);
+      centralHeader.writeUInt32LE(crc, 16);
+      centralHeader.writeUInt32LE(compressed.length, 20);
+      centralHeader.writeUInt32LE(uncompressed.length, 24);
+      centralHeader.writeUInt16LE(nameBuf.length, 28);
+      centralHeader.writeUInt16LE(0, 30);
+      centralHeader.writeUInt16LE(0, 32);
+      centralHeader.writeUInt16LE(0, 34);
+      centralHeader.writeUInt16LE(0, 36);
+      centralHeader.writeUInt32LE(0, 38);
+      centralHeader.writeUInt32LE(offset, 42);
+
+      centralParts.push(centralHeader, nameBuf);
+      offset += localHeader.length + nameBuf.length + compressed.length;
+    }
+
+    const centralDirBuf = Buffer.concat(centralParts);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4);
+    eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(files.length, 8);
+    eocd.writeUInt16LE(files.length, 10);
+    eocd.writeUInt32LE(centralDirBuf.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    eocd.writeUInt16LE(0, 20);
+
+    return Buffer.concat([...localParts, centralDirBuf, eocd]);
+  }
+
+  function collectDirFilesForZip(
+    absDir: string,
+    zipPrefix: string,
+    out: Array<{ zipPath: string; content: Buffer }>
+  ): void {
+    if (!fs.existsSync(absDir)) return;
+    const entries = fs.readdirSync(absDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(absDir, entry.name);
+      const relZipPath = `${zipPrefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        collectDirFilesForZip(fullPath, relZipPath, out);
+      } else if (entry.isFile()) {
+        out.push({
+          zipPath: relZipPath,
+          content: fs.readFileSync(fullPath),
+        });
+      }
+    }
+  }
+
+  app.get('/api/organizer/cpanel-bundle', requireSuperAdmin, (_req, res) => {
+    try {
+      const bundleServerFile = path.join(ROOT_DIR, 'cpanel-server.cjs');
+      const primaryDistDir = path.join(ROOT_DIR, 'dist');
+      const cpanelDistDir = path.join(ROOT_DIR, 'cpanel_dist');
+
+      if (
+        !fs.existsSync(bundleServerFile) ||
+        (!fs.existsSync(path.join(primaryDistDir, 'index.html')) &&
+          !fs.existsSync(path.join(cpanelDistDir, 'index.html')))
+      ) {
+        execSync('npm run build:all', { cwd: ROOT_DIR, stdio: 'pipe' });
+      }
+
+      const activeDistDir = fs.existsSync(path.join(primaryDistDir, 'index.html'))
+        ? primaryDistDir
+        : cpanelDistDir;
+
+      const filesToZip: Array<{ zipPath: string; content: Buffer }> = [];
+
+      if (fs.existsSync(bundleServerFile)) {
+        filesToZip.push({
+          zipPath: 'cpanel-server.cjs',
+          content: fs.readFileSync(bundleServerFile),
+        });
+      }
+
+      // Masukkan ke dalam dist/ sekaligus cpanel_dist/ agar 100% pasti terbaca di cPanel
+      collectDirFilesForZip(activeDistDir, 'dist', filesToZip);
+      collectDirFilesForZip(activeDistDir, 'cpanel_dist', filesToZip);
+
+      // Sertakan database hidup saat ini ke dalam data/baraka-db.json
+      filesToZip.push({
+        zipPath: 'data/baraka-db.json',
+        content: Buffer.from(JSON.stringify(db, null, 2), 'utf-8'),
+      });
+
+      const zipBuf = createZipArchiveBuffer(filesToZip);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="baraka-cpanel-ready-${dateStr}.zip"`
+      );
+      res.send(zipBuf);
+    } catch (err: any) {
+      res.status(500).json({
+        error: `Gagal menyiapkan bundel cPanel: ${err?.message || 'Unknown error'}`,
+      });
+    }
+  });
+
 // --------------------------------------------------------------------------
 // VITE MIDDLEWARE (DEVELOPMENT) ATAU STATIC FILES (NON-VERCEL STANDALONE)
 // --------------------------------------------------------------------------
@@ -3692,7 +3853,13 @@ process.on('uncaughtException', (err) => {
 });
 
 async function startServer() {
-  const distPath = path.join(ROOT_DIR, 'dist');
+  const primaryDistPath = path.join(ROOT_DIR, 'dist');
+  const cpanelDistPath = path.join(ROOT_DIR, 'cpanel_dist');
+  const distPath = fs.existsSync(path.join(primaryDistPath, 'index.html'))
+    ? primaryDistPath
+    : fs.existsSync(path.join(cpanelDistPath, 'index.html'))
+      ? cpanelDistPath
+      : primaryDistPath;
   const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
   const isDevScript =
     process.env.npm_lifecycle_event === 'dev' ||

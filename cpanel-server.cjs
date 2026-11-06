@@ -5253,7 +5253,7 @@ var require_read = __commonJS({
     var iconv = require_lib();
     var onFinished = require_on_finished();
     var unpipe = require_unpipe();
-    var zlib = require("zlib");
+    var zlib2 = require("zlib");
     module2.exports = read;
     function read(req, res, next, parse, debug, options2) {
       var length;
@@ -5349,12 +5349,12 @@ var require_read = __commonJS({
       }
       switch (encoding) {
         case "deflate":
-          stream = zlib.createInflate();
+          stream = zlib2.createInflate();
           debug("inflate body");
           req.pipe(stream);
           break;
         case "gzip":
-          stream = zlib.createGunzip();
+          stream = zlib2.createGunzip();
           debug("gunzip body");
           req.pipe(stream);
           break;
@@ -39189,7 +39189,7 @@ var require_compression_filter = __commonJS({
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.CompressionFilterFactory = exports2.CompressionFilter = void 0;
-    var zlib = require("zlib");
+    var zlib2 = require("zlib");
     var compression_algorithms_1 = require_compression_algorithms();
     var constants_1 = require_constants();
     var filter_1 = require_filter();
@@ -39249,7 +39249,7 @@ var require_compression_filter = __commonJS({
       }
       compressMessage(message) {
         return new Promise((resolve, reject) => {
-          zlib.deflate(message, (err, output) => {
+          zlib2.deflate(message, (err, output) => {
             if (err) {
               reject(err);
             } else {
@@ -39262,7 +39262,7 @@ var require_compression_filter = __commonJS({
         return new Promise((resolve, reject) => {
           let totalLength = 0;
           const messageParts = [];
-          const decompresser = zlib.createInflate();
+          const decompresser = zlib2.createInflate();
           decompresser.on("error", (error) => {
             reject({
               code: constants_1.Status.INTERNAL,
@@ -39295,7 +39295,7 @@ var require_compression_filter = __commonJS({
       }
       compressMessage(message) {
         return new Promise((resolve, reject) => {
-          zlib.gzip(message, (err, output) => {
+          zlib2.gzip(message, (err, output) => {
             if (err) {
               reject(err);
             } else {
@@ -39308,7 +39308,7 @@ var require_compression_filter = __commonJS({
         return new Promise((resolve, reject) => {
           let totalLength = 0;
           const messageParts = [];
-          const decompresser = zlib.createGunzip();
+          const decompresser = zlib2.createGunzip();
           decompresser.on("error", (error) => {
             reject({
               code: constants_1.Status.INTERNAL,
@@ -41133,7 +41133,7 @@ var require_server_call = __commonJS({
     var events_1 = require("events");
     var http2 = require("http2");
     var stream_1 = require("stream");
-    var zlib = require("zlib");
+    var zlib2 = require("zlib");
     var constants_1 = require_constants();
     var metadata_1 = require_metadata();
     var stream_decoder_1 = require_stream_decoder();
@@ -41378,9 +41378,9 @@ var require_server_call = __commonJS({
         } else if (encoding === "deflate" || encoding === "gzip") {
           let decompresser;
           if (encoding === "deflate") {
-            decompresser = zlib.createInflate();
+            decompresser = zlib2.createInflate();
           } else {
-            decompresser = zlib.createGunzip();
+            decompresser = zlib2.createGunzip();
           }
           return new Promise((resolve, reject) => {
             let totalLength = 0;
@@ -44090,12 +44090,14 @@ __export(server_exports, {
   verifyPin: () => verifyPin
 });
 module.exports = __toCommonJS(server_exports);
+var import_child_process = require("child_process");
 var import_crypto2 = __toESM(require("crypto"), 1);
 var import_express = __toESM(require_express2(), 1);
 var import_fs = __toESM(require("fs"), 1);
 var import_http = __toESM(require("http"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_url = require("url");
+var import_zlib = __toESM(require("zlib"), 1);
 
 // node_modules/@firebase/util/dist/postinstall.mjs
 var getDefaultsFromPostinstall = () => void 0;
@@ -80610,6 +80612,131 @@ app.post("/api/organizer/database/import", requireSuperAdmin, (req, res) => {
     }
   });
 });
+var crc32Table = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+function computeCrc32(buf) {
+  let crc = 4294967295;
+  for (let i = 0; i < buf.length; i++) {
+    crc = crc32Table[(crc ^ buf[i]) & 255] ^ crc >>> 8;
+  }
+  return (crc ^ 4294967295) >>> 0;
+}
+function createZipArchiveBuffer(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const file of files) {
+    const nameBuf = Buffer.from(file.zipPath.replace(/\\/g, "/"), "utf-8");
+    const uncompressed = file.content;
+    const compressed = import_zlib.default.deflateRawSync(uncompressed);
+    const crc = computeCrc32(uncompressed);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(67324752, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(8, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(uncompressed.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, nameBuf, compressed);
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(33639248, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0, 8);
+    centralHeader.writeUInt16LE(8, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(compressed.length, 20);
+    centralHeader.writeUInt32LE(uncompressed.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, nameBuf);
+    offset += localHeader.length + nameBuf.length + compressed.length;
+  }
+  const centralDirBuf = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(101010256, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(centralDirBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirBuf, eocd]);
+}
+function collectDirFilesForZip(absDir, zipPrefix, out) {
+  if (!import_fs.default.existsSync(absDir)) return;
+  const entries = import_fs.default.readdirSync(absDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = import_path.default.join(absDir, entry.name);
+    const relZipPath = `${zipPrefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      collectDirFilesForZip(fullPath, relZipPath, out);
+    } else if (entry.isFile()) {
+      out.push({
+        zipPath: relZipPath,
+        content: import_fs.default.readFileSync(fullPath)
+      });
+    }
+  }
+}
+app.get("/api/organizer/cpanel-bundle", requireSuperAdmin, (_req, res) => {
+  try {
+    const bundleServerFile = import_path.default.join(ROOT_DIR, "cpanel-server.cjs");
+    const primaryDistDir = import_path.default.join(ROOT_DIR, "dist");
+    const cpanelDistDir = import_path.default.join(ROOT_DIR, "cpanel_dist");
+    if (!import_fs.default.existsSync(bundleServerFile) || !import_fs.default.existsSync(import_path.default.join(primaryDistDir, "index.html")) && !import_fs.default.existsSync(import_path.default.join(cpanelDistDir, "index.html"))) {
+      (0, import_child_process.execSync)("npm run build:all", { cwd: ROOT_DIR, stdio: "pipe" });
+    }
+    const activeDistDir = import_fs.default.existsSync(import_path.default.join(primaryDistDir, "index.html")) ? primaryDistDir : cpanelDistDir;
+    const filesToZip = [];
+    if (import_fs.default.existsSync(bundleServerFile)) {
+      filesToZip.push({
+        zipPath: "cpanel-server.cjs",
+        content: import_fs.default.readFileSync(bundleServerFile)
+      });
+    }
+    collectDirFilesForZip(activeDistDir, "dist", filesToZip);
+    collectDirFilesForZip(activeDistDir, "cpanel_dist", filesToZip);
+    filesToZip.push({
+      zipPath: "data/baraka-db.json",
+      content: Buffer.from(JSON.stringify(db, null, 2), "utf-8")
+    });
+    const zipBuf = createZipArchiveBuffer(filesToZip);
+    const dateStr = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="baraka-cpanel-ready-${dateStr}.zip"`
+    );
+    res.send(zipBuf);
+  } catch (err) {
+    res.status(500).json({
+      error: `Gagal menyiapkan bundel cPanel: ${err?.message || "Unknown error"}`
+    });
+  }
+});
 process.on("unhandledRejection", (reason) => {
   console.warn("[BARAKA SERVER] Unhandled Rejection:", reason);
 });
@@ -80617,7 +80744,9 @@ process.on("uncaughtException", (err) => {
   console.warn("[BARAKA SERVER] Uncaught Exception:", err);
 });
 async function startServer() {
-  const distPath = import_path.default.join(ROOT_DIR, "dist");
+  const primaryDistPath = import_path.default.join(ROOT_DIR, "dist");
+  const cpanelDistPath = import_path.default.join(ROOT_DIR, "cpanel_dist");
+  const distPath = import_fs.default.existsSync(import_path.default.join(primaryDistPath, "index.html")) ? primaryDistPath : import_fs.default.existsSync(import_path.default.join(cpanelDistPath, "index.html")) ? cpanelDistPath : primaryDistPath;
   const hasBuiltDist = import_fs.default.existsSync(import_path.default.join(distPath, "index.html"));
   const isDevScript = process.env.npm_lifecycle_event === "dev" || process.execArgv.some((arg) => arg.includes("tsx"));
   const useStaticDist = process.env.NODE_ENV === "production" || true;
