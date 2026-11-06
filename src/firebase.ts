@@ -20,6 +20,15 @@ import {
 import firebaseConfig from '../firebase-applet-config.json';
 import type { Course, ParticipantPublic, ParticipantSession } from './types';
 
+// Deteksi otomatis Mode Mandiri (Standalone cPanel seperti neo.baraka.id):
+// Jika dijalankan di domain mandiri di luar preview AI Studio (*.run.app) atau VITE_STANDALONE_MODE=true,
+// matikan seluruh koneksi jaringan ke Firebase agar 100% mandiri di server cPanel sendiri.
+const isClientStandalone =
+  import.meta.env.VITE_STANDALONE_MODE === 'true' ||
+  (typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    !window.location.hostname.endsWith('.run.app'));
+
 // Matikan log error internal Firestore di console agar mode offline / gangguan jaringan
 // tidak memicu false-positive error overlay pada browser peserta.
 setLogLevel('silent');
@@ -93,8 +102,9 @@ export function handleFirestoreError(
   console.warn('Firestore Notice: ', JSON.stringify(errInfo));
 }
 
-// Validate Connection to Firestore on boot (tanpa memicu console.error saat offline)
+// Validate Connection to Firestore on boot (tanpa memicu console.error saat offline atau mode mandiri)
 async function testConnection() {
+  if (isClientStandalone) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
@@ -106,6 +116,7 @@ async function testConnection() {
 void testConnection();
 
 export async function signInWithGoogleFirebase(): Promise<User | null> {
+  if (isClientStandalone) return null;
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
@@ -116,6 +127,7 @@ export async function signInWithGoogleFirebase(): Promise<User | null> {
 }
 
 export async function signOutFirebase(): Promise<void> {
+  if (isClientStandalone) return;
   try {
     await signOut(auth);
   } catch {
@@ -137,6 +149,7 @@ function sanitizeId(raw: string): string {
  * Mencadangkan dokumen Course ke Cloud Firestore sesuai skema firebase-blueprint.json
  */
 export async function syncCourseToFirestore(course: Course): Promise<void> {
+  if (isClientStandalone) return;
   const currentUser = auth.currentUser;
   if (!currentUser || !currentUser.emailVerified) return;
 
@@ -169,6 +182,7 @@ export async function syncSessionToFirestore(
   session: ParticipantSession,
   participant: ParticipantPublic
 ): Promise<void> {
+  if (isClientStandalone) return;
   const currentUser = auth.currentUser;
   if (!currentUser || !currentUser.emailVerified) return;
 

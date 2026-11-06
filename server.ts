@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { initializeApp as initializeFirebaseApp, getApps as getFirebaseApps } from 'firebase/app';
@@ -51,13 +52,22 @@ const SyncStatus = {
   REJECTED_SERVER: 'REJECTED_SERVER' as SyncStatusType,
 };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const ROOT_DIR =
+  typeof import.meta?.url === 'string'
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : process.cwd();
 
-const PORT = 3000;
+const isAiStudioPreviewProxy = Boolean(process.env.NGINX_PORT && process.env.DEFAULT_APP_PORT);
+const PORT: number | string =
+  process.env.CPANEL_PORT ||
+  (!isAiStudioPreviewProxy && process.env.PORT
+    ? Number.isNaN(Number(process.env.PORT))
+      ? process.env.PORT
+      : Number(process.env.PORT)
+    : 3000);
 const DATA_DIR = process.env.VERCEL
   ? path.join('/tmp', 'baraka-data')
-  : path.join(__dirname, 'data');
+  : path.join(ROOT_DIR, 'data');
 const DB_FILE = path.join(DATA_DIR, 'baraka-db.json');
 const TOKEN_SECRET =
   process.env.BARAKA_TOKEN_SECRET || 'baraka-adventure-hmac-secret-2026';
@@ -3682,42 +3692,17 @@ process.on('uncaughtException', (err) => {
 });
 
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    process.env.DISABLE_HMR = 'true';
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-      appType: 'spa',
-    });
+  const distPath = path.join(ROOT_DIR, 'dist');
+  const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isDevScript =
+    process.env.npm_lifecycle_event === 'dev' ||
+    process.execArgv.some((arg) => arg.includes('tsx'));
+  const useStaticDist =
+    process.env.NODE_ENV === 'production' ||
+    process.env.STANDALONE_MODE === 'true' ||
+    (!isDevScript && hasBuiltDist);
 
-    app.get('/@vite/client', async (_req, res, next) => {
-      try {
-        const result = await vite.transformRequest('/@vite/client');
-        if (result && result.code) {
-          const safeClientCode = result.code
-            .replace(
-              'transport.connect(createHMRHandler(handleMessage));',
-              '/* HMR WebSocket disabled in preview */'
-            )
-            .replace(
-              'else throw new SendBeforeConnectError("send was called before connect");',
-              'else return;'
-            )
-            .replace(
-              'else throw new SendBeforeConnectError("invoke was called before connect");',
-              'else return;'
-            )
-            .replace('throw e;', 'return;');
-          res.status(200).set({ 'Content-Type': 'application/javascript' }).send(safeClientCode);
-          return;
-        }
-      } catch {
-        // Lanjutkan ke middleware standar jika gagal transformasi
-      }
-      next();
-    });
-
-    // Cegah API 404 mengembalikan HTML index.html
+  const registerStaticFallback = () => {
     app.all('/api/*', (req, res) => {
       res.status(404).json({
         error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
@@ -3725,26 +3710,97 @@ async function startServer() {
       });
     });
 
-    app.use(vite.middlewares);
-  } else {
-    app.all('/api/*', (req, res) => {
-      res.status(404).json({
-        error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath, { maxAge: '1d' }));
 
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
+  };
+
+  if (!useStaticDist) {
+    try {
+      process.env.DISABLE_HMR = 'true';
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true, hmr: false, ws: false, watch: null },
+        appType: 'spa',
+      });
+
+      app.get('/@vite/client', async (_req, res, next) => {
+        try {
+          const result = await vite.transformRequest('/@vite/client');
+          if (result && result.code) {
+            const safeClientCode = result.code
+              .replace(
+                'transport.connect(createHMRHandler(handleMessage));',
+                '/* HMR WebSocket disabled in preview */'
+              )
+              .replace(
+                'else throw new SendBeforeConnectError("send was called before connect");',
+                'else return;'
+              )
+              .replace(
+                'else throw new SendBeforeConnectError("invoke was called before connect");',
+                'else return;'
+              )
+              .replace('throw e;', 'return;');
+            res.status(200).set({ 'Content-Type': 'application/javascript' }).send(safeClientCode);
+            return;
+          }
+        } catch {
+          // Lanjutkan ke middleware standar jika gagal transformasi
+        }
+        next();
+      });
+
+      // Cegah API 404 mengembalikan HTML index.html
+      app.all('/api/*', (req, res) => {
+        res.status(404).json({
+          error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
+          timestamp: new Date().toISOString(),
+        });
+      });
+
+      app.use(vite.middlewares);
+    } catch (viteErr) {
+      console.warn(
+        '[BARAKA SERVER] Vite middleware tidak aktif, beralih ke static dist:',
+        viteErr
+      );
+      registerStaticFallback();
+    }
+  } else {
+    registerStaticFallback();
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
+  const primaryServer = http.createServer(app);
+  primaryServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
   });
+  if (typeof PORT === 'number') {
+    primaryServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
+    });
+  } else {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
+    });
+  }
+
+  // Pastikan port 3000 dan process.env.PORT sama-sama terlayani jika berbeda
+  const fallbackPorts = [3000, Number(process.env.PORT)].filter(
+    (p) => p && !Number.isNaN(p) && p !== PORT
+  );
+  for (const extraPort of new Set(fallbackPorts)) {
+    if (process.env.CPANEL_PORT) continue;
+    const extraServer = http.createServer(app);
+    extraServer.on('error', () => {
+      // Port sudah digunakan oleh reverse proxy internal, abaikan dengan aman
+    });
+    extraServer.listen(extraPort, '0.0.0.0', () => {
+      console.log(`BARAKA ADVENTURE Server juga aktif di port ${extraPort}`);
+    });
+  }
 }
 
 if (!process.env.VERCEL) {

@@ -6,12 +6,12 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
-    "start:standalone": "node server.js",
+    "start:standalone": "node cpanel-server.cjs",
     "build": "vite build",
-    "build:server": "esbuild server.ts --platform=node --format=esm --target=node18 --outfile=server.js --packages=external",
-    "build:all": "vite build && esbuild server.ts --platform=node --format=esm --target=node18 --outfile=server.js --packages=external",
+    "build:server": "esbuild server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=cpanel-server.cjs --external:vite --define:process.env.STANDALONE_MODE='\"true\"'",
+    "build:all": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=cpanel-server.cjs --external:vite --define:process.env.STANDALONE_MODE='\"true\"'",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist cpanel-server.cjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +21,7 @@
     "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
+    "esbuild": "^0.25.0",
     "express": "^4.21.2",
     "firebase": "^13.1.0",
     "jsqr": "^1.4.0",
@@ -30,7 +31,9 @@
     "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "vite": "^8.3.0"
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.0",
+    "vite-plugin-pwa": "^2.0.0"
   },
   "devDependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
@@ -39,11 +42,8 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
     "eslint": "^10.13.0",
-    "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "vite-plugin-pwa": "^2.0.0"
+    "typescript": "^7.0.2"
   }
 }

@@ -112,82 +112,45 @@ app.get('*', (_req, res) => {
 
 ---
 
-## 4. PERSIAPAN FILE & BUILD SEBELUM DEPLOY
+## 4. BUNDEL SIAP PAKAI TANPA `npm install` (`cpanel-server.cjs` + `dist/`)
 
-Lakukan langkah ini di laptop atau komputer Anda satu kali sebelum mengunggah ke hosting:
+Proyek ini sudah dilengkapi bundel matang (**Zero-NPM-Install Bundle**) yang menyatukan seluruh kode server beserta *Express.js* ke dalam satu file mandiri **`cpanel-server.cjs`**, serta seluruh tampilan ke dalam folder **`dist/`**.
 
-1. Buka terminal di folder project, jalankan:
-   ```bash
-   npm install
-   npm run build:all
-   ```
-   *Perintah ini akan melakukan 2 hal sekaligus: mengompilasi frontend ke folder `dist/` dan mengompilasi backend ke file `server.js` siap jalan.*
-2. Siapkan file-file berikut untuk di-upload (satukan dalam format `.zip`, misalnya `baraka-deploy.zip`):
-   * Folder `dist/` (wajib)
-   * File `server.js` (wajib - hasil build)
-   * File `package.json` (wajib)
-   * Folder `data/` (opsional, jika belum ada akan otomatis dibuat oleh server)
-   * File `.env.example` (opsional)
+Anda **tidak perlu menjalankan `npm install`** di cPanel Gapurahoster! File yang wajib ada di folder aplikasi cPanel Anda hanyalah:
+1. File **`cpanel-server.cjs`** (1 file server mandiri hasil bundel)
+2. Folder **`dist/`** (seluruh tampilan web & PWA hasil kompilasi)
+3. Folder **`data/`** (database JSON lokal — akan otomatis dibuat jika belum ada)
 
-> ⚠️ **Catatan Penting**: Folder `node_modules` dan folder `.git` **JANGAN dimasukkan ke zip** agar file ringan (hanya ~5-15 MB) dan cepat diunggah.
+*(Catatan: Jika suatu hari Anda mengedit source code di laptop sendiri, cukup jalankan `npm run build:all` untuk memperbarui `dist/` dan `cpanel-server.cjs`).*
 
 ---
 
-## 5. OPSI A: DEPLOY DI SHARED HOSTING (CPANEL / DIRECTADMIN)
-
-Sangat cocok jika Anda sudah memiliki langganan web hosting murah seperti Niagahoster, DomaiNesia, IDWebhost, Rumahweb, Hostinger, dll.
-
-### Syarat:
-* Tersedia menu **"Setup Node.js App"** di cPanel Anda.
-* SSL Aktif (Let's Encrypt / AutoSSL gratis dari cPanel).
+## 5. OPSI A: DEPLOY DI SHARED HOSTING CPANEL GAPURAHOSTER (`neo.baraka.id`) — TANPA `npm install`
 
 ### Langkah-demi-Langkah:
-1. **Buat Aplikasi Node.js di cPanel**:
-   * Login ke cPanel hosting Anda.
-   * Cari dan buka menu **Setup Node.js App**.
-   * Klik tombol **Create Application**:
-     * **Node.js version**: Pilih versi **18.x** atau **20.x**.
+1. **Upload File ke Folder Domain (`neo.baraka.id`)**:
+   * Buka menu **File Manager** di cPanel Gapurahoster.
+   * Masuk ke folder domain Anda (misal `neo.baraka.id`).
+   * Unggah dan ekstrak hasil unduhan proyek sehingga di dalam folder `neo.baraka.id` terdapat langsung:
+     * **`cpanel-server.cjs`**
+     * **`dist/`** (folder)
+     * **`data/`** (folder, opsional)
+
+2. **Buat / Edit Aplikasi Node.js di cPanel**:
+   * Buka menu **Setup Node.js App** di cPanel.
+   * Klik **Create Application** (atau klik ikon **Edit** jika sudah dibuat):
+     * **Node.js version**: Pilih versi **18.x**, **20.x**, atau **22.x**.
      * **Application mode**: Pilih **Production**.
-     * **Application root**: Isi nama folder, misal `baraka` atau `public_html/lomba`.
-     * **Application URL**: Pilih subdomain atau domain utama Anda (misal `lomba.domainanda.com`).
-     * **Application startup file**: Ketik `server.js`.
-   * Klik tombol **Create**.
+     * **Application root**: Isi folder Anda, misal `neo.baraka.id`.
+     * **Application URL**: Pilih `neo.baraka.id`.
+     * **Application startup file**: Ketik **`cpanel-server.cjs`** *(bukan `server.ts` atau `server.js`)*.
+   * *(Opsional)* Pada bagian **Environment variables**, Anda dapat menambahkan:
+     * `BARAKA_MASTER_PIN` = *(PIN darurat rahasia pemilik, misal `BARAKA-OWNER-99`)*
 
-2. **Upload dan Ekstrak File**:
-   * Buka menu **File Manager** di cPanel.
-   * Masuk ke folder aplikasi yang Anda tentukan tadi (misal folder `baraka`).
-   * Klik tombol **Upload**, lalu pilih file `baraka-deploy.zip`.
-   * Setelah selesai, klik kanan file zip lalu pilih **Extract**.
-
-3. **Install Dependencies di cPanel**:
-   * Kembali ke menu **Setup Node.js App**.
-   * Klik ikon pensil (Edit) pada aplikasi Anda.
-   * Klik tombol **Run NPM Install**. Tunggu sekitar 1-2 menit hingga statusnya selesai.
-
-4. **Konfigurasi Environment Variables**:
-   * Di halaman edit Node.js App cPanel, scroll ke bawah ke bagian **Environment variables**.
-   * Klik **Add Variable**, tambahkan:
-     * `STANDALONE_MODE` = `true`
-     * `NODE_ENV` = `production`
-   * Klik **Save**.
-
-5. **Penanganan Routing Otomatis via `.htaccess`**:
-   cPanel Node.js selector secara otomatis membuat file `.htaccess` yang mengarahkan semua traffic domain ke Passenger Node.js socket.
-   Jika Anda menggunakan konfigurasi manual, isi file `.htaccess` di root domain Anda adalah:
-   ```apache
-   # DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION BEGIN
-   PassengerAppRoot "/home/username/baraka"
-   PassengerBaseURI "/"
-   PassengerNodejs "/home/username/nodevenv/baraka/20/bin/node"
-   PassengerAppType node
-   PassengerStartupFile server.js
-   # DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION END
-   ```
-
-6. **Mulai Ulang (Restart)**:
-   * Klik tombol **Restart Application**.
-   * Buka browser Anda di `https://lomba.domainanda.com`.
-   * Aplikasi Anda sudah aktif dan siap digunakan!
+3. **Langsung Jalankan Tanpa `npm install`**:
+   * Anda **TIDAK PERLU** mengklik tombol **Run NPM Install** karena seluruh *library* sudah dibundel di dalam `cpanel-server.cjs`.
+   * Cukup klik tombol **Save** lalu klik **Restart** (atau **Start App**).
+   * Buka `https://neo.baraka.id` di browser — aplikasi langsung aktif!
 
 ---
 
