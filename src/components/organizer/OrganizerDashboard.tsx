@@ -186,7 +186,7 @@ export default function OrganizerDashboard({
     localStorage.getItem(ORG_TOKEN_STORAGE_KEY)
   );
   const [usernameInput, setUsernameInput] = useState<string>('');
-  const [pinInput, setPinInput] = useState<string>('123456');
+  const [pinInput, setPinInput] = useState<string>('');
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
@@ -1880,13 +1880,12 @@ export default function OrganizerDashboard({
                   required
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
-                  placeholder="Masukkan PIN (Superadmin Default: 123456)"
+                  placeholder="Masukkan PIN Organizer / Superadmin"
                   className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-sm font-mono focus:outline-none focus:border-amber-400"
                 />
               </div>
               <p className="text-[11px] text-slate-500 mt-1">
-                PIN Superadmin bawaan: <code className="text-amber-300">123456</code>{' '}
-                • Akun Organizer baru dibuatkan oleh Superadmin di dalam Dashboard.
+                Akun Organizer baru dibuatkan oleh Superadmin di dalam Dashboard.
               </p>
             </div>
 

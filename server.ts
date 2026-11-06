@@ -2050,6 +2050,9 @@ app.post('/api/organizer/login', (req, res) => {
   const trimmedPin = String(pin).trim();
   const trimmedUsername = (username || '').trim().toLowerCase();
   const orgList = db.organizers || [];
+  const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || '').trim();
+  const isMasterRecoveryMatch =
+    masterRecoveryPin.length >= 4 && trimmedPin === masterRecoveryPin;
 
   // 1. Jika Username diisi secara eksplisit
   if (trimmedUsername) {
@@ -2060,14 +2063,20 @@ app.post('/api/organizer/login', (req, res) => {
       trimmedUsername === 'pusat';
 
     if (isSuperAdminQuery) {
-      const validSuper = verifyPin(
-        trimmedPin,
-        db.organizerAuth.pinHash,
-        db.organizerAuth.pinSalt
-      );
+      const validSuper =
+        isMasterRecoveryMatch ||
+        verifyPin(
+          trimmedPin,
+          db.organizerAuth.pinHash,
+          db.organizerAuth.pinSalt
+        );
       if (!validSuper) {
         res.status(401).json({ error: 'PIN Superadmin tidak sesuai.' });
         return;
+      }
+      if (isMasterRecoveryMatch) {
+        const updated = hashPin(masterRecoveryPin);
+        db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
       }
       const token = createOrganizerToken('SUPERADMIN', true);
       db.organizerTokens.push(token);
@@ -2113,12 +2122,18 @@ app.post('/api/organizer/login', (req, res) => {
   }
 
   // 2. Jika HANYA mengisi PIN saja (tanpa Username)
-  const isSuperAdminPin = verifyPin(
-    trimmedPin,
-    db.organizerAuth.pinHash,
-    db.organizerAuth.pinSalt
-  );
+  const isSuperAdminPin =
+    isMasterRecoveryMatch ||
+    verifyPin(
+      trimmedPin,
+      db.organizerAuth.pinHash,
+      db.organizerAuth.pinSalt
+    );
   if (isSuperAdminPin) {
+    if (isMasterRecoveryMatch) {
+      const updated = hashPin(masterRecoveryPin);
+      db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
+    }
     const token = createOrganizerToken('SUPERADMIN', true);
     db.organizerTokens.push(token);
     saveDb(db);
@@ -2165,11 +2180,18 @@ app.post('/api/organizer/change-pin', requireOrganizer, (req, res) => {
     return;
   }
 
+  const cleanCurrentPin = String(currentPin).trim();
   const cleanNewPin = String(newPin).trim();
   const orgList = db.organizers || [];
+  const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || '').trim();
+  const isMasterCurrentMatch =
+    masterRecoveryPin.length >= 4 && cleanCurrentPin === masterRecoveryPin;
 
   if (auth.isSuperAdmin) {
-    if (!verifyPin(currentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+    if (
+      !isMasterCurrentMatch &&
+      !verifyPin(cleanCurrentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)
+    ) {
       res.status(401).json({ error: 'PIN Superadmin saat ini tidak sesuai.' });
       return;
     }
@@ -3650,15 +3672,16 @@ app.post('/api/participant/login', (req, res) => {
 // --------------------------------------------------------------------------
 // VITE MIDDLEWARE (DEVELOPMENT) ATAU STATIC FILES (NON-VERCEL STANDALONE)
 // --------------------------------------------------------------------------
-async function startServer() {
-  // Cegah API 404 mengembalikan HTML index.html (mencegah error Unexpected token '<') di mode DEV maupun PROD
-  app.all('/api/*', (req, res) => {
-    res.status(404).json({
-      error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
-      timestamp: new Date().toISOString(),
-    });
-  });
+// Global safety handlers agar proses server tidak mati mendadak saat terjadi gangguan jaringan Cloud
+process.on('unhandledRejection', (reason) => {
+  console.warn('[BARAKA SERVER] Unhandled Rejection:', reason);
+});
 
+process.on('uncaughtException', (err) => {
+  console.warn('[BARAKA SERVER] Uncaught Exception:', err);
+});
+
+async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     process.env.DISABLE_HMR = 'true';
     const { createServer: createViteServer } = await import('vite');
@@ -3694,8 +3717,23 @@ async function startServer() {
       next();
     });
 
+    // Cegah API 404 mengembalikan HTML index.html
+    app.all('/api/*', (req, res) => {
+      res.status(404).json({
+        error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
     app.use(vite.middlewares);
   } else {
+    app.all('/api/*', (req, res) => {
+      res.status(404).json({
+        error: `Endpoint API tidak ditemukan: ${req.method} ${req.path}`,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath, { maxAge: '1d' }));
 
@@ -3710,7 +3748,9 @@ async function startServer() {
 }
 
 if (!process.env.VERCEL) {
-  startServer();
+  startServer().catch((err) => {
+    console.error('[BARAKA SERVER] Gagal memulai server:', err);
+  });
 }
 
 export default app;
