@@ -234,8 +234,8 @@ export default function ParticipantView({
   const [regAgeGroup, setRegAgeGroup] = useState<string>('Semua Umur');
   const [regPhone, setRegPhone] = useState('');
   const [regPin, setRegPin] = useState('');
-  const [loginIdentity, setLoginIdentity] = useState('BRK-101');
-  const [loginPin, setLoginPin] = useState('1111');
+  const [loginIdentity, setLoginIdentity] = useState('');
+  const [loginPin, setLoginPin] = useState('');
 
   // Input QR & Checkpoint (untuk mode manual / darurat)
   const [setupQrInput, setSetupQrInput] = useState(DEMO_QR_CODES.SETUP_DEFAULT);
@@ -1915,7 +1915,7 @@ export default function ParticipantView({
       triggerRunnerFeedback('success');
       setFeedbackBanner({
         type: 'success',
-        text: `Registrasi berhasil! Nomor BIB Anda: ${data.participant.bibNumber} (Tim: ${data.participant.teamName}). Silakan tekan tombol SCAN SETUP QR.`,
+        text: `Registrasi berhasil! Tim: ${data.participant.teamName} (Pendaftar: ${data.participant.name}). Silakan tekan tombol SCAN SETUP QR.`,
       });
     } catch {
       setFeedbackBanner({
@@ -1934,7 +1934,8 @@ export default function ParticipantView({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bibOrName: loginIdentity,
+          teamName: loginIdentity.trim(),
+          bibOrName: loginIdentity.trim(),
           pin: loginPin,
           vaultParticipants: localVault.participants,
         }),
@@ -1967,12 +1968,12 @@ export default function ParticipantView({
         setActiveSession(data.latestSession);
         setFeedbackBanner({
           type: 'success',
-          text: `Selamat datang kembali, ${data.participant.name} (${data.participant.teamName})! Sesi Course "${data.activeCourse.name}" Anda siap dilanjutkan.`,
+          text: `Selamat datang kembali, Tim ${data.participant.teamName}! Sesi Course "${data.activeCourse.name}" Anda siap dilanjutkan.`,
         });
       } else {
         setFeedbackBanner({
           type: 'success',
-          text: `Login berhasil: ${data.participant.name} — Tim ${data.participant.teamName} (${data.participant.bibNumber}).`,
+          text: `Login berhasil: Tim ${data.participant.teamName} (Pendaftar: ${data.participant.name}).`,
         });
       }
     } catch {
@@ -2312,7 +2313,7 @@ export default function ParticipantView({
     ctx.fillStyle = '#f8fafc';
     ctx.font = 'bold 26px sans-serif';
     ctx.fillText(
-      `${participant.name} — Tim ${participant.teamName} (${participant.bibNumber})`,
+      `Tim ${participant.teamName} (${participant.name})`,
       32,
       90
     );
@@ -2372,7 +2373,9 @@ export default function ParticipantView({
     const dataUrl = canvas.toDataURL('image/png');
     const a = document.createElement('a');
     a.href = dataUrl;
-    a.download = `Bukti-Baraka-${participant.bibNumber}.png`;
+    const safeTeamSlug =
+      participant.teamName.replace(/[^a-zA-Z0-9-_]/g, '_') || 'Peserta';
+    a.download = `Bukti-Baraka-${safeTeamSlug}.png`;
     a.click();
   }
 
@@ -2833,7 +2836,7 @@ export default function ParticipantView({
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                Sudah Punya BIB
+                Login Tim
               </button>
               <button
                 type="button"
@@ -2853,7 +2856,7 @@ export default function ParticipantView({
             <form onSubmit={handleRegister} className="space-y-3">
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Nama Peserta / Ketua Tim{' '}
+                  Nama Peserta Pendaftar{' '}
                   <span className="text-rose-400">*</span>
                 </label>
                 <input
@@ -2867,17 +2870,31 @@ export default function ParticipantView({
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Nama Tim (Wajib) <span className="text-rose-400">*</span>
-                  </label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium text-slate-300">
+                      Nama Tim (Wajib) <span className="text-rose-400">*</span>
+                    </label>
+                    {regName.trim() && regTeam.trim() !== regName.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setRegTeam(regName.trim())}
+                        className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 underline cursor-pointer"
+                      >
+                        Peserta Individu? Pakai Nama Pendaftar
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="text"
                     required
                     value={regTeam}
                     onChange={(e) => setRegTeam(e.target.value)}
-                    placeholder="Contoh: Elang Rimba"
+                    placeholder="Nama Tim (atau Nama Anda jika individu)"
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                   />
+                  <p className="mt-1 text-[11px] text-amber-300/90 leading-snug">
+                    * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
@@ -2952,18 +2969,18 @@ export default function ParticipantView({
             </form>
           ) : (
             <form onSubmit={handleLogin} className="space-y-3">
-              <div className="rounded-lg bg-slate-950/90 p-3 text-xs text-slate-400 border border-slate-800">
-                Akun contoh siap uji: Nomor BIB{' '}
-                <strong className="text-slate-200">BRK-101</strong> dengan PIN{' '}
-                <strong className="text-slate-200">1111</strong>.
+              <div className="rounded-lg bg-slate-950/90 p-3 text-xs text-slate-300 border border-slate-800">
+                Masuk menggunakan <strong className="text-emerald-400">Nama Tim</strong> dan{' '}
+                <strong className="text-emerald-400">PIN</strong> Anda. Jika Anda peserta individu, masukkan nama Anda pada kolom Nama Tim.
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Nomor BIB, Nama Peserta, atau Nama Tim
+                  Nama Tim <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="text"
                   required
+                  placeholder="Ketik Nama Tim (atau Nama Anda jika individu)"
                   value={loginIdentity}
                   onChange={(e) => setLoginIdentity(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
@@ -2971,11 +2988,12 @@ export default function ParticipantView({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  PIN Peserta
+                  PIN Keamanan <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
                   required
+                  placeholder="Masukkan PIN"
                   value={loginPin}
                   onChange={(e) => setLoginPin(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
@@ -2995,15 +3013,15 @@ export default function ParticipantView({
           {/* HEADER PROFIL PESERTA AKTIF */}
           <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5">
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-12 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-bold">
-                {participant.bibNumber}
+              <div className="flex h-9 px-2.5 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-bold uppercase">
+                TIM
               </div>
               <div>
                 <div className="text-sm font-bold text-white leading-tight">
-                  {participant.name}
+                  {participant.teamName}
                 </div>
                 <div className="text-xs text-emerald-400 font-medium">
-                  Tim: {participant.teamName} • {participant.gender || 'Other'} •{' '}
+                  Pendaftar: {participant.name} • {participant.gender || 'Other'} •{' '}
                   {participant.ageGroup || 'Semua Umur'}
                 </div>
               </div>

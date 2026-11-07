@@ -130,7 +130,7 @@ function createParticipantMarkerIcon(params: {
     <div style="position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center;transform:${ringScale};transition:transform 0.2s;">
       <div style="width:20px;height:20px;border-radius:9999px;background:${dotColor};border:3px solid #ffffff;box-shadow:0 0 12px ${dotColor};"></div>
       <div style="position:absolute;bottom:-17px;left:50%;transform:translateX(-50%);background:${badgeBg};color:#ffffff;border:1.5px solid ${badgeBorder};border-radius:5px;padding:1px 6px;font-size:9px;font-weight:800;font-family:monospace;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.65);">
-        ${teamLabel} (${bibNumber})
+        ${teamLabel}
       </div>
     </div>
   `;
@@ -437,10 +437,10 @@ export function LiveMonitoringMap({
       const popupHtml = `
         <div style="font-family:sans-serif;font-size:12px;line-height:1.45;min-width:185px;">
           <div style="font-weight:800;font-size:13px;color:#0f172a;">
-            ${teamLabel} (${bibNumber})
+            ${teamLabel}
           </div>
           <div style="color:#334155;font-size:11px;">
-            Peserta: <strong>${participant?.name || '-'}</strong>
+            Pendaftar: <strong>${participant?.name || '-'}</strong>
           </div>
           <hr style="margin:5px 0;border-color:#e2e8f0;" />
           <div>Status: <strong>${sess.status}</strong></div>

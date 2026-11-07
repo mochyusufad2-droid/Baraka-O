@@ -566,20 +566,11 @@ export function SpectatorLiveLeaderboardModal({
                     Peringkat 2
                   </span>
                   <div className="font-bold text-white text-sm truncate">
-                    {top3[1] ? (
-                      <>
-                        <span className="font-mono text-slate-300 mr-1.5">
-                          {top3[1].bibNumber}
-                        </span>
-                        {top3[1].participantName}
-                      </>
-                    ) : (
-                      'Belum Terisi'
-                    )}
+                    {top3[1] ? top3[1].teamName : 'Belum Terisi'}
                   </div>
                   {top3[1] && (
                     <div className="text-[11px] text-slate-400 truncate">
-                      {top3[1].teamName} • {top3[1].checkpointsCompleted}/
+                      {top3[1].gender} • {top3[1].ageGroup} • {top3[1].checkpointsCompleted}/
                       {top3[1].totalCheckpoints} CP
                     </div>
                   )}
@@ -611,13 +602,10 @@ export function SpectatorLiveLeaderboardModal({
                     </span>
                   </div>
                   <div className="font-black text-white text-base truncate mt-0.5">
-                    <span className="font-mono text-amber-300 mr-1.5">
-                      {top3[0].bibNumber}
-                    </span>
-                    {top3[0].participantName}
+                    {top3[0].teamName}
                   </div>
                   <div className="text-xs text-amber-200/80 truncate">
-                    {top3[0].teamName} • {top3[0].checkpointsCompleted}/
+                    {top3[0].gender} • {top3[0].ageGroup} • {top3[0].checkpointsCompleted}/
                     {top3[0].totalCheckpoints} CP
                   </div>
                 </div>
@@ -647,20 +635,11 @@ export function SpectatorLiveLeaderboardModal({
                     Peringkat 3
                   </span>
                   <div className="font-bold text-white text-sm truncate">
-                    {top3[2] ? (
-                      <>
-                        <span className="font-mono text-slate-300 mr-1.5">
-                          {top3[2].bibNumber}
-                        </span>
-                        {top3[2].participantName}
-                      </>
-                    ) : (
-                      'Belum Terisi'
-                    )}
+                    {top3[2] ? top3[2].teamName : 'Belum Terisi'}
                   </div>
                   {top3[2] && (
                     <div className="text-[11px] text-slate-400 truncate">
-                      {top3[2].teamName} • {top3[2].checkpointsCompleted}/
+                      {top3[2].gender} • {top3[2].ageGroup} • {top3[2].checkpointsCompleted}/
                       {top3[2].totalCheckpoints} CP
                     </div>
                   )}
@@ -692,8 +671,7 @@ export function SpectatorLiveLeaderboardModal({
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-mono text-[11px] md:text-xs uppercase">
                   <th className="py-3 px-3 text-center whitespace-nowrap">Rank</th>
-                  <th className="py-3 px-4 whitespace-nowrap">BIB &amp; Peserta</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Tim</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Nama Tim</th>
                   <th className="py-3 px-3 whitespace-nowrap">Kategori</th>
                   <th className="py-3 px-3 whitespace-nowrap">Status</th>
                   <th className="py-3 px-3 whitespace-nowrap">Progres Pos</th>
@@ -720,7 +698,7 @@ export function SpectatorLiveLeaderboardModal({
                 {leaderboardRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={10 + (showSplits ? splitColumnCount : 0)}
+                      colSpan={9 + (showSplits ? splitColumnCount : 0)}
                       className="py-16 text-center text-slate-500 font-mono text-sm"
                     >
                       Belum ada data peserta untuk filter yang dipilih.
@@ -766,18 +744,8 @@ export function SpectatorLiveLeaderboardModal({
                           )}
                         </td>
 
-                        {/* BIB & Nama */}
-                        <td className="py-3.5 px-4 whitespace-nowrap">
-                          <span className="font-mono font-bold text-amber-400 mr-2 text-xs md:text-sm bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
-                            {row.bibNumber}
-                          </span>
-                          <span className="font-bold text-white text-sm md:text-base">
-                            {row.participantName}
-                          </span>
-                        </td>
-
                         {/* Nama Tim */}
-                        <td className="py-3.5 px-4 text-emerald-300 font-semibold whitespace-nowrap text-xs md:text-sm">
+                        <td className="py-3.5 px-4 text-emerald-300 font-bold whitespace-nowrap text-sm md:text-base">
                           {row.teamName}
                         </td>
 

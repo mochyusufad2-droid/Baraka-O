@@ -27,6 +27,9 @@ import {
   Database,
   Download,
   Upload,
+  Share2,
+  KeyRound,
+  ExternalLink,
 } from 'lucide-react';
 import {
   Course,
@@ -49,6 +52,7 @@ import {
   resolveSessionPositionOnCourse,
 } from './LiveMonitoringMap';
 import { SpectatorLiveLeaderboardModal } from './SpectatorLiveLeaderboardModal';
+import { ShareSpectatorLiveModal } from './ShareSpectatorLiveModal';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
@@ -57,6 +61,7 @@ import {
   mergeSessionMonotonically,
   removeCourseFromOrganizerBackup,
   removeOrganizerFromVaultBackup,
+  removeParticipantsFromVaultBackup,
   removeSessionFromVaultBackup,
   saveOrganizerCoursesBackup,
 } from '../../services/offlineQueue';
@@ -67,6 +72,7 @@ interface DashboardApiData {
   organizers?: OrganizerPublic[];
   courses: Course[];
   participants: ParticipantPublic[];
+  deletedParticipantIds?: string[];
   sessions: ParticipantSession[];
   deletedSessionIds?: string[];
   reports: CheckpointReport[];
@@ -268,7 +274,7 @@ export default function OrganizerDashboard({
   const [cpLng, setCpLng] = useState<string>('107.6305');
   const [cpRadiusInput, setCpRadiusInput] = useState<string>('35');
 
-  // Form States for Participant Creation by Organizer
+  // Form States for Participant Creation & Deletion by Organizer
   const [partName, setPartName] = useState('');
   const [partTeam, setPartTeam] = useState('');
   const [partGender, setPartGender] = useState<string>('Other');
@@ -276,6 +282,12 @@ export default function OrganizerDashboard({
   const [partPhone, setPartPhone] = useState('');
   const [partPin, setPartPin] = useState('');
   const [partStatusMsg, setPartStatusMsg] = useState<string | null>(null);
+  const [confirmDeleteParticipant, setConfirmDeleteParticipant] =
+    useState<ParticipantPublic | null>(null);
+  const [confirmBulkDeleteScope, setConfirmBulkDeleteScope] = useState<
+    'ALL' | 'SELF_REGISTERED' | 'OWN' | null
+  >(null);
+  const [isDeletingParticipants, setIsDeletingParticipants] = useState<boolean>(false);
 
   // Result View Options: With Split (Detail) vs Without Split (Ringkas) + Filters
   const [showResultSplits, setShowResultSplits] = useState<boolean>(true);
@@ -305,6 +317,17 @@ export default function OrganizerDashboard({
   const [resetPinOrgId, setResetPinOrgId] = useState<string | null>(null);
   const [resetPinValue, setResetPinValue] = useState<string>('');
 
+  // Live Spectator Link States
+  const [shareSpectatorCourse, setShareSpectatorCourse] = useState<Course | null>(null);
+  const [copiedLiveCourseId, setCopiedLiveCourseId] = useState<string | null>(null);
+
+  // Superadmin Account Credential States (Ganti Username & PIN)
+  const [superCurrentPin, setSuperCurrentPin] = useState<string>('');
+  const [superNewUsername, setSuperNewUsername] = useState<string>('');
+  const [superNewPin, setSuperNewPin] = useState<string>('');
+  const [superCredLoading, setSuperCredLoading] = useState<boolean>(false);
+  const [superCredMsg, setSuperCredMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   // Live timer tick for active sessions
   const [nowTick, setNowTick] = useState<number>(Date.now());
   useEffect(() => {
@@ -318,6 +341,90 @@ export default function OrganizerDashboard({
       setSuccessMsg((prev) => (prev === msg ? null : prev));
     }, 3500);
   }, []);
+
+  const handleCopyLiveLink = useCallback(
+    (c: Course) => {
+      const liveUrl = `${window.location.origin}?live=true&course=${encodeURIComponent(c.id)}`;
+      try {
+        if (navigator?.clipboard?.writeText) {
+          navigator.clipboard.writeText(liveUrl);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = liveUrl;
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+        }
+        setCopiedLiveCourseId(c.id);
+        showTemporarySuccess(`Link Live Penonton untuk "${c.name}" berhasil disalin!`);
+        setTimeout(() => setCopiedLiveCourseId((prev) => (prev === c.id ? null : prev)), 3000);
+      } catch {
+        showTemporarySuccess(`Link Penonton: ${liveUrl}`);
+      }
+    },
+    [showTemporarySuccess]
+  );
+
+  const handleUpdateSuperadminCredentials = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSuperCredMsg(null);
+    if (!token) return;
+    if (!superCurrentPin.trim()) {
+      setSuperCredMsg({
+        type: 'error',
+        text: 'PIN Superadmin saat ini wajib diisi untuk verifikasi keamanan.',
+      });
+      return;
+    }
+    if (!superNewUsername.trim() && !superNewPin.trim()) {
+      setSuperCredMsg({
+        type: 'error',
+        text: 'Harap masukkan Username baru atau PIN baru yang ingin diubah.',
+      });
+      return;
+    }
+    setSuperCredLoading(true);
+    try {
+      const res = await fetch('/api/organizer/change-pin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPin: superCurrentPin.trim(),
+          newUsername: superNewUsername.trim() || undefined,
+          newPin: superNewPin.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSuperCredMsg({
+          type: 'error',
+          text: data.error || 'Gagal memperbarui kredensial Superadmin.',
+        });
+        setSuperCredLoading(false);
+        return;
+      }
+      setSuperCredMsg({
+        type: 'success',
+        text: data.message || 'Kredensial Superadmin berhasil diperbarui!',
+      });
+      setSuperCurrentPin('');
+      setSuperNewUsername('');
+      setSuperNewPin('');
+      await fetchDashboard();
+      showTemporarySuccess('Kredensial Superadmin (Username & PIN) berhasil diperbarui!');
+    } catch {
+      setSuperCredMsg({
+        type: 'error',
+        text: 'Kesalahan jaringan saat memperbarui kredensial.',
+      });
+    } finally {
+      setSuperCredLoading(false);
+    }
+  };
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem(ORG_TOKEN_STORAGE_KEY);
@@ -403,6 +510,11 @@ export default function OrganizerDashboard({
         ...(localVault.deletedCourseIds || []),
         ...(data.vaultSnapshot?.deletedCourseIds || []),
       ]);
+      const deletedParticipantSet = new Set<string>([
+        ...(localVault.deletedParticipantIds || []),
+        ...(data.deletedParticipantIds || []),
+        ...(data.vaultSnapshot?.deletedParticipantIds || []),
+      ]);
 
       const visibleCourseIdSet = new Set<string>(
         data.courses.map((c) => c.id)
@@ -440,6 +552,7 @@ export default function OrganizerDashboard({
         (bp) =>
           bp &&
           bp.id &&
+          !deletedParticipantSet.has(bp.id) &&
           (isSuperAdmin || bp.createdByOrganizerId === currentOrgId) &&
           !data.participants.some((sp) => sp.id === bp.id)
       );
@@ -452,6 +565,7 @@ export default function OrganizerDashboard({
           !ls.id ||
           deletedSessionSet.has(ls.id) ||
           deletedCourseSet.has(ls.courseId) ||
+          deletedParticipantSet.has(ls.participantId) ||
           !visibleCourseIdSet.has(ls.courseId)
         ) {
           return false;
@@ -514,6 +628,7 @@ export default function OrganizerDashboard({
         ? mergeAndSaveOrganizerVaultBackup(data.vaultSnapshot)
         : mergeAndSaveOrganizerVaultBackup({
             courses: data.courses,
+            deletedParticipantIds: data.deletedParticipantIds,
             sessions: data.sessions,
             deletedSessionIds: data.deletedSessionIds,
             reports: data.reports,
@@ -571,6 +686,7 @@ export default function OrganizerDashboard({
             !s.id ||
             deletedSessionSet.has(s.id) ||
             deletedCourseSet.has(s.courseId) ||
+            deletedParticipantSet.has(s.participantId) ||
             (!isSuperAdmin && !finalCourseIds.has(s.courseId))
           ) {
             continue;
@@ -594,6 +710,7 @@ export default function OrganizerDashboard({
             !r.reportId ||
             deletedSessionSet.has(r.sessionId) ||
             deletedCourseSet.has(r.courseId) ||
+            deletedParticipantSet.has(r.participantId) ||
             (!isSuperAdmin && !finalCourseIds.has(r.courseId))
           ) {
             continue;
@@ -611,6 +728,9 @@ export default function OrganizerDashboard({
 
         return {
           ...data,
+          participants: (data.participants || []).filter(
+            (p) => !deletedParticipantSet.has(p.id)
+          ),
           courses: Array.from(courseMap.values()),
           sessions: Array.from(sessionMap.values()),
           reports: Array.from(reportMap.values()),
@@ -1473,11 +1593,102 @@ export default function OrganizerDashboard({
       setPartPhone('');
       setPartPin('');
       setPartStatusMsg(
-        `Peserta ${data.participant.bibNumber} (Tim: ${data.participant.teamName} • ${data.participant.gender || 'Other'} • ${data.participant.ageGroup || 'Semua Umur'}) berhasil didaftarkan.`
+        `Tim "${data.participant.teamName}" (Pendaftar: ${data.participant.name} • ${data.participant.gender || 'Other'} • ${data.participant.ageGroup || 'Semua Umur'}) berhasil didaftarkan.`
       );
       await fetchDashboard();
     } catch {
       setPartStatusMsg('Kesalahan jaringan saat mendaftarkan peserta.');
+    }
+  };
+
+  // Hapus 1 Peserta (Superadmin: Semua Peserta | Organizer: Hanya Peserta Buatannya Sendiri)
+  const handleConfirmDeleteParticipant = async () => {
+    if (!token || !confirmDeleteParticipant) return;
+    setIsDeletingParticipants(true);
+    const target = confirmDeleteParticipant;
+    try {
+      const res = await fetch(`/api/organizer/participants/${target.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal menghapus akun peserta.');
+        setConfirmDeleteParticipant(null);
+        return;
+      }
+      removeParticipantsFromVaultBackup([target.id]);
+      setDashboard((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          participants: prev.participants.filter((p) => p.id !== target.id),
+          deletedParticipantIds: Array.from(
+            new Set([...(prev.deletedParticipantIds || []), target.id])
+          ),
+          sessions: prev.sessions.filter((s) => s.participantId !== target.id),
+          reports: prev.reports.filter((r) => r.participantId !== target.id),
+        };
+      });
+      setConfirmDeleteParticipant(null);
+      showTemporarySuccess(
+        `Peserta Tim "${target.teamName}" (Pendaftar: ${target.name}) berhasil dihapus.`
+      );
+      await fetchDashboard();
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat menghapus peserta.');
+    } finally {
+      setIsDeletingParticipants(false);
+    }
+  };
+
+  // Hapus Massal Peserta sesuai Hak Akses (Superadmin: ALL / SELF_REGISTERED | Organizer: OWN)
+  const handleConfirmBulkDeleteParticipants = async () => {
+    if (!token || !confirmBulkDeleteScope) return;
+    setIsDeletingParticipants(true);
+    try {
+      const res = await fetch('/api/organizer/participants/bulk-delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ scope: confirmBulkDeleteScope }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal menghapus daftar peserta.');
+        setConfirmBulkDeleteScope(null);
+        return;
+      }
+      const removedIds: string[] = Array.isArray(data.deletedParticipantIds)
+        ? data.deletedParticipantIds
+        : [];
+      if (removedIds.length > 0) {
+        removeParticipantsFromVaultBackup(removedIds);
+      }
+      const removedSet = new Set(removedIds);
+      setDashboard((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          participants: prev.participants.filter((p) => !removedSet.has(p.id)),
+          deletedParticipantIds: Array.from(
+            new Set([...(prev.deletedParticipantIds || []), ...removedIds])
+          ),
+          sessions: prev.sessions.filter((s) => !removedSet.has(s.participantId)),
+          reports: prev.reports.filter((r) => !removedSet.has(r.participantId)),
+        };
+      });
+      setConfirmBulkDeleteScope(null);
+      showTemporarySuccess(
+        `Berhasil menghapus ${data.deletedCount ?? removedIds.length} peserta beserta riwayat sesinya.`
+      );
+      await fetchDashboard();
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat menghapus daftar peserta.');
+    } finally {
+      setIsDeletingParticipants(false);
     }
   };
 
@@ -1782,8 +1993,6 @@ export default function OrganizerDashboard({
 
     const headers = [
       'Rank',
-      'BIB',
-      'Nama Peserta',
       'Nama Tim',
       'Gender',
       'Kelompok Umur',
@@ -1825,8 +2034,6 @@ export default function OrganizerDashboard({
 
         return [
           r.rank,
-          `"${r.bibNumber}"`,
-          `"${r.participantName}"`,
           `"${r.teamName}"`,
           `"${r.gender}"`,
           `"${r.ageGroup}"`,
@@ -1877,25 +2084,24 @@ export default function OrganizerDashboard({
           </div>
 
           <p className="text-xs text-slate-400 leading-relaxed">
-            Masukkan <strong className="text-slate-200">PIN saja</strong> (atau{' '}
-            <strong className="text-slate-200">Username + PIN</strong> yang dibuatkan
-            oleh Superadmin). Setiap Organizer hanya dapat melihat &amp; mengelola
-            Course buatannya sendiri beserta peserta di Course tersebut.
+            Organizer &amp; Superadmin dapat login menggunakan{' '}
+            <strong className="text-slate-200">Username + PIN</strong> atau langsung menggunakan{' '}
+            <strong className="text-slate-200">PIN unik</strong>. Superadmin memiliki akses penuh ke seluruh Course &amp; akun panitia, sedangkan Organizer hanya dapat mengelola Course buatannya sendiri.
           </p>
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                Username / ID Organizer{' '}
+                Username Organizer / Superadmin{' '}
                 <span className="text-slate-500 font-normal">
-                  (Opsional — Boleh Dikosongkan)
+                  (Boleh dikosongkan jika login pakai PIN)
                 </span>
               </label>
               <input
                 type="text"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
-                placeholder="Kosongkan jika login langsung pakai PIN"
+                placeholder="Contoh: superadmin atau namaorganizer"
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-amber-400"
               />
             </div>
@@ -2017,6 +2223,17 @@ export default function OrganizerDashboard({
           )}
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {selectedCourse && (
+              <button
+                type="button"
+                onClick={() => setShareSpectatorCourse(selectedCourse)}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-xs font-semibold transition shrink-0 cursor-pointer"
+                title="Bagikan Tautan & QR Code Live Leaderboard Penonton"
+              >
+                <Radio className="w-3.5 h-3.5 text-sky-400 animate-pulse" />
+                <span>Link Penonton</span>
+              </button>
+            )}
             <button
               onClick={fetchDashboard}
               className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition shrink-0"
@@ -2302,7 +2519,7 @@ export default function OrganizerDashboard({
               >
                 <div>
                   <label className="block text-slate-300 mb-1">
-                    Nama Peserta / Kapten *
+                    Nama Peserta Pendaftar *
                   </label>
                   <input
                     type="text"
@@ -2314,17 +2531,31 @@ export default function OrganizerDashboard({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-300 mb-1">
-                    Nama Tim (Wajib) *
-                  </label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-slate-300">
+                      Nama Tim (Wajib) *
+                    </label>
+                    {partName.trim() && partTeam.trim() !== partName.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setPartTeam(partName.trim())}
+                        className="text-[10px] font-semibold text-amber-400 hover:text-amber-300 underline cursor-pointer"
+                      >
+                        Individu? Pakai Nama Pendaftar
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="text"
                     required
-                    placeholder="Contoh: Garuda Rimba"
+                    placeholder="Contoh: Garuda Rimba (atau Nama Peserta jika individu)"
                     value={partTeam}
                     onChange={(e) => setPartTeam(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
                   />
+                  <p className="mt-1 text-[10px] text-amber-300/90 leading-snug">
+                    * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>. Peserta login menggunakan Nama Tim &amp; PIN.
+                  </p>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -2405,32 +2636,130 @@ export default function OrganizerDashboard({
                 </button>
               </form>
 
-              <div className="pt-2 border-t border-slate-800">
-                <div className="text-xs font-semibold text-slate-300 mb-2">
-                  Daftar Peserta Terdaftar ({dashboard.participants.length})
-                </div>
-                <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
-                  {dashboard.participants.map((p: ParticipantPublic) => (
-                    <div
-                      key={p.id}
-                      className="px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-xs"
-                    >
-                      <div className="truncate">
-                        <span className="font-mono font-bold text-amber-400 mr-2">
-                          {p.bibNumber}
-                        </span>
-                        <span className="text-emerald-300 font-bold">
-                          {p.teamName}
-                        </span>
-                        <span className="text-slate-400 ml-1.5 text-[11px]">
-                          ({p.name})
-                        </span>
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-slate-300">
+                    Daftar Peserta Terdaftar ({dashboard.participants.length})
+                  </div>
+                  {dashboard.currentOrganizer?.isSuperAdmin ? (
+                    dashboard.participants.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {dashboard.participants.some((p) => !p.createdByOrganizerId) && (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmBulkDeleteScope('SELF_REGISTERED')}
+                            className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                            title="Hapus semua peserta yang daftar mandiri"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Hapus Mandiri
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setConfirmBulkDeleteScope('ALL')}
+                          className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                          title="Superadmin: Hapus seluruh peserta terdaftar (Mulai dari 0)"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Hapus Semua
+                        </button>
                       </div>
-                      <span className="text-[10px] font-mono text-slate-300 bg-slate-800 px-1.5 py-0.5 rounded shrink-0">
-                        {p.gender || 'Other'} • {p.ageGroup || 'Semua Umur'}
-                      </span>
+                    )
+                  ) : (
+                    dashboard.participants.some(
+                      (p) => p.createdByOrganizerId === dashboard.currentOrganizer?.id
+                    ) && (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmBulkDeleteScope('OWN')}
+                        className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                        title="Hapus semua peserta yang Anda daftarkan sendiri"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Hapus Buatan Saya
+                      </button>
+                    )
+                  )}
+                </div>
+
+                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                  {dashboard.participants.length === 0 ? (
+                    <div className="text-[11px] text-slate-500 italic py-2 text-center">
+                      Belum ada peserta terdaftar.
                     </div>
-                  ))}
+                  ) : (
+                    dashboard.participants.map((p: ParticipantPublic) => {
+                      const isSuperAdmin = Boolean(dashboard.currentOrganizer?.isSuperAdmin);
+                      const isOwnCreated =
+                        Boolean(p.createdByOrganizerId) &&
+                        p.createdByOrganizerId === dashboard.currentOrganizer?.id;
+                      const canDeleteThisParticipant = isSuperAdmin || isOwnCreated;
+                      const originLabel = !p.createdByOrganizerId
+                        ? 'Daftar Mandiri'
+                        : p.createdByOrganizerId === 'SUPERADMIN'
+                          ? 'Superadmin'
+                          : isOwnCreated
+                            ? 'Buatan Anda'
+                            : 'Panitia';
+
+                      return (
+                        <div
+                          key={p.id}
+                          className="px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate">
+                              <span className="text-emerald-300 font-bold">
+                                {p.teamName}
+                              </span>
+                              <span className="text-slate-400 ml-1.5 text-[11px]">
+                                (Pendaftar: {p.name})
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-0.5 text-[10px]">
+                              <span className="font-mono text-slate-300 bg-slate-800 px-1.5 py-0.5 rounded">
+                                {p.gender || 'Other'} • {p.ageGroup || 'Semua Umur'}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-medium ${
+                                  !p.createdByOrganizerId
+                                    ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                                    : isOwnCreated
+                                      ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                      : 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                                }`}
+                              >
+                                {originLabel}
+                              </span>
+                            </div>
+                          </div>
+
+                          {canDeleteThisParticipant ? (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteParticipant(p)}
+                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition shrink-0 cursor-pointer"
+                              title={
+                                isSuperAdmin
+                                  ? `Hapus peserta ${p.name} (Akses Superadmin)`
+                                  : `Hapus peserta buatan Anda (${p.name})`
+                              }
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          ) : (
+                            <span
+                              className="text-[10px] text-slate-500 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 shrink-0"
+                              title="Hanya Superadmin yang dapat menghapus peserta daftar mandiri atau buatan organizer lain"
+                            >
+                              Terkunci
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
             </div>
@@ -2753,6 +3082,17 @@ export default function OrganizerDashboard({
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
+                              setShareSpectatorCourse(c);
+                            }}
+                            className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 transition cursor-pointer"
+                            title="Bagikan Link & QR Live Leaderboard Penonton"
+                          >
+                            <Radio className="w-3.5 h-3.5 text-sky-400" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
                               setSelectedCourseId(c.id);
                               handleStartEditCourse(c);
                             }}
@@ -2837,6 +3177,16 @@ export default function OrganizerDashboard({
 
                 {/* Action Buttons: Edit Course, Delete Course, and Bulk Print QR */}
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShareSpectatorCourse(effectiveSelectedCourse)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-semibold text-xs transition cursor-pointer"
+                    title="Bagikan Tautan & QR Code Live Leaderboard untuk penonton"
+                  >
+                    <Radio className="w-3.5 h-3.5 text-sky-400 animate-pulse" />
+                    Bagikan Link Penonton
+                  </button>
+
                   <button
                     type="button"
                     onClick={() =>
@@ -3465,14 +3815,11 @@ export default function OrganizerDashboard({
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-amber-400 text-sm">
-                                {participant?.bibNumber || '?'}
-                              </span>
-                              <span className="font-bold text-white text-sm">
+                              <span className="font-bold text-emerald-300 text-sm">
                                 {participant?.teamName || participant?.name || 'Tim'}
                               </span>
-                              <span className="text-xs text-slate-300">
-                                ({participant?.name || '-'})
+                              <span className="text-xs text-slate-400">
+                                (Pendaftar: {participant?.name || '-'})
                               </span>
                             </div>
                             <div className="text-xs text-slate-400 mt-0.5">
@@ -3658,6 +4005,18 @@ export default function OrganizerDashboard({
                   </button>
                 </div>
 
+                {selectedCourse && (
+                  <button
+                    type="button"
+                    onClick={() => setShareSpectatorCourse(selectedCourse)}
+                    className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-bold text-xs transition cursor-pointer"
+                    title="Bagikan Tautan & QR Code Live Leaderboard untuk penonton"
+                  >
+                    <Radio className="w-4 h-4 text-sky-400 animate-pulse" />
+                    Bagikan Link Penonton
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setIsSpectatorFullscreen(true)}
@@ -3753,7 +4112,6 @@ export default function OrganizerDashboard({
                 <thead>
                   <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
                     <th className="py-3 px-3 whitespace-nowrap">Rank</th>
-                    <th className="py-3 px-3 whitespace-nowrap">BIB &amp; Peserta</th>
                     <th className="py-3 px-3 whitespace-nowrap">Nama Tim</th>
                     <th className="py-3 px-3 whitespace-nowrap">Gender</th>
                     <th className="py-3 px-3 whitespace-nowrap">Kelompok Umur</th>
@@ -3786,7 +4144,7 @@ export default function OrganizerDashboard({
                     <tr>
                       <td
                         colSpan={
-                          13 + (showResultSplits ? splitColumnCount + 1 : 0)
+                          12 + (showResultSplits ? splitColumnCount + 1 : 0)
                         }
                         className="py-8 text-center text-slate-400 text-xs"
                       >
@@ -3799,15 +4157,7 @@ export default function OrganizerDashboard({
                         <td className="py-3 px-3 font-mono font-bold text-amber-400 whitespace-nowrap">
                           #{row.rank}
                         </td>
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <span className="font-mono font-bold text-slate-300 mr-2">
-                            {row.bibNumber}
-                          </span>
-                          <span className="font-semibold text-white">
-                            {row.participantName}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-emerald-300 font-medium whitespace-nowrap">
+                        <td className="py-3 px-3 text-emerald-300 font-bold whitespace-nowrap">
                           {row.teamName}
                         </td>
                         <td className="py-3 px-3 text-slate-300 whitespace-nowrap">
@@ -3982,8 +4332,104 @@ export default function OrganizerDashboard({
         dashboard &&
         dashboard.currentOrganizer?.isSuperAdmin && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Form Buat Akun Organizer Baru */}
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="space-y-6">
+              {/* Form Pengaturan Kredensial Superadmin (Ganti Username & PIN) */}
+              <div className="bg-[#111827] border border-purple-500/30 rounded-xl p-5 space-y-4 shadow-lg shadow-purple-950/20">
+                <div className="border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/20 text-purple-400">
+                      <KeyRound className="w-4 h-4" />
+                    </div>
+                    <span className="text-[11px] font-mono uppercase text-purple-400 font-bold">
+                      Kredensial Superadmin
+                    </span>
+                  </div>
+                  <h2 className="text-base font-bold text-white mt-1">
+                    Ubah Username &amp; PIN Superadmin
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                    Ubah username login Superadmin (agar tidak kosong) dan perbarui PIN utama secara aman.
+                  </p>
+                </div>
+
+                <form onSubmit={handleUpdateSuperadminCredentials} className="space-y-3">
+                  <div className="rounded-lg bg-slate-950 p-2.5 border border-slate-800 text-xs">
+                    <span className="text-slate-400">Username Login Saat Ini: </span>
+                    <strong className="font-mono text-purple-300">
+                      {dashboard.currentOrganizer?.username || 'superadmin'}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Username Superadmin Baru{' '}
+                      <span className="text-slate-500 font-normal">(Opsional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={superNewUsername}
+                      onChange={(e) => setSuperNewUsername(e.target.value)}
+                      placeholder="Contoh: superadmin atau masteradmin"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      Min 3 karakter (huruf, angka, titik, strip, underscore).
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      PIN Superadmin Saat Ini <span className="text-rose-400">*</span>
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={superCurrentPin}
+                      onChange={(e) => setSuperCurrentPin(e.target.value)}
+                      placeholder="Masukkan PIN saat ini untuk verifikasi"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      PIN Superadmin Baru{' '}
+                      <span className="text-slate-500 font-normal">(Opsional)</span>
+                    </label>
+                    <input
+                      type="password"
+                      value={superNewPin}
+                      onChange={(e) => setSuperNewPin(e.target.value)}
+                      placeholder="Minimal 4 karakter (kosongkan jika tidak ganti PIN)"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                    />
+                  </div>
+
+                  {superCredMsg && (
+                    <div
+                      className={`p-2.5 rounded-lg text-xs border ${
+                        superCredMsg.type === 'success'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                      }`}
+                    >
+                      {superCredMsg.text}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={superCredLoading}
+                    className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                    {superCredLoading ? 'Menyimpan...' : 'Simpan Kredensial Superadmin'}
+                  </button>
+                </form>
+              </div>
+
+              {/* Form Buat Akun Organizer Baru */}
+              <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
               <div>
                 <span className="text-[11px] font-mono uppercase text-purple-400">
                   Otoritas Superadmin
@@ -4079,8 +4525,9 @@ export default function OrganizerDashboard({
                 </button>
               </form>
             </div>
+          </div>
 
-            {/* Daftar Akun Organizer */}
+          {/* Daftar Akun Organizer */}
             <div className="lg:col-span-2 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div>
@@ -4283,28 +4730,142 @@ export default function OrganizerDashboard({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-300">
-                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
-                  <div className="font-bold text-amber-300 mb-1">📦 1 File untuk Semua Data</div>
+                <div className="bg-slate-950/60 border border-emerald-500/30 rounded-lg p-3">
+                  <div className="font-bold text-emerald-300 mb-1">🛡️ Bundel Update Aman (.ZIP)</div>
                   <p className="text-slate-400 leading-relaxed text-[11px]">
-                    File backup menyimpan seluruh Course, titik pos, nomor BIB peserta, akun panitia, dan riwayat skor lomba tanpa ada yang tertinggal.
+                    Tombol <strong className="text-emerald-300">Download Paket Siap Upload cPanel (.zip)</strong> hanya berisi update fitur/tampilan terbaru dan <strong>tidak menimpa</strong> file database live <code className="text-amber-300">data/baraka-db.json</code> di hosting Anda.
                   </p>
                 </div>
                 <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
-                  <div className="font-bold text-emerald-300 mb-1">🚀 Bebas Firebase &amp; Vercel</div>
+                  <div className="font-bold text-amber-300 mb-1">📦 Backup Database Terpisah (.JSON)</div>
                   <p className="text-slate-400 leading-relaxed text-[11px]">
-                    Di hosting/domain pribadi Anda, database tersimpan di harddisk permanen server Anda sendiri tanpa batasan kuota atau biaya tambahan pihak ketiga.
+                    Gunakan tombol <strong className="text-amber-300">Download Full Database (.json)</strong> untuk mencadangkan atau memindahkan seluruh Course, Pos, Peserta, Akun Organizer, dan Skor.
                   </p>
                 </div>
                 <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
-                  <div className="font-bold text-purple-300 mb-1">🛡️ Perlindungan Human Error</div>
+                  <div className="font-bold text-purple-300 mb-1">🚀 Alur Update Mudah ke cPanel</div>
                   <p className="text-slate-400 leading-relaxed text-[11px]">
-                    Sebelum lomba atau sebelum mengedit data penting, unduh backup ke laptop Anda sebagai arsip aman yang bisa dipulihkan kapan saja.
+                    Setiap selesai mengubah fitur lewat AI Studio, cukup unduh bundel <strong>.zip</strong>, unggah &amp; Extract di folder aplikasi cPanel, lalu klik <strong>Restart</strong> di Setup Node.js App.
                   </p>
                 </div>
               </div>
             </div>
           </div>
         )}
+
+      {/* Modal Konfirmasi Hapus 1 Peserta */}
+      {confirmDeleteParticipant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-500/40 bg-slate-900 p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] font-mono uppercase tracking-wider text-rose-400">
+                  Konfirmasi Hapus Peserta
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  Hapus Tim "{confirmDeleteParticipant.teamName}"?
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Apakah Anda yakin ingin menghapus peserta Tim{' '}
+              <strong className="text-emerald-300">
+                {confirmDeleteParticipant.teamName}
+              </strong>{' '}
+              (Pendaftar: <strong className="text-white">{confirmDeleteParticipant.name}</strong>) beserta seluruh sesi dan riwayat laporannya?
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingParticipants}
+                onClick={() => setConfirmDeleteParticipant(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingParticipants}
+                onClick={handleConfirmDeleteParticipant}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer"
+              >
+                {isDeletingParticipants ? 'Menghapus...' : 'Ya, Hapus Peserta'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Konfirmasi Hapus Massal Peserta */}
+      {confirmBulkDeleteScope && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-500/40 bg-slate-900 p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] font-mono uppercase tracking-wider text-rose-400">
+                  Konfirmasi Pembersihan Peserta
+                </span>
+                <h3 className="text-base font-bold text-white">
+                  {confirmBulkDeleteScope === 'ALL'
+                    ? 'Hapus Seluruh Daftar Peserta?'
+                    : confirmBulkDeleteScope === 'SELF_REGISTERED'
+                      ? 'Hapus Semua Peserta Daftar Mandiri?'
+                      : 'Hapus Semua Peserta Buatan Anda?'}
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              {confirmBulkDeleteScope === 'ALL' ? (
+                <>
+                  Tindakan ini akan menghapus{' '}
+                  <strong className="text-white">
+                    seluruh peserta terdaftar ({dashboard?.participants.length || 0} peserta)
+                  </strong>{' '}
+                  baik yang dibuat oleh Superadmin, Organizer, maupun yang mendaftar mandiri, beserta seluruh sesi &amp; hasil lombanya.
+                </>
+              ) : confirmBulkDeleteScope === 'SELF_REGISTERED' ? (
+                <>
+                  Tindakan ini akan menghapus seluruh peserta yang{' '}
+                  <strong className="text-sky-300">mendaftar mandiri</strong> beserta sesi lombanya, sementara peserta yang didaftarkan oleh Panitia/Superadmin tetap aman.
+                </>
+              ) : (
+                <>
+                  Tindakan ini akan menghapus seluruh peserta yang{' '}
+                  <strong className="text-emerald-300">Anda daftarkan sendiri</strong> beserta riwayat sesi lombanya. Peserta milik Organizer lain atau daftar mandiri tidak akan terhapus.
+                </>
+              )}
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingParticipants}
+                onClick={() => setConfirmBulkDeleteScope(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingParticipants}
+                onClick={handleConfirmBulkDeleteParticipants}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer"
+              >
+                {isDeletingParticipants ? 'Menghapus...' : 'Ya, Hapus Sekarang'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Konfirmasi Hapus Course */}
       {confirmDeleteCourse && (
@@ -4352,6 +4913,14 @@ export default function OrganizerDashboard({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal Bagikan Link Live Leaderboard Penonton (Khusus Course Tertentu) */}
+      {shareSpectatorCourse && (
+        <ShareSpectatorLiveModal
+          course={shareSpectatorCourse}
+          onClose={() => setShareSpectatorCourse(null)}
+        />
       )}
 
       {/* Bulk Print QR Modal (2 to 8 QR per page — Satu-satunya pintu cetak semua QR) */}

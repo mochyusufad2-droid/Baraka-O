@@ -210,6 +210,7 @@ export interface OrganizerVaultBackup {
   courses: Course[];
   deletedCourseIds: string[];
   participants: ParticipantBackupRecord[];
+  deletedParticipantIds?: string[];
   sessions: ParticipantSession[];
   deletedSessionIds?: string[];
   reports: CheckpointReport[];

@@ -220,6 +220,7 @@ function createEmptyVaultBackup(): OrganizerVaultBackup {
     courses: [],
     deletedCourseIds: [],
     participants: [],
+    deletedParticipantIds: [],
     sessions: [],
     deletedSessionIds: [],
     reports: [],
@@ -408,6 +409,10 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       ? parsed.deletedSessionIds
       : [];
     const deletedSessionSet = new Set(deletedSessionIds);
+    const deletedParticipantIds = Array.isArray(parsed.deletedParticipantIds)
+      ? parsed.deletedParticipantIds
+      : [];
+    const deletedParticipantSet = new Set(deletedParticipantIds);
 
     const courseMap = new Map<string, Course>();
     for (const c of legacyCourses) {
@@ -428,7 +433,7 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       : [];
 
     const participants = Array.isArray(parsed.participants)
-      ? parsed.participants.filter((p) => p && p.id)
+      ? parsed.participants.filter((p) => p && p.id && !deletedParticipantSet.has(p.id))
       : [];
 
     const sessions = Array.isArray(parsed.sessions)
@@ -437,7 +442,8 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
             s &&
             s.id &&
             !deletedCourseSet.has(s.courseId) &&
-            !deletedSessionSet.has(s.id)
+            !deletedSessionSet.has(s.id) &&
+            !deletedParticipantSet.has(s.participantId)
         )
       : [];
 
@@ -447,7 +453,8 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
             r &&
             r.reportId &&
             !deletedCourseSet.has(r.courseId) &&
-            !deletedSessionSet.has(r.sessionId)
+            !deletedSessionSet.has(r.sessionId) &&
+            !deletedParticipantSet.has(r.participantId)
         )
       : [];
 
@@ -457,6 +464,7 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       courses: Array.from(courseMap.values()),
       deletedCourseIds,
       participants,
+      deletedParticipantIds,
       sessions,
       deletedSessionIds,
       reports,
@@ -491,6 +499,10 @@ export function mergeAndSaveOrganizerVaultBackup(
   const deletedSessionSet = new Set<string>([
     ...(current.deletedSessionIds || []),
     ...(incoming.deletedSessionIds || []),
+  ]);
+  const deletedParticipantSet = new Set<string>([
+    ...(current.deletedParticipantIds || []),
+    ...(incoming.deletedParticipantIds || []),
   ]);
 
   // 1. Merge Organizers by ID
@@ -555,13 +567,13 @@ export function mergeAndSaveOrganizerVaultBackup(
   // 3. Merge Participants by ID
   const partMap = new Map<string, ParticipantBackupRecord>();
   for (const p of current.participants) {
-    if (p && p.id) {
+    if (p && p.id && !deletedParticipantSet.has(p.id)) {
       partMap.set(p.id, p);
     }
   }
   if (Array.isArray(incoming.participants)) {
     for (const p of incoming.participants) {
-      if (p && p.id) {
+      if (p && p.id && !deletedParticipantSet.has(p.id)) {
         const prev = partMap.get(p.id);
         partMap.set(p.id, {
           ...(prev || {}),
@@ -580,7 +592,8 @@ export function mergeAndSaveOrganizerVaultBackup(
       s &&
       s.id &&
       !deletedCourseSet.has(s.courseId) &&
-      !deletedSessionSet.has(s.id)
+      !deletedSessionSet.has(s.id) &&
+      !deletedParticipantSet.has(s.participantId)
     ) {
       sessionMap.set(s.id, s);
     }
@@ -591,7 +604,8 @@ export function mergeAndSaveOrganizerVaultBackup(
         s &&
         s.id &&
         !deletedCourseSet.has(s.courseId) &&
-        !deletedSessionSet.has(s.id)
+        !deletedSessionSet.has(s.id) &&
+        !deletedParticipantSet.has(s.participantId)
       ) {
         const prev = sessionMap.get(s.id);
         sessionMap.set(s.id, prev ? mergeSessionMonotonically(prev, s) : s);
@@ -606,7 +620,8 @@ export function mergeAndSaveOrganizerVaultBackup(
       r &&
       r.reportId &&
       !deletedCourseSet.has(r.courseId) &&
-      !deletedSessionSet.has(r.sessionId)
+      !deletedSessionSet.has(r.sessionId) &&
+      !deletedParticipantSet.has(r.participantId)
     ) {
       reportMap.set(r.reportId, r);
     }
@@ -617,7 +632,8 @@ export function mergeAndSaveOrganizerVaultBackup(
         r &&
         r.reportId &&
         !deletedCourseSet.has(r.courseId) &&
-        !deletedSessionSet.has(r.sessionId)
+        !deletedSessionSet.has(r.sessionId) &&
+        !deletedParticipantSet.has(r.participantId)
       ) {
         const prevRep = reportMap.get(r.reportId);
         reportMap.set(r.reportId, {
@@ -638,6 +654,7 @@ export function mergeAndSaveOrganizerVaultBackup(
     courses: Array.from(courseMap.values()),
     deletedCourseIds: Array.from(deletedCourseSet),
     participants: Array.from(partMap.values()),
+    deletedParticipantIds: Array.from(deletedParticipantSet),
     sessions: Array.from(sessionMap.values()),
     deletedSessionIds: Array.from(deletedSessionSet),
     reports: Array.from(reportMap.values()),
@@ -730,6 +747,38 @@ export function removeSessionFromVaultBackup(sessionId: string): void {
     sessions: filteredSessions,
     deletedSessionIds: nextDeletedSessions,
     reports: filteredReports,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
+  } catch {
+    // Abaikan
+  }
+}
+
+export function removeParticipantsFromVaultBackup(participantIds: string[]): void {
+  if (!Array.isArray(participantIds) || participantIds.length === 0) return;
+  const current = loadOrganizerVaultBackup();
+  const delSet = new Set<string>([
+    ...(current.deletedParticipantIds || []),
+    ...participantIds,
+  ]);
+  const removedSessionIds = current.sessions
+    .filter((s) => delSet.has(s.participantId))
+    .map((s) => s.id);
+  const delSessSet = new Set<string>([
+    ...(current.deletedSessionIds || []),
+    ...removedSessionIds,
+  ]);
+
+  const updated: OrganizerVaultBackup = {
+    ...current,
+    participants: current.participants.filter((p) => !delSet.has(p.id)),
+    deletedParticipantIds: Array.from(delSet),
+    sessions: current.sessions.filter((s) => !delSet.has(s.participantId)),
+    deletedSessionIds: Array.from(delSessSet),
+    reports: current.reports.filter((r) => !delSet.has(r.participantId)),
     updatedAt: new Date().toISOString(),
   };
 

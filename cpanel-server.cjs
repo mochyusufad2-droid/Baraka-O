@@ -77969,7 +77969,7 @@ var SyncStatus = {
   ACCEPTED_SERVER: "ACCEPTED_SERVER",
   REJECTED_SERVER: "REJECTED_SERVER"
 };
-var ROOT_DIR = typeof import_meta?.url === "string" ? import_path.default.dirname((0, import_url.fileURLToPath)(import_meta.url)) : process.cwd();
+var ROOT_DIR = typeof __dirname !== "undefined" ? __dirname : typeof import_meta?.url === "string" ? import_path.default.dirname((0, import_url.fileURLToPath)(import_meta.url)) : process.cwd();
 var isAiStudioPreviewProxy = Boolean(process.env.NGINX_PORT && process.env.DEFAULT_APP_PORT);
 var PORT = process.env.CPANEL_PORT || (!isAiStudioPreviewProxy && process.env.PORT ? Number.isNaN(Number(process.env.PORT)) ? process.env.PORT : Number(process.env.PORT) : 3e3);
 var DATA_DIR = process.env.VERCEL ? import_path.default.join("/tmp", "baraka-data") : import_path.default.join(ROOT_DIR, "data");
@@ -78209,7 +78209,8 @@ function createInitialDatabase() {
   return {
     organizerAuth: {
       pinHash: orgPin.hash,
-      pinSalt: orgPin.salt
+      pinSalt: orgPin.salt,
+      username: "superadmin"
     },
     organizerTokens: [],
     participantTokens: {},
@@ -78230,6 +78231,7 @@ function createInitialDatabase() {
     ],
     deletedCourseIds: [],
     deletedOrganizerIds: [],
+    deletedParticipantIds: [],
     deletedSessionIds: [],
     organizers: [],
     sessions: [],
@@ -78260,6 +78262,9 @@ function parseAndMigrateDbContent(raw) {
     }
     if (!Array.isArray(parsed.deletedOrganizerIds)) {
       parsed.deletedOrganizerIds = [];
+    }
+    if (!Array.isArray(parsed.deletedParticipantIds)) {
+      parsed.deletedParticipantIds = [];
     }
     if (!Array.isArray(parsed.deletedSessionIds)) {
       parsed.deletedSessionIds = [];
@@ -78383,7 +78388,8 @@ async function pushDbToCloudNow(dbSnapshot) {
       deletedOrganizerIds: dbSnapshot.deletedOrganizerIds || [],
       courses: dbSnapshot.courses || [],
       deletedCourseIds: dbSnapshot.deletedCourseIds || [],
-      participants: dbSnapshot.participants || []
+      participants: dbSnapshot.participants || [],
+      deletedParticipantIds: dbSnapshot.deletedParticipantIds || []
     };
     const racePayload = {
       sessions: dbSnapshot.sessions || [],
@@ -78536,6 +78542,14 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
     targetDb.deletedOrganizerIds = Array.from(deletedOrganizerSet);
     changed = true;
   }
+  const deletedParticipantSet = /* @__PURE__ */ new Set([
+    ...targetDb.deletedParticipantIds || [],
+    ...incoming.deletedParticipantIds || []
+  ]);
+  if (deletedParticipantSet.size !== (targetDb.deletedParticipantIds || []).length) {
+    targetDb.deletedParticipantIds = Array.from(deletedParticipantSet);
+    changed = true;
+  }
   const deletedSessionSet = /* @__PURE__ */ new Set([
     ...targetDb.deletedSessionIds || [],
     ...incoming.deletedSessionIds || []
@@ -78551,22 +78565,32 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
   const beforeOrgsLen = targetDb.organizers.length;
   targetDb.organizers = targetDb.organizers.filter((o) => !deletedOrganizerSet.has(o.id));
   if (targetDb.organizers.length !== beforeOrgsLen) changed = true;
+  const beforeParticipantsLen = targetDb.participants.length;
+  targetDb.participants = targetDb.participants.filter(
+    (p) => !deletedParticipantSet.has(p.id)
+  );
+  if (targetDb.participants.length !== beforeParticipantsLen) changed = true;
   const beforeSessionsLen = targetDb.sessions.length;
   targetDb.sessions = targetDb.sessions.filter(
-    (s) => !deletedCourseSet.has(s.courseId) && !deletedSessionSet.has(s.id)
+    (s) => !deletedCourseSet.has(s.courseId) && !deletedSessionSet.has(s.id) && !deletedParticipantSet.has(s.participantId)
   );
   if (targetDb.sessions.length !== beforeSessionsLen) changed = true;
   const beforeReportsLen = targetDb.reports.length;
   targetDb.reports = targetDb.reports.filter(
-    (r) => !deletedCourseSet.has(r.courseId) && !deletedSessionSet.has(r.sessionId)
+    (r) => !deletedCourseSet.has(r.courseId) && !deletedSessionSet.has(r.sessionId) && !deletedParticipantSet.has(r.participantId)
   );
   if (targetDb.reports.length !== beforeReportsLen) changed = true;
-  if (!authScope && incoming.organizerAuth?.pinHash && incoming.organizerAuth?.pinSalt && incoming.organizerAuth.pinHash !== targetDb.organizerAuth.pinHash) {
-    targetDb.organizerAuth = {
-      pinHash: incoming.organizerAuth.pinHash,
-      pinSalt: incoming.organizerAuth.pinSalt
-    };
-    changed = true;
+  if (!authScope && incoming.organizerAuth?.pinHash && incoming.organizerAuth?.pinSalt) {
+    const hasPinDiff = incoming.organizerAuth.pinHash !== targetDb.organizerAuth.pinHash;
+    const hasUserDiff = Boolean(incoming.organizerAuth.username) && incoming.organizerAuth.username !== targetDb.organizerAuth.username;
+    if (hasPinDiff || hasUserDiff) {
+      targetDb.organizerAuth = {
+        pinHash: incoming.organizerAuth.pinHash,
+        pinSalt: incoming.organizerAuth.pinSalt,
+        username: incoming.organizerAuth.username || targetDb.organizerAuth.username || "superadmin"
+      };
+      changed = true;
+    }
   }
   if (Array.isArray(incoming.organizers)) {
     for (const rawOrg of incoming.organizers) {
@@ -78592,7 +78616,23 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
         changed = true;
       } else {
         const current = targetDb.organizers[existingIdx];
-        if (!current.pinHash && rawOrg.pinHash && rawOrg.pinSalt) {
+        if (rawOrg.name && current.name !== rawOrg.name) {
+          current.name = rawOrg.name;
+          changed = true;
+        }
+        if (rawOrg.username && current.username !== rawOrg.username) {
+          current.username = rawOrg.username.toLowerCase();
+          changed = true;
+        }
+        if (rawOrg.organization !== void 0 && current.organization !== rawOrg.organization) {
+          current.organization = rawOrg.organization;
+          changed = true;
+        }
+        if (typeof rawOrg.isActive === "boolean" && current.isActive !== rawOrg.isActive) {
+          current.isActive = rawOrg.isActive;
+          changed = true;
+        }
+        if (rawOrg.pinHash && rawOrg.pinSalt && current.pinHash !== rawOrg.pinHash) {
           current.pinHash = rawOrg.pinHash;
           current.pinSalt = rawOrg.pinSalt;
           changed = true;
@@ -78647,7 +78687,7 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
   }
   if (Array.isArray(incoming.participants)) {
     for (const rawPart of incoming.participants) {
-      if (!rawPart || !rawPart.id) continue;
+      if (!rawPart || !rawPart.id || deletedParticipantSet.has(rawPart.id)) continue;
       const existingIdx = targetDb.participants.findIndex((p) => p.id === rawPart.id);
       if (existingIdx === -1) {
         const fallbackPin = hashPin("1111");
@@ -78689,7 +78729,7 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
   }
   if (Array.isArray(incoming.reports)) {
     for (const rawRep of incoming.reports) {
-      if (!rawRep || !rawRep.reportId || deletedCourseSet.has(rawRep.courseId) || deletedSessionSet.has(rawRep.sessionId)) {
+      if (!rawRep || !rawRep.reportId || deletedCourseSet.has(rawRep.courseId) || deletedSessionSet.has(rawRep.sessionId) || deletedParticipantSet.has(rawRep.participantId)) {
         continue;
       }
       const existingRepIdx = targetDb.reports.findIndex(
@@ -78709,7 +78749,7 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
   }
   if (Array.isArray(incoming.sessions)) {
     for (const rawSess of incoming.sessions) {
-      if (!rawSess || !rawSess.id || deletedCourseSet.has(rawSess.courseId) || deletedSessionSet.has(rawSess.id)) {
+      if (!rawSess || !rawSess.id || deletedCourseSet.has(rawSess.courseId) || deletedSessionSet.has(rawSess.id) || deletedParticipantSet.has(rawSess.participantId)) {
         continue;
       }
       const existingIdx = targetDb.sessions.findIndex((s) => s.id === rawSess.id);
@@ -78753,7 +78793,19 @@ function loadDb() {
   }
 }
 var telemetryDiskTimer = null;
+function syncDbFromDisk(targetDb) {
+  try {
+    if (!import_fs.default.existsSync(DB_FILE)) return false;
+    const raw = import_fs.default.readFileSync(DB_FILE, "utf-8");
+    const diskDb = parseAndMigrateDbContent(raw);
+    if (!diskDb) return false;
+    return smartMergeIntoServerDb(targetDb, diskDb);
+  } catch {
+    return false;
+  }
+}
 function saveDb(dbToSave) {
+  syncDbFromDisk(dbToSave);
   recoverOrphanedOrganizersFromCourses(dbToSave);
   saveDbToDiskOnly(dbToSave);
   scheduleCloudSync(dbToSave);
@@ -78764,6 +78816,7 @@ function saveDbTelemetryOnly(dbToSave) {
   }
   telemetryDiskTimer = setTimeout(() => {
     telemetryDiskTimer = null;
+    syncDbFromDisk(dbToSave);
     saveDbToDiskOnly(dbToSave);
   }, 1500);
 }
@@ -78861,7 +78914,7 @@ function getSuperAdminPublicProfile() {
   return {
     id: "SUPERADMIN",
     code: "SUPERADMIN",
-    username: "superadmin",
+    username: db.organizerAuth?.username || "superadmin",
     name: "Superadmin Utama",
     organization: "BARAKA Pusat",
     isSuperAdmin: true,
@@ -79407,7 +79460,12 @@ function processSingleReport(payload, authenticatedParticipantId) {
 }
 var app = (0, import_express.default)();
 app.use(import_express.default.json({ limit: "5mb" }));
-app.use("/api", async (_req, _res, next) => {
+app.use("/api", async (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  syncDbFromDisk(db);
   await ensureCloudHydrated();
   next();
 });
@@ -79436,7 +79494,8 @@ app.post("/api/organizer/login", (req, res) => {
   const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || "").trim();
   const isMasterRecoveryMatch = masterRecoveryPin.length >= 4 && trimmedPin === masterRecoveryPin;
   if (trimmedUsername) {
-    const isSuperAdminQuery = trimmedUsername === "superadmin" || trimmedUsername === "admin" || trimmedUsername === "master" || trimmedUsername === "pusat";
+    const currentSuperUsername = (db.organizerAuth?.username || "superadmin").toLowerCase();
+    const isSuperAdminQuery = trimmedUsername === currentSuperUsername || trimmedUsername === "superadmin" || trimmedUsername === "admin" || trimmedUsername === "master" || trimmedUsername === "pusat";
     if (isSuperAdminQuery) {
       const validSuper = isMasterRecoveryMatch || verifyPin(
         trimmedPin,
@@ -79532,13 +79591,14 @@ app.post("/api/organizer/login", (req, res) => {
 });
 app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
   const auth = req.organizerAuth;
-  const { currentPin, newPin } = req.body;
-  if (!currentPin || !newPin || String(newPin).trim().length < 4) {
-    res.status(400).json({ error: "PIN baru minimal 4 karakter." });
+  const { currentPin, newPin, newUsername } = req.body;
+  if (!currentPin || !String(currentPin).trim()) {
+    res.status(400).json({ error: "PIN saat ini wajib diisi untuk verifikasi keamanan." });
     return;
   }
   const cleanCurrentPin = String(currentPin).trim();
-  const cleanNewPin = String(newPin).trim();
+  const cleanNewPin = newPin ? String(newPin).trim() : "";
+  const cleanNewUsername = newUsername ? String(newUsername).trim().toLowerCase() : "";
   const orgList = db.organizers || [];
   const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || "").trim();
   const isMasterCurrentMatch = masterRecoveryPin.length >= 4 && cleanCurrentPin === masterRecoveryPin;
@@ -79547,17 +79607,51 @@ app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
       res.status(401).json({ error: "PIN Superadmin saat ini tidak sesuai." });
       return;
     }
-    const conflictOrg = orgList.find((o) => verifyPin(cleanNewPin, o.pinHash, o.pinSalt));
-    if (conflictOrg) {
-      res.status(400).json({
-        error: `PIN tersebut sudah dipakai oleh Organizer "${conflictOrg.name}". Gunakan PIN lain agar login cepat tetap unik.`
-      });
+    if (!cleanNewPin && !cleanNewUsername) {
+      res.status(400).json({ error: "Harap masukkan Username baru atau PIN baru yang ingin diubah." });
       return;
     }
-    const updated2 = hashPin(cleanNewPin);
-    db.organizerAuth = { pinHash: updated2.hash, pinSalt: updated2.salt };
+    if (cleanNewUsername) {
+      if (cleanNewUsername.length < 3) {
+        res.status(400).json({ error: "Username Superadmin baru minimal 3 karakter." });
+        return;
+      }
+      if (!/^[a-zA-Z0-9_.-]+$/.test(cleanNewUsername)) {
+        res.status(400).json({
+          error: "Username hanya boleh huruf, angka, titik (.), strip (-), atau underscore (_)."
+        });
+        return;
+      }
+      const collision = orgList.find((o) => o.username.toLowerCase() === cleanNewUsername);
+      if (collision) {
+        res.status(400).json({
+          error: `Username "${cleanNewUsername}" sudah dipakai oleh Organizer "${collision.name}".`
+        });
+        return;
+      }
+      db.organizerAuth.username = cleanNewUsername;
+    }
+    if (cleanNewPin) {
+      if (cleanNewPin.length < 4) {
+        res.status(400).json({ error: "PIN baru minimal 4 karakter." });
+        return;
+      }
+      const conflictOrg = orgList.find((o) => verifyPin(cleanNewPin, o.pinHash, o.pinSalt));
+      if (conflictOrg) {
+        res.status(400).json({
+          error: `PIN tersebut sudah dipakai oleh Organizer "${conflictOrg.name}". Gunakan PIN lain agar login cepat tetap unik.`
+        });
+        return;
+      }
+      const updated2 = hashPin(cleanNewPin);
+      db.organizerAuth.pinHash = updated2.hash;
+      db.organizerAuth.pinSalt = updated2.salt;
+    }
     saveDb(db);
-    res.json({ message: "PIN Superadmin berhasil diperbarui dengan aman (hashed)." });
+    res.json({
+      message: "Kredensial Superadmin (Username/PIN) berhasil diperbarui dengan aman.",
+      organizer: getSuperAdminPublicProfile()
+    });
     return;
   }
   const targetOrg = orgList.find((o) => o.id === auth.organizerId);
@@ -79565,8 +79659,12 @@ app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
     res.status(404).json({ error: "Akun Organizer tidak ditemukan." });
     return;
   }
-  if (!verifyPin(currentPin, targetOrg.pinHash, targetOrg.pinSalt)) {
+  if (!verifyPin(cleanCurrentPin, targetOrg.pinHash, targetOrg.pinSalt)) {
     res.status(401).json({ error: "PIN Organizer saat ini tidak sesuai." });
+    return;
+  }
+  if (!cleanNewPin || cleanNewPin.length < 4) {
+    res.status(400).json({ error: "PIN baru minimal 4 karakter." });
     return;
   }
   if (verifyPin(cleanNewPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
@@ -79744,6 +79842,87 @@ app.delete("/api/organizer/accounts/:organizerId", requireSuperAdmin, (req, res)
     organizers: db.organizers.map(toPublicOrganizer)
   });
 });
+app.get("/api/public/courses", (_req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+  const publicCourseList = (db.courses || []).filter((c) => c.isActive !== false).map((c) => ({
+    id: c.id,
+    name: c.name,
+    description: c.description,
+    locationName: c.locationName,
+    date: c.date,
+    durationMinutes: c.durationMinutes || 0,
+    scoringEnabled: c.scoringEnabled !== false,
+    validationMethod: c.validationMethod,
+    checkpointsCount: (c.checkpoints || []).length,
+    createdByOrganizerName: c.createdByOrganizerName || "Panitia Baraka"
+  }));
+  res.json({ courses: publicCourseList });
+});
+app.get("/api/public/leaderboard/:courseId", (req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=5");
+  const courseId = req.params.courseId;
+  const course = (db.courses || []).find((c) => c.id === courseId);
+  if (!course) {
+    res.status(404).json({ error: "Course tidak ditemukan atau telah dinonaktifkan." });
+    return;
+  }
+  const sessions = (db.sessions || []).filter((s) => s.courseId === course.id);
+  const partMap = new Map((db.participants || []).map((p) => [p.id, p]));
+  const leaderboard = sessions.map((s) => {
+    const part = partMap.get(s.participantId);
+    return {
+      sessionId: s.id,
+      teamName: part?.teamName || part?.name || "Tim Peserta",
+      gender: part?.gender || "Other",
+      ageGroup: part?.ageGroup || "Semua Umur",
+      attemptNumber: s.attemptNumber || 1,
+      status: s.status,
+      checkpointsCompleted: (s.validatedCheckpointIds || []).length,
+      totalCheckpoints: (course.checkpoints || []).length,
+      grossScore: s.grossScore || 0,
+      overtimeMinutes: s.overtimeMinutes || 0,
+      penaltyPoints: s.penaltyPoints || 0,
+      totalScore: s.totalScore || 0,
+      durationSeconds: s.durationSeconds,
+      isDnf: Boolean(s.isDnf),
+      dnfReason: s.dnfReason,
+      startedAt: s.startedAt,
+      finishedAt: s.finishedAt
+    };
+  });
+  const statusWeightPublic = (st, isDnf) => {
+    if (st === "FINISHED" && !isDnf) return 4;
+    if (st === "ACTIVE") return 3;
+    if (st === "FINISHED" && isDnf) return 2;
+    return 1;
+  };
+  leaderboard.sort((a, b) => {
+    const wDiff = statusWeightPublic(b.status, b.isDnf) - statusWeightPublic(a.status, a.isDnf);
+    if (wDiff !== 0) return wDiff;
+    if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+    const aDur = a.durationSeconds ?? Number.MAX_SAFE_INTEGER;
+    const bDur = b.durationSeconds ?? Number.MAX_SAFE_INTEGER;
+    return aDur - bDur;
+  });
+  const rankedLeaderboard = leaderboard.map((row, idx) => ({
+    ...row,
+    rank: idx + 1
+  }));
+  res.json({
+    course: {
+      id: course.id,
+      name: course.name,
+      locationName: course.locationName,
+      date: course.date,
+      durationMinutes: course.durationMinutes || 0,
+      checkpointsCount: (course.checkpoints || []).length,
+      createdByOrganizerName: course.createdByOrganizerName || "Panitia Baraka"
+    },
+    totalParticipants: rankedLeaderboard.length,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    leaderboard: rankedLeaderboard
+  });
+});
 app.post("/api/participant/register", (req, res) => {
   const { name: name4, teamName, gender, ageGroup, phone, pin } = req.body;
   if (!name4 || !name4.trim() || !teamName || !teamName.trim() || !pin || String(pin).trim().length < 4) {
@@ -79776,9 +79955,10 @@ app.post("/api/participant/register", (req, res) => {
   });
 });
 app.post("/api/participant/login", (req, res) => {
-  const { bibOrName, pin, participantBackup, vaultParticipants } = req.body;
-  if (!bibOrName || !pin) {
-    res.status(400).json({ error: "Nomor dada (BIB) / Nama dan PIN wajib diisi." });
+  const { teamName, bibOrName, pin, participantBackup, vaultParticipants } = req.body;
+  const rawIdentity = (teamName || bibOrName || "").trim();
+  if (!rawIdentity || !pin) {
+    res.status(400).json({ error: "Nama Tim dan PIN wajib diisi." });
     return;
   }
   const incomingBackups = [];
@@ -79793,12 +79973,17 @@ app.post("/api/participant/login", (req, res) => {
       saveDb(db);
     }
   }
-  const query = bibOrName.trim().toLowerCase();
-  const found = db.participants.find(
-    (p) => p.bibNumber.toLowerCase() === query || p.name.toLowerCase() === query || p.teamName.toLowerCase() === query
+  const query = rawIdentity.toLowerCase();
+  const foundByTeam = db.participants.find(
+    (p) => p.teamName.trim().toLowerCase() === query && verifyPin(pin, p.pinHash, p.pinSalt)
   );
-  if (!found || !verifyPin(pin, found.pinHash, found.pinSalt)) {
-    res.status(401).json({ error: "Nomor peserta/Nama atau PIN tidak cocok." });
+  const found = foundByTeam || db.participants.find(
+    (p) => p.name.trim().toLowerCase() === query && verifyPin(pin, p.pinHash, p.pinSalt)
+  );
+  if (!found) {
+    res.status(401).json({
+      error: "Nama Tim atau PIN tidak cocok. Pastikan Nama Tim dan PIN sesuai saat pendaftaran."
+    });
     return;
   }
   const token = createParticipantToken(found.id);
@@ -79838,7 +80023,7 @@ app.post("/api/participant/load-event", requireParticipant, (req, res) => {
     res.status(400).json({ error: "Setup QR Code wajib dipindai." });
     return;
   }
-  if (participantSnapshot && participantSnapshot.id === participantId && !db.participants.some((p) => p.id === participantId)) {
+  if (participantSnapshot && participantSnapshot.id === participantId && !(db.deletedParticipantIds || []).includes(participantId) && !db.participants.some((p) => p.id === participantId)) {
     const fallbackPin = hashPin("1111");
     db.participants.push({
       ...participantSnapshot,
@@ -79914,7 +80099,7 @@ app.post("/api/participant/reports/sync", requireParticipant, (req, res) => {
     return;
   }
   const deletedSet = new Set(db.deletedCourseIds || []);
-  if (participantSnapshot && participantSnapshot.id === participantId && !db.participants.some((p) => p.id === participantId)) {
+  if (participantSnapshot && participantSnapshot.id === participantId && !(db.deletedParticipantIds || []).includes(participantId) && !db.participants.some((p) => p.id === participantId)) {
     const fallbackPin = hashPin("1111");
     db.participants.push({
       ...participantSnapshot,
@@ -80148,6 +80333,7 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
     courses: visibleCourses,
     deletedCourseIds: db.deletedCourseIds || [],
     participants: visibleStoredParticipants,
+    deletedParticipantIds: db.deletedParticipantIds || [],
     sessions: visibleSessions,
     deletedSessionIds: db.deletedSessionIds || [],
     reports: visibleReports,
@@ -80159,6 +80345,7 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
     organizers: auth.isSuperAdmin ? (db.organizers || []).map(toPublicOrganizer) : void 0,
     courses: visibleCourses,
     participants: visibleParticipants,
+    deletedParticipantIds: db.deletedParticipantIds || [],
     sessions: visibleSessions,
     deletedSessionIds: db.deletedSessionIds || [],
     reports: visibleReports,
@@ -80294,6 +80481,7 @@ app.post("/api/organizer/courses/sync-backup", requireOrganizer, (req, res) => {
       courses: body.courses,
       deletedCourseIds: body.deletedCourseIds,
       participants: body.participants,
+      deletedParticipantIds: body.deletedParticipantIds,
       sessions: body.sessions,
       deletedSessionIds: body.deletedSessionIds,
       reports: body.reports
@@ -80510,6 +80698,120 @@ app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
     participantBackup: newParticipant
   });
 });
+app.delete(
+  "/api/organizer/participants/:participantId",
+  requireOrganizer,
+  (req, res) => {
+    const auth = req.organizerAuth;
+    const participantId = req.params.participantId;
+    const targetParticipant = db.participants.find((p) => p.id === participantId);
+    if (!targetParticipant) {
+      res.status(404).json({ error: "Data peserta tidak ditemukan." });
+      return;
+    }
+    if (!auth.isSuperAdmin) {
+      if (!targetParticipant.createdByOrganizerId || targetParticipant.createdByOrganizerId !== auth.organizerId) {
+        res.status(403).json({
+          error: "Akses Ditolak: Anda hanya memiliki izin untuk menghapus peserta yang Anda daftarkan sendiri."
+        });
+        return;
+      }
+    }
+    if (!Array.isArray(db.deletedParticipantIds)) {
+      db.deletedParticipantIds = [];
+    }
+    if (!db.deletedParticipantIds.includes(participantId)) {
+      db.deletedParticipantIds.push(participantId);
+    }
+    if (!Array.isArray(db.deletedSessionIds)) {
+      db.deletedSessionIds = [];
+    }
+    for (const s of db.sessions) {
+      if (s.participantId === participantId && !db.deletedSessionIds.includes(s.id)) {
+        db.deletedSessionIds.push(s.id);
+      }
+    }
+    db.participants = db.participants.filter((p) => p.id !== participantId);
+    db.sessions = db.sessions.filter((s) => s.participantId !== participantId);
+    db.reports = db.reports.filter((r) => r.participantId !== participantId);
+    for (const [token, pid] of Object.entries(db.participantTokens || {})) {
+      if (pid === participantId) {
+        delete db.participantTokens[token];
+      }
+    }
+    saveDb(db);
+    void pushDbToCloudNow(db);
+    res.json({
+      deletedParticipantId: participantId,
+      deletedParticipantIds: db.deletedParticipantIds
+    });
+  }
+);
+app.post(
+  "/api/organizer/participants/bulk-delete",
+  requireOrganizer,
+  (req, res) => {
+    const auth = req.organizerAuth;
+    const rawScope = req.body?.scope || (auth.isSuperAdmin ? "ALL" : "OWN");
+    if (!auth.isSuperAdmin && rawScope !== "OWN") {
+      res.status(403).json({
+        error: "Akses Ditolak: Organizer hanya dapat menghapus daftar peserta yang dibuat sendiri."
+      });
+      return;
+    }
+    const targetParticipants = db.participants.filter((p) => {
+      if (auth.isSuperAdmin) {
+        if (rawScope === "SELF_REGISTERED") {
+          return !p.createdByOrganizerId;
+        }
+        if (rawScope === "OWN") {
+          return p.createdByOrganizerId === auth.organizerId;
+        }
+        return true;
+      }
+      return p.createdByOrganizerId === auth.organizerId;
+    });
+    const removedIds = targetParticipants.map((p) => p.id);
+    const removedIdSet = new Set(removedIds);
+    if (!Array.isArray(db.deletedParticipantIds)) {
+      db.deletedParticipantIds = [];
+    }
+    for (const id of removedIds) {
+      if (!db.deletedParticipantIds.includes(id)) {
+        db.deletedParticipantIds.push(id);
+      }
+    }
+    if (!Array.isArray(db.deletedSessionIds)) {
+      db.deletedSessionIds = [];
+    }
+    for (const s of db.sessions) {
+      if ((removedIdSet.has(s.participantId) || auth.isSuperAdmin && rawScope === "ALL") && !db.deletedSessionIds.includes(s.id)) {
+        db.deletedSessionIds.push(s.id);
+      }
+    }
+    db.participants = db.participants.filter((p) => !removedIdSet.has(p.id));
+    if (auth.isSuperAdmin && rawScope === "ALL") {
+      db.sessions = [];
+      db.reports = [];
+      db.participantTokens = {};
+    } else {
+      db.sessions = db.sessions.filter((s) => !removedIdSet.has(s.participantId));
+      db.reports = db.reports.filter((r) => !removedIdSet.has(r.participantId));
+      for (const [token, pid] of Object.entries(db.participantTokens || {})) {
+        if (removedIdSet.has(pid)) {
+          delete db.participantTokens[token];
+        }
+      }
+    }
+    saveDb(db);
+    void pushDbToCloudNow(db);
+    res.json({
+      deletedParticipantIds: removedIds,
+      deletedCount: removedIds.length,
+      allDeletedParticipantIds: db.deletedParticipantIds
+    });
+  }
+);
 app.delete("/api/organizer/sessions/:sessionId", requireOrganizer, (req, res) => {
   const auth = req.organizerAuth;
   const sessionId = req.params.sessionId;
@@ -80548,6 +80850,7 @@ app.get("/api/organizer/database/export", requireSuperAdmin, (_req, res) => {
     reports: db.reports || [],
     deletedCourseIds: db.deletedCourseIds || [],
     deletedOrganizerIds: db.deletedOrganizerIds || [],
+    deletedParticipantIds: db.deletedParticipantIds || [],
     deletedSessionIds: db.deletedSessionIds || []
   };
   const dateStr = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
@@ -80590,6 +80893,9 @@ app.post("/api/organizer/database/import", requireSuperAdmin, (req, res) => {
   }
   if (Array.isArray(payload.deletedOrganizerIds)) {
     db.deletedOrganizerIds = payload.deletedOrganizerIds;
+  }
+  if (Array.isArray(payload.deletedParticipantIds)) {
+    db.deletedParticipantIds = payload.deletedParticipantIds;
   }
   if (Array.isArray(payload.deletedSessionIds)) {
     db.deletedSessionIds = payload.deletedSessionIds;
@@ -80706,23 +81012,43 @@ app.get("/api/organizer/cpanel-bundle", requireSuperAdmin, (_req, res) => {
     const bundleServerFile = import_path.default.join(ROOT_DIR, "cpanel-server.cjs");
     const primaryDistDir = import_path.default.join(ROOT_DIR, "dist");
     const cpanelDistDir = import_path.default.join(ROOT_DIR, "cpanel_dist");
-    if (!import_fs.default.existsSync(bundleServerFile) || !import_fs.default.existsSync(import_path.default.join(primaryDistDir, "index.html")) && !import_fs.default.existsSync(import_path.default.join(cpanelDistDir, "index.html"))) {
+    const isDevRuntime = process.env.npm_lifecycle_event === "dev" || process.execArgv.some((arg) => arg.includes("tsx"));
+    if (isDevRuntime || !import_fs.default.existsSync(bundleServerFile) || !import_fs.default.existsSync(import_path.default.join(primaryDistDir, "index.html")) && !import_fs.default.existsSync(import_path.default.join(cpanelDistDir, "index.html"))) {
       (0, import_child_process.execSync)("npm run build:all", { cwd: ROOT_DIR, stdio: "pipe" });
     }
     const activeDistDir = import_fs.default.existsSync(import_path.default.join(primaryDistDir, "index.html")) ? primaryDistDir : cpanelDistDir;
     const filesToZip = [];
     if (import_fs.default.existsSync(bundleServerFile)) {
+      const serverBuf = import_fs.default.readFileSync(bundleServerFile);
       filesToZip.push({
         zipPath: "cpanel-server.cjs",
-        content: import_fs.default.readFileSync(bundleServerFile)
+        content: serverBuf
+      });
+      filesToZip.push({
+        zipPath: "app.js",
+        content: serverBuf
+      });
+      filesToZip.push({
+        zipPath: "server.js",
+        content: serverBuf
       });
     }
+    const standalonePkg = {
+      name: "baraka-adventure-standalone",
+      version: "1.0.0",
+      private: true,
+      type: "commonjs",
+      main: "cpanel-server.cjs",
+      scripts: {
+        start: "node cpanel-server.cjs"
+      }
+    };
+    filesToZip.push({
+      zipPath: "package.json",
+      content: Buffer.from(JSON.stringify(standalonePkg, null, 2), "utf-8")
+    });
     collectDirFilesForZip(activeDistDir, "dist", filesToZip);
     collectDirFilesForZip(activeDistDir, "cpanel_dist", filesToZip);
-    filesToZip.push({
-      zipPath: "data/baraka-db.json",
-      content: Buffer.from(JSON.stringify(db, null, 2), "utf-8")
-    });
     const zipBuf = createZipArchiveBuffer(filesToZip);
     const dateStr = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     res.setHeader("Content-Type", "application/zip");
@@ -80812,6 +81138,12 @@ async function startServer() {
   primaryServer.on("error", (err) => {
     console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
   });
+  if (true) {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Standalone Server berjalan di port/socket ${PORT}`);
+    });
+    return;
+  }
   if (typeof PORT === "number") {
     primaryServer.listen(PORT, "0.0.0.0", () => {
       console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
