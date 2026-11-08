@@ -27,6 +27,7 @@ interface CourseMapPlannerProps {
   draftCpLng: string;
   draftCpRadiusMeters: number;
   editingCheckpointId: string | null;
+  readOnly?: boolean;
   onPickCpCoordinates: (lat: number, lng: number) => void;
   onUpdateStartLocation: (loc: GeoPointLocation | null) => Promise<void>;
   onUpdateFinishLocation: (loc: GeoPointLocation | null) => Promise<void>;
@@ -192,6 +193,7 @@ export function CourseMapPlanner({
   draftCpLng,
   draftCpRadiusMeters,
   editingCheckpointId,
+  readOnly = false,
   onPickCpCoordinates,
   onUpdateStartLocation,
   onUpdateFinishLocation,
@@ -214,6 +216,7 @@ export function CourseMapPlanner({
   // Simpan referensi callback terbaru agar event listener klik peta selalu menggunakan state terkini
   const clickHandlerRef = useRef<(lat: number, lng: number) => void>(() => {});
   clickHandlerRef.current = async (lat: number, lng: number) => {
+    if (readOnly) return;
     const roundedLat = Number(lat.toFixed(6));
     const roundedLng = Number(lng.toFixed(6));
 
@@ -437,42 +440,46 @@ export function CourseMapPlanner({
       }
     };
 
-    // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung)
+    // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung jika tidak Read-Only)
     if (course.startLocation && liveStartCoord) {
       const startMarker = L.marker(liveStartCoord, {
         icon: createStartTriangleIcon(),
-        draggable: true,
+        draggable: !readOnly,
       });
       startMarker.bindTooltip(
         `<strong>🔺 TITIK START</strong><br/>${course.startLocation.latitude.toFixed(
           5
-        )}, ${course.startLocation.longitude.toFixed(
-          5
-        )}<br/><em>Geser (Drag) simbol ini untuk memindahkan posisi Start</em>`,
+        )}, ${course.startLocation.longitude.toFixed(5)}<br/><em>${
+          readOnly
+            ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : 'Geser (Drag) simbol ini untuk memindahkan posisi Start'
+        }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
-      startMarker.on('drag', () => {
-        const pos = startMarker.getLatLng();
-        liveStartCoord[0] = pos.lat;
-        liveStartCoord[1] = pos.lng;
-        refreshPolyline();
-      });
-      startMarker.on('dragend', () => {
-        const pos = startMarker.getLatLng();
-        const roundedLat = Number(pos.lat.toFixed(6));
-        const roundedLng = Number(pos.lng.toFixed(6));
-        void onUpdateStartLocation({
-          latitude: roundedLat,
-          longitude: roundedLng,
-          name: course.startLocation?.name || 'Titik Start',
+      if (!readOnly) {
+        startMarker.on('drag', () => {
+          const pos = startMarker.getLatLng();
+          liveStartCoord[0] = pos.lat;
+          liveStartCoord[1] = pos.lng;
+          refreshPolyline();
         });
-      });
+        startMarker.on('dragend', () => {
+          const pos = startMarker.getLatLng();
+          const roundedLat = Number(pos.lat.toFixed(6));
+          const roundedLng = Number(pos.lng.toFixed(6));
+          void onUpdateStartLocation({
+            latitude: roundedLat,
+            longitude: roundedLng,
+            name: course.startLocation?.name || 'Titik Start',
+          });
+        });
+      }
       startMarker.addTo(group);
     }
 
-    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag Langsung)
+    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag jika tidak Read-Only)
     sortedCps.forEach((cp) => {
-      const isEditingThis = editingCheckpointId === cp.id;
+      const isEditingThis = !readOnly && editingCheckpointId === cp.id;
       const cpLatLng: [number, number] = [cp.latitude, cp.longitude];
 
       let cpCircle: L.Circle | null = null;
@@ -489,7 +496,7 @@ export function CourseMapPlanner({
 
       const cpMarker = L.marker(cpLatLng, {
         icon: createCheckpointCircleIcon(cp, isEditingThis),
-        draggable: true,
+        draggable: !readOnly,
       });
 
       const titleStr = cp.name ? `${cp.code} — ${cp.name}` : cp.code;
@@ -500,40 +507,46 @@ export function CourseMapPlanner({
       cpMarker.bindTooltip(
         `<strong>⭕ Pos #${cp.orderIndex}: ${titleStr}</strong><br/>Poin: ${
           cp.points
-        } pts • ${radiusOrQrInfo}<br/><em>Klik untuk edit detail • Geser (Drag) untuk pindah posisi</em>`,
+        } pts • ${radiusOrQrInfo}<br/><em>${
+          readOnly
+            ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : 'Klik untuk edit detail • Geser (Drag) untuk pindah posisi'
+        }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
 
-      cpMarker.on('click', (ev) => {
-        L.DomEvent.stopPropagation(ev);
-        onSelectCheckpointForEdit(cp);
-      });
-
-      cpMarker.on('drag', () => {
-        const pos = cpMarker.getLatLng();
-        if (cpCircle) {
-          cpCircle.setLatLng(pos);
-        }
-        liveCpCoords.set(cp.id, [pos.lat, pos.lng]);
-        refreshPolyline();
-      });
-
-      cpMarker.on('dragend', () => {
-        const pos = cpMarker.getLatLng();
-        const roundedLat = Number(pos.lat.toFixed(6));
-        const roundedLng = Number(pos.lng.toFixed(6));
-        if (onDragCheckpointCoordinates) {
-          void onDragCheckpointCoordinates(cp, roundedLat, roundedLng);
-        } else {
+      if (!readOnly) {
+        cpMarker.on('click', (ev) => {
+          L.DomEvent.stopPropagation(ev);
           onSelectCheckpointForEdit(cp);
-          onPickCpCoordinates(roundedLat, roundedLng);
-        }
-      });
+        });
+
+        cpMarker.on('drag', () => {
+          const pos = cpMarker.getLatLng();
+          if (cpCircle) {
+            cpCircle.setLatLng(pos);
+          }
+          liveCpCoords.set(cp.id, [pos.lat, pos.lng]);
+          refreshPolyline();
+        });
+
+        cpMarker.on('dragend', () => {
+          const pos = cpMarker.getLatLng();
+          const roundedLat = Number(pos.lat.toFixed(6));
+          const roundedLng = Number(pos.lng.toFixed(6));
+          if (onDragCheckpointCoordinates) {
+            void onDragCheckpointCoordinates(cp, roundedLat, roundedLng);
+          } else {
+            onSelectCheckpointForEdit(cp);
+            onPickCpCoordinates(roundedLat, roundedLng);
+          }
+        });
+      }
 
       cpMarker.addTo(group);
     });
 
-    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag Langsung)
+    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag jika tidak Read-Only)
     if (course.finishLocation && liveFinishCoord) {
       const isSameAsStart = Boolean(
         course.startLocation &&
@@ -547,39 +560,43 @@ export function CourseMapPlanner({
 
       const finishMarker = L.marker(liveFinishCoord, {
         icon: createFinishDoubleCircleIcon(isSameAsStart),
-        draggable: true,
+        draggable: !readOnly,
       });
       finishMarker.bindTooltip(
         `<strong>◎ TITIK FINISH</strong><br/>${course.finishLocation.latitude.toFixed(
           5
-        )}, ${course.finishLocation.longitude.toFixed(
-          5
-        )}<br/><em>Geser (Drag) simbol ini untuk memindahkan posisi Finish</em>`,
+        )}, ${course.finishLocation.longitude.toFixed(5)}<br/><em>${
+          readOnly
+            ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : 'Geser (Drag) simbol ini untuk memindahkan posisi Finish'
+        }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
-      finishMarker.on('drag', () => {
-        const pos = finishMarker.getLatLng();
-        liveFinishCoord[0] = pos.lat;
-        liveFinishCoord[1] = pos.lng;
-        refreshPolyline();
-      });
-      finishMarker.on('dragend', () => {
-        const pos = finishMarker.getLatLng();
-        const roundedLat = Number(pos.lat.toFixed(6));
-        const roundedLng = Number(pos.lng.toFixed(6));
-        void onUpdateFinishLocation({
-          latitude: roundedLat,
-          longitude: roundedLng,
-          name: course.finishLocation?.name || 'Titik Finish',
+      if (!readOnly) {
+        finishMarker.on('drag', () => {
+          const pos = finishMarker.getLatLng();
+          liveFinishCoord[0] = pos.lat;
+          liveFinishCoord[1] = pos.lng;
+          refreshPolyline();
         });
-      });
+        finishMarker.on('dragend', () => {
+          const pos = finishMarker.getLatLng();
+          const roundedLat = Number(pos.lat.toFixed(6));
+          const roundedLng = Number(pos.lng.toFixed(6));
+          void onUpdateFinishLocation({
+            latitude: roundedLat,
+            longitude: roundedLng,
+            name: course.finishLocation?.name || 'Titik Finish',
+          });
+        });
+      }
       finishMarker.addTo(group);
     }
 
-    // 4. Titik Preview / Calon Pos (Draft CP) saat panitia klik di peta — Bisa Di-drag Juga
+    // 4. Titik Preview / Calon Pos (Draft CP) saat panitia klik di peta — Hanya tampil jika tidak Read-Only
     const parsedDraftLat = parseFloat(draftCpLat);
     const parsedDraftLng = parseFloat(draftCpLng);
-    if (!Number.isNaN(parsedDraftLat) && !Number.isNaN(parsedDraftLng)) {
+    if (!readOnly && !Number.isNaN(parsedDraftLat) && !Number.isNaN(parsedDraftLng)) {
       const matchesExistingUnedited = course.checkpoints.some(
         (cp) =>
           cp.id !== editingCheckpointId &&
@@ -634,6 +651,7 @@ export function CourseMapPlanner({
     draftCpLng,
     draftCpRadiusMeters,
     editingCheckpointId,
+    readOnly,
     onSelectCheckpointForEdit,
     onDragCheckpointCoordinates,
     onPickCpCoordinates,
@@ -797,61 +815,74 @@ export function CourseMapPlanner({
 
       {/* Baris Kontrol: Mode Klik Peta (CP / Start / Finish) + Pencarian Tempat */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-center">
-        {/* 3 Tombol Mode Klik Peta */}
+        {/* 3 Tombol Mode Klik Peta (Atau Indikator Mode Pantau Read-Only) */}
         <div className="lg:col-span-7 flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setClickMode('CP')}
-            className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
-              clickMode === 'CP'
-                ? 'bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-400 shadow-sm'
-                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
-            }`}
-          >
-            <span>⭕</span>
-            <span>
-              {editingCheckpointId
-                ? 'Klik Peta = Geser Pos (Edit)'
-                : 'Klik Peta = Titik Pos (CP)'}
-            </span>
-          </button>
+          {readOnly ? (
+            <div className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
+              <span className="font-semibold text-sky-300">
+                Mode Pantau Peta (Read-Only):
+              </span>
+              <span className="text-slate-400">
+                Titik Start, Pos CP, dan Finish dikunci agar tidak tergeser tanpa sengaja.
+              </span>
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setClickMode('CP')}
+                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  clickMode === 'CP'
+                    ? 'bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-400 shadow-sm'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                }`}
+              >
+                <span>⭕</span>
+                <span>
+                  {editingCheckpointId
+                    ? 'Klik Peta = Geser Pos (Edit)'
+                    : 'Klik Peta = Titik Pos (CP)'}
+                </span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => setClickMode('START')}
-            className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
-              clickMode === 'START'
-                ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400 shadow-sm'
-                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
-            }`}
-          >
-            <span>🔺</span>
-            <span>Klik Peta = Set Start</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => setClickMode('START')}
+                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  clickMode === 'START'
+                    ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400 shadow-sm'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                }`}
+              >
+                <span>🔺</span>
+                <span>Klik Peta = Set Start</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => setClickMode('FINISH')}
-            className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
-              clickMode === 'FINISH'
-                ? 'bg-sky-500/20 text-sky-200 border-sky-400 shadow-sm'
-                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
-            }`}
-          >
-            <span>◎</span>
-            <span>Klik Peta = Set Finish</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => setClickMode('FINISH')}
+                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  clickMode === 'FINISH'
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-400 shadow-sm'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                }`}
+              >
+                <span>◎</span>
+                <span>Klik Peta = Set Finish</span>
+              </button>
 
-          {course.startLocation && (
-            <button
-              type="button"
-              disabled={isSavingPoint}
-              onClick={handleCopyStartToFinish}
-              className="px-2.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-sky-300 border border-slate-700 text-[11px] font-semibold transition"
-              title="Jadikan titik Finish sama dengan titik Start (Basecamp)"
-            >
-              Finish = Start
-            </button>
+              {course.startLocation && (
+                <button
+                  type="button"
+                  disabled={isSavingPoint}
+                  onClick={handleCopyStartToFinish}
+                  className="px-2.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-sky-300 border border-slate-700 text-[11px] font-semibold transition"
+                  title="Jadikan titik Finish sama dengan titik Start (Basecamp)"
+                >
+                  Finish = Start
+                </button>
+              )}
+            </>
           )}
         </div>
 
@@ -877,14 +908,16 @@ export function CourseMapPlanner({
           >
             {isSearching ? '...' : 'Cari'}
           </button>
-          <button
-            type="button"
-            onClick={handleLocateMe}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition"
-            title="Arahkan ke Lokasi GPS Saya"
-          >
-            <Compass className="w-4 h-4" />
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={handleLocateMe}
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition"
+              title="Arahkan ke Lokasi GPS Saya"
+            >
+              <Compass className="w-4 h-4" />
+            </button>
+          )}
           <button
             type="button"
             onClick={fitMapToCourseBounds}
@@ -913,12 +946,21 @@ export function CourseMapPlanner({
       <div className="relative rounded-xl overflow-hidden border border-slate-700 shadow-inner">
         <div
           ref={mapContainerRef}
-          className="h-[390px] sm:h-[440px] w-full bg-slate-900 z-0 cursor-crosshair"
+          className={`h-[390px] sm:h-[440px] w-full bg-slate-900 z-0 ${
+            readOnly ? 'cursor-grab' : 'cursor-crosshair'
+          }`}
         />
 
         {/* Banner Mode Klik & Drag Aktif di Sudut Atas Peta */}
         <div className="pointer-events-none absolute top-3 right-3 left-3 sm:left-auto z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg backdrop-blur-sm">
-          {clickMode === 'CP' ? (
+          {readOnly ? (
+            <span>
+              Status Peta:{' '}
+              <strong className="text-sky-300">
+                Mode Pantau (Read-Only) • Klik &amp; Geser Titik Pos Dikunci
+              </strong>
+            </span>
+          ) : clickMode === 'CP' ? (
             <span>
               Mode Aktif:{' '}
               <strong className="text-fuchsia-300">
@@ -952,16 +994,16 @@ export function CourseMapPlanner({
               <div className="font-bold text-emerald-300">
                 Titik START (Segitiga)
               </div>
-              <div className="font-mono text-[11px] text-slate-300">
+              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
                 {course.startLocation
                   ? `${course.startLocation.latitude.toFixed(
                       5
                     )}, ${course.startLocation.longitude.toFixed(5)}`
-                  : 'Belum ditentukan (Klik Set Start)'}
+                  : 'Belum ditentukan'}
               </div>
             </div>
           </div>
-          {course.startLocation && (
+          {!readOnly && course.startLocation && (
             <button
               type="button"
               onClick={() => onUpdateStartLocation(null)}
@@ -980,13 +1022,18 @@ export function CourseMapPlanner({
               <div className="font-bold text-fuchsia-300">
                 Pos Kontrol / Checkpoints
               </div>
-              <div className="font-mono text-[11px] text-slate-300">
-                {course.checkpoints.length} Pos Terdaftar • Calon Pos:{' '}
-                {draftCpLat && draftCpLng
-                  ? `${Number(draftCpLat).toFixed(4)}, ${Number(
-                      draftCpLng
-                    ).toFixed(4)}`
-                  : '-'}
+              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
+                {course.checkpoints.length} Pos Terdaftar
+                {!readOnly && (
+                  <>
+                    {' '}• Calon Pos:{' '}
+                    {draftCpLat && draftCpLng
+                      ? `${Number(draftCpLat).toFixed(4)}, ${Number(
+                          draftCpLng
+                        ).toFixed(4)}`
+                      : '-'}
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1000,16 +1047,16 @@ export function CourseMapPlanner({
               <div className="font-bold text-sky-300">
                 Titik FINISH (Lingkaran Ganda)
               </div>
-              <div className="font-mono text-[11px] text-slate-300">
+              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
                 {course.finishLocation
                   ? `${course.finishLocation.latitude.toFixed(
                       5
                     )}, ${course.finishLocation.longitude.toFixed(5)}`
-                  : 'Belum ditentukan (Klik Set Finish)'}
+                  : 'Belum ditentukan'}
               </div>
             </div>
           </div>
-          {course.finishLocation ? (
+          {!readOnly && course.finishLocation ? (
             <button
               type="button"
               onClick={() => onUpdateFinishLocation(null)}
