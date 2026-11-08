@@ -213,22 +213,49 @@ export function CourseMapPlanner({
   const [searchStatus, setSearchStatus] = useState<string | null>(null);
   const [isSavingPoint, setIsSavingPoint] = useState<boolean>(false);
 
+  // Pelindung status Drag agar layer peta tidak pernah di-reset/clear saat user sedang menahan & menggeser marker
+  const isDraggingRef = useRef<boolean>(false);
+  const [dragFinishedTick, setDragFinishedTick] = useState<number>(0);
+
+  // Simpan seluruh callback di dalam ref agar re-render 1 detik dari parent (stopwatch) tidak memicu clearLayers()
+  const callbacksRef = useRef({
+    onPickCpCoordinates,
+    onUpdateStartLocation,
+    onUpdateFinishLocation,
+    onSelectCheckpointForEdit,
+    onDragCheckpointCoordinates,
+  });
+  callbacksRef.current = {
+    onPickCpCoordinates,
+    onUpdateStartLocation,
+    onUpdateFinishLocation,
+    onSelectCheckpointForEdit,
+    onDragCheckpointCoordinates,
+  };
+
+  // Saat user memilih Pos (CP) untuk diedit, otomatis pastikan mode klik peta berada di mode CP
+  useEffect(() => {
+    if (editingCheckpointId) {
+      setClickMode('CP');
+    }
+  }, [editingCheckpointId]);
+
   // Simpan referensi callback terbaru agar event listener klik peta selalu menggunakan state terkini
   const clickHandlerRef = useRef<(lat: number, lng: number) => void>(() => {});
   clickHandlerRef.current = async (lat: number, lng: number) => {
-    if (readOnly) return;
+    if (readOnly || isDraggingRef.current) return;
     const roundedLat = Number(lat.toFixed(6));
     const roundedLng = Number(lng.toFixed(6));
 
-    if (clickMode === 'CP') {
-      onPickCpCoordinates(roundedLat, roundedLng);
+    if (clickMode === 'CP' || editingCheckpointId) {
+      callbacksRef.current.onPickCpCoordinates(roundedLat, roundedLng);
       return;
     }
 
     if (clickMode === 'START') {
       setIsSavingPoint(true);
       try {
-        await onUpdateStartLocation({
+        await callbacksRef.current.onUpdateStartLocation({
           latitude: roundedLat,
           longitude: roundedLng,
           name: 'Titik Start',
@@ -242,7 +269,7 @@ export function CourseMapPlanner({
     if (clickMode === 'FINISH') {
       setIsSavingPoint(true);
       try {
-        await onUpdateFinishLocation({
+        await callbacksRef.current.onUpdateFinishLocation({
           latitude: roundedLat,
           longitude: roundedLng,
           name: 'Titik Finish',
@@ -286,6 +313,37 @@ export function CourseMapPlanner({
     }
     return Math.round(sum);
   }, [course.startLocation, course.finishLocation, course.checkpoints]);
+
+  // Signature deterministik geometri course agar polling 6 detik tidak me-reset layer peta jika koordinat tidak berubah
+  const courseMapSignature = React.useMemo(() => {
+    const startSig = course.startLocation
+      ? `${course.startLocation.latitude.toFixed(6)},${course.startLocation.longitude.toFixed(6)}`
+      : 'none';
+    const finishSig = course.finishLocation
+      ? `${course.finishLocation.latitude.toFixed(6)},${course.finishLocation.longitude.toFixed(6)}`
+      : 'none';
+    const cpSig = [...course.checkpoints]
+      .sort((a, b) => a.orderIndex - b.orderIndex)
+      .map(
+        (cp) =>
+          `${cp.id}:${cp.code}:${cp.name || ''}:${cp.orderIndex}:${cp.latitude.toFixed(
+            6
+          )},${cp.longitude.toFixed(6)}:${cp.radiusMeters}:${cp.points}`
+      )
+      .join('|');
+    return `${course.id}::${course.enforceOrder}::${course.validationMethod}::${course.defaultGpsRadiusMeters}::${startSig}::${finishSig}::${cpSig}`;
+  }, [
+    course.id,
+    course.enforceOrder,
+    course.validationMethod,
+    course.defaultGpsRadiusMeters,
+    course.startLocation,
+    course.finishLocation,
+    course.checkpoints,
+  ]);
+
+  const courseRef = useRef<Course>(course);
+  courseRef.current = course;
 
   // Inisialisasi Peta Leaflet
   useEffect(() => {
@@ -349,22 +407,23 @@ export function CourseMapPlanner({
   // Fungsi fokuskan tampilan peta ke seluruh titik lintasan Course
   const fitMapToCourseBounds = React.useCallback(() => {
     const map = mapInstanceRef.current;
-    if (!map) return;
+    const activeCourse = courseRef.current;
+    if (!map || !activeCourse) return;
 
     const boundsPoints: L.LatLngExpression[] = [];
-    if (course.startLocation) {
+    if (activeCourse.startLocation) {
       boundsPoints.push([
-        course.startLocation.latitude,
-        course.startLocation.longitude,
+        activeCourse.startLocation.latitude,
+        activeCourse.startLocation.longitude,
       ]);
     }
-    course.checkpoints.forEach((cp) => {
+    activeCourse.checkpoints.forEach((cp) => {
       boundsPoints.push([cp.latitude, cp.longitude]);
     });
-    if (course.finishLocation) {
+    if (activeCourse.finishLocation) {
       boundsPoints.push([
-        course.finishLocation.latitude,
-        course.finishLocation.longitude,
+        activeCourse.finishLocation.latitude,
+        activeCourse.finishLocation.longitude,
       ]);
     }
 
@@ -376,7 +435,7 @@ export function CourseMapPlanner({
     } else if (boundsPoints.length === 1) {
       map.setView(boundsPoints[0], 16);
     }
-  }, [course]);
+  }, []);
 
   // Otomatis sesuaikan fokus peta ketika berganti Course
   useEffect(() => {
@@ -391,25 +450,39 @@ export function CourseMapPlanner({
   const usesGpsRadius = course.validationMethod !== ValidationMethod.QR_ONLY;
 
   // Render ulang simbol IOF (Start 🔺, CP ⭕ + Radius, Finish ◎, Garis Rute, dan Preview CP 🎯)
-  // Dilengkapi fitur Drag & Drop langsung di peta dengan pembaruan lingkaran radius & garis rute real-time
+  // Dilengkapi fitur Drag & Drop langsung di peta dengan pelindung isDraggingRef agar tidak pernah terlepas saat digeser
   useEffect(() => {
     const group = overlayGroupRef.current;
     if (!group) return;
+    // Jangan pernah menghapus layer saat user sedang menahan & menggeser marker
+    if (isDraggingRef.current) return;
+
+    const activeCourse = courseRef.current;
     group.clearLayers();
 
-    const sortedCps = [...course.checkpoints].sort(
+    const sortedCps = [...activeCourse.checkpoints].sort(
       (a, b) => a.orderIndex - b.orderIndex
     );
 
-    // Menyimpan titik rute secara berurutan agar polyline ikut bergeser mulus saat marker di-drag
-    const liveStartCoord: [number, number] | null = course.startLocation
-      ? [course.startLocation.latitude, course.startLocation.longitude]
+    const parsedDraftLat = parseFloat(draftCpLat);
+    const parsedDraftLng = parseFloat(draftCpLng);
+    const hasValidDraftCoords =
+      !Number.isNaN(parsedDraftLat) && !Number.isNaN(parsedDraftLng);
+
+    // Menyimpan titik rute secara berurutan agar polyline ikut bergeser mulus saat marker di-drag atau saat di-klik di tempat baru
+    const liveStartCoord: [number, number] | null = activeCourse.startLocation
+      ? [activeCourse.startLocation.latitude, activeCourse.startLocation.longitude]
       : null;
     const liveCpCoords: Map<string, [number, number]> = new Map(
-      sortedCps.map((cp) => [cp.id, [cp.latitude, cp.longitude]])
+      sortedCps.map((cp) => {
+        if (!readOnly && editingCheckpointId === cp.id && hasValidDraftCoords) {
+          return [cp.id, [parsedDraftLat, parsedDraftLng]];
+        }
+        return [cp.id, [cp.latitude, cp.longitude]];
+      })
     );
-    const liveFinishCoord: [number, number] | null = course.finishLocation
-      ? [course.finishLocation.latitude, course.finishLocation.longitude]
+    const liveFinishCoord: [number, number] | null = activeCourse.finishLocation
+      ? [activeCourse.finishLocation.latitude, activeCourse.finishLocation.longitude]
       : null;
 
     let routePolyline: L.Polyline | null = null;
@@ -425,7 +498,7 @@ export function CourseMapPlanner({
     };
 
     const initialRouteCoords = buildCurrentRouteLatLngs();
-    if (course.enforceOrder && initialRouteCoords.length >= 2) {
+    if (activeCourse.enforceOrder && initialRouteCoords.length >= 2) {
       routePolyline = L.polyline(initialRouteCoords, {
         color: '#d946ef',
         weight: 3,
@@ -441,15 +514,15 @@ export function CourseMapPlanner({
     };
 
     // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung jika tidak Read-Only)
-    if (course.startLocation && liveStartCoord) {
+    if (activeCourse.startLocation && liveStartCoord) {
       const startMarker = L.marker(liveStartCoord, {
         icon: createStartTriangleIcon(),
         draggable: !readOnly,
       });
       startMarker.bindTooltip(
-        `<strong>🔺 TITIK START</strong><br/>${course.startLocation.latitude.toFixed(
+        `<strong>🔺 TITIK START</strong><br/>${activeCourse.startLocation.latitude.toFixed(
           5
-        )}, ${course.startLocation.longitude.toFixed(5)}<br/><em>${
+        )}, ${activeCourse.startLocation.longitude.toFixed(5)}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
             : 'Geser (Drag) simbol ini untuk memindahkan posisi Start'
@@ -457,6 +530,9 @@ export function CourseMapPlanner({
         { direction: 'top', offset: [0, -14] }
       );
       if (!readOnly) {
+        startMarker.on('dragstart', () => {
+          isDraggingRef.current = true;
+        });
         startMarker.on('drag', () => {
           const pos = startMarker.getLatLng();
           liveStartCoord[0] = pos.lat;
@@ -464,14 +540,16 @@ export function CourseMapPlanner({
           refreshPolyline();
         });
         startMarker.on('dragend', () => {
+          isDraggingRef.current = false;
           const pos = startMarker.getLatLng();
           const roundedLat = Number(pos.lat.toFixed(6));
           const roundedLng = Number(pos.lng.toFixed(6));
-          void onUpdateStartLocation({
+          void callbacksRef.current.onUpdateStartLocation({
             latitude: roundedLat,
             longitude: roundedLng,
-            name: course.startLocation?.name || 'Titik Start',
+            name: activeCourse.startLocation?.name || 'Titik Start',
           });
+          setDragFinishedTick((t) => t + 1);
         });
       }
       startMarker.addTo(group);
@@ -480,28 +558,44 @@ export function CourseMapPlanner({
     // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag jika tidak Read-Only)
     sortedCps.forEach((cp) => {
       const isEditingThis = !readOnly && editingCheckpointId === cp.id;
-      const cpLatLng: [number, number] = [cp.latitude, cp.longitude];
+      const effectiveLat =
+        isEditingThis && hasValidDraftCoords ? parsedDraftLat : cp.latitude;
+      const effectiveLng =
+        isEditingThis && hasValidDraftCoords ? parsedDraftLng : cp.longitude;
+      const effectiveRadius =
+        isEditingThis && draftCpRadiusMeters > 0
+          ? draftCpRadiusMeters
+          : cp.radiusMeters || activeCourse.defaultGpsRadiusMeters || 35;
+      const effectiveCode =
+        isEditingThis && draftCpCode.trim()
+          ? draftCpCode.trim().toUpperCase()
+          : cp.code;
+      const cpLatLng: [number, number] = [effectiveLat, effectiveLng];
 
       let cpCircle: L.Circle | null = null;
       if (usesGpsRadius) {
         cpCircle = L.circle(cpLatLng, {
-          radius: cp.radiusMeters || course.defaultGpsRadiusMeters || 35,
+          radius: effectiveRadius,
           color: isEditingThis ? '#f59e0b' : '#d946ef',
-          weight: 1.5,
+          weight: isEditingThis ? 2 : 1.5,
           fillColor: isEditingThis ? '#f59e0b' : '#d946ef',
-          fillOpacity: 0.12,
+          fillOpacity: isEditingThis ? 0.18 : 0.12,
           dashArray: '4 4',
         }).addTo(group);
       }
 
+      const cpForIcon: Checkpoint = isEditingThis
+        ? { ...cp, code: effectiveCode }
+        : cp;
+
       const cpMarker = L.marker(cpLatLng, {
-        icon: createCheckpointCircleIcon(cp, isEditingThis),
+        icon: createCheckpointCircleIcon(cpForIcon, isEditingThis),
         draggable: !readOnly,
       });
 
-      const titleStr = cp.name ? `${cp.code} — ${cp.name}` : cp.code;
+      const titleStr = cp.name ? `${effectiveCode} — ${cp.name}` : effectiveCode;
       const radiusOrQrInfo = usesGpsRadius
-        ? `Radius GPS: ${cp.radiusMeters || course.defaultGpsRadiusMeters || 35}m`
+        ? `Radius GPS: ${effectiveRadius}m`
         : 'Validasi: QR Code Saja';
 
       cpMarker.bindTooltip(
@@ -510,7 +604,9 @@ export function CourseMapPlanner({
         } pts • ${radiusOrQrInfo}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
-            : 'Klik untuk edit detail • Geser (Drag) untuk pindah posisi'
+            : isEditingThis
+            ? 'Mode Edit Aktif — Klik di peta atau geser simbol ini, lalu klik Simpan Perubahan Pos'
+            : 'Klik untuk edit detail • Geser (Drag) untuk pindah posisi langsung'
         }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
@@ -518,7 +614,11 @@ export function CourseMapPlanner({
       if (!readOnly) {
         cpMarker.on('click', (ev) => {
           L.DomEvent.stopPropagation(ev);
-          onSelectCheckpointForEdit(cp);
+          callbacksRef.current.onSelectCheckpointForEdit(cp);
+        });
+
+        cpMarker.on('dragstart', () => {
+          isDraggingRef.current = true;
         });
 
         cpMarker.on('drag', () => {
@@ -531,15 +631,21 @@ export function CourseMapPlanner({
         });
 
         cpMarker.on('dragend', () => {
+          isDraggingRef.current = false;
           const pos = cpMarker.getLatLng();
           const roundedLat = Number(pos.lat.toFixed(6));
           const roundedLng = Number(pos.lng.toFixed(6));
-          if (onDragCheckpointCoordinates) {
-            void onDragCheckpointCoordinates(cp, roundedLat, roundedLng);
+          if (callbacksRef.current.onDragCheckpointCoordinates) {
+            void callbacksRef.current.onDragCheckpointCoordinates(
+              cp,
+              roundedLat,
+              roundedLng
+            );
           } else {
-            onSelectCheckpointForEdit(cp);
-            onPickCpCoordinates(roundedLat, roundedLng);
+            callbacksRef.current.onSelectCheckpointForEdit(cp);
+            callbacksRef.current.onPickCpCoordinates(roundedLat, roundedLng);
           }
+          setDragFinishedTick((t) => t + 1);
         });
       }
 
@@ -547,14 +653,16 @@ export function CourseMapPlanner({
     });
 
     // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag jika tidak Read-Only)
-    if (course.finishLocation && liveFinishCoord) {
+    if (activeCourse.finishLocation && liveFinishCoord) {
       const isSameAsStart = Boolean(
-        course.startLocation &&
+        activeCourse.startLocation &&
           Math.abs(
-            course.startLocation.latitude - course.finishLocation.latitude
+            activeCourse.startLocation.latitude -
+              activeCourse.finishLocation.latitude
           ) < 0.00005 &&
           Math.abs(
-            course.startLocation.longitude - course.finishLocation.longitude
+            activeCourse.startLocation.longitude -
+              activeCourse.finishLocation.longitude
           ) < 0.00005
       );
 
@@ -563,9 +671,9 @@ export function CourseMapPlanner({
         draggable: !readOnly,
       });
       finishMarker.bindTooltip(
-        `<strong>◎ TITIK FINISH</strong><br/>${course.finishLocation.latitude.toFixed(
+        `<strong>◎ TITIK FINISH</strong><br/>${activeCourse.finishLocation.latitude.toFixed(
           5
-        )}, ${course.finishLocation.longitude.toFixed(5)}<br/><em>${
+        )}, ${activeCourse.finishLocation.longitude.toFixed(5)}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
             : 'Geser (Drag) simbol ini untuk memindahkan posisi Finish'
@@ -573,6 +681,9 @@ export function CourseMapPlanner({
         { direction: 'top', offset: [0, -14] }
       );
       if (!readOnly) {
+        finishMarker.on('dragstart', () => {
+          isDraggingRef.current = true;
+        });
         finishMarker.on('drag', () => {
           const pos = finishMarker.getLatLng();
           liveFinishCoord[0] = pos.lat;
@@ -580,26 +691,25 @@ export function CourseMapPlanner({
           refreshPolyline();
         });
         finishMarker.on('dragend', () => {
+          isDraggingRef.current = false;
           const pos = finishMarker.getLatLng();
           const roundedLat = Number(pos.lat.toFixed(6));
           const roundedLng = Number(pos.lng.toFixed(6));
-          void onUpdateFinishLocation({
+          void callbacksRef.current.onUpdateFinishLocation({
             latitude: roundedLat,
             longitude: roundedLng,
-            name: course.finishLocation?.name || 'Titik Finish',
+            name: activeCourse.finishLocation?.name || 'Titik Finish',
           });
+          setDragFinishedTick((t) => t + 1);
         });
       }
       finishMarker.addTo(group);
     }
 
-    // 4. Titik Preview / Calon Pos (Draft CP) saat panitia klik di peta — Hanya tampil jika tidak Read-Only
-    const parsedDraftLat = parseFloat(draftCpLat);
-    const parsedDraftLng = parseFloat(draftCpLng);
-    if (!readOnly && !Number.isNaN(parsedDraftLat) && !Number.isNaN(parsedDraftLng)) {
-      const matchesExistingUnedited = course.checkpoints.some(
+    // 4. Titik Preview / Calon Pos Baru (Draft CP) saat tambah pos baru (bukan sedang edit pos lama)
+    if (!readOnly && !editingCheckpointId && hasValidDraftCoords) {
+      const matchesExistingUnedited = activeCourse.checkpoints.some(
         (cp) =>
-          cp.id !== editingCheckpointId &&
           Math.abs(cp.latitude - parsedDraftLat) < 0.00001 &&
           Math.abs(cp.longitude - parsedDraftLng) < 0.00001
       );
@@ -611,7 +721,7 @@ export function CourseMapPlanner({
           const previewRadius =
             draftCpRadiusMeters > 0
               ? draftCpRadiusMeters
-              : course.defaultGpsRadiusMeters || 35;
+              : activeCourse.defaultGpsRadiusMeters || 35;
 
           draftCircle = L.circle(draftLatLng, {
             radius: previewRadius,
@@ -624,8 +734,11 @@ export function CourseMapPlanner({
         }
 
         const draftMarker = L.marker(draftLatLng, {
-          icon: createDraftCpIcon(draftCpCode, Boolean(editingCheckpointId)),
+          icon: createDraftCpIcon(draftCpCode, false),
           draggable: true,
+        });
+        draftMarker.on('dragstart', () => {
+          isDraggingRef.current = true;
         });
         draftMarker.on('drag', () => {
           const pos = draftMarker.getLatLng();
@@ -634,17 +747,19 @@ export function CourseMapPlanner({
           }
         });
         draftMarker.on('dragend', () => {
+          isDraggingRef.current = false;
           const pos = draftMarker.getLatLng();
-          onPickCpCoordinates(
+          callbacksRef.current.onPickCpCoordinates(
             Number(pos.lat.toFixed(6)),
             Number(pos.lng.toFixed(6))
           );
+          setDragFinishedTick((t) => t + 1);
         });
         draftMarker.addTo(group);
       }
     }
   }, [
-    course,
+    courseMapSignature,
     usesGpsRadius,
     draftCpCode,
     draftCpLat,
@@ -652,11 +767,7 @@ export function CourseMapPlanner({
     draftCpRadiusMeters,
     editingCheckpointId,
     readOnly,
-    onSelectCheckpointForEdit,
-    onDragCheckpointCoordinates,
-    onPickCpCoordinates,
-    onUpdateStartLocation,
-    onUpdateFinishLocation,
+    dragFinishedTick,
   ]);
 
   // Pencarian Lokasi Peta via OpenStreetMap Nominatim (Tanpa harus ke lapangan)

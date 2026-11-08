@@ -479,6 +479,62 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
 }
 
 /**
+ * Menggabungkan dua Course secara pintar berdasarkan timestamp updatedAt dan tombstone deletedCheckpointIds
+ * agar perubahan koordinat Pos (CP), titik Start/Finish, atau penghapusan CP tidak pernah tertimpa data lama.
+ */
+export function mergeCourseSmart(existing: Course, incoming: Course): Course {
+  const deletedCpSet = new Set<string>([
+    ...(existing.deletedCheckpointIds || []),
+    ...(incoming.deletedCheckpointIds || []),
+  ]);
+
+  const existingCourseMs =
+    Date.parse(existing.updatedAt || existing.createdAt || '') || 0;
+  const incomingCourseMs =
+    Date.parse(incoming.updatedAt || incoming.createdAt || '') || 0;
+  const incomingCourseIsNewer = incomingCourseMs >= existingCourseMs;
+
+  const baseCourse: Course = incomingCourseIsNewer
+    ? { ...existing, ...incoming }
+    : { ...incoming, ...existing };
+
+  const cpMap = new Map<string, Checkpoint>();
+  for (const cp of existing.checkpoints || []) {
+    if (cp && cp.id && !deletedCpSet.has(cp.id)) {
+      cpMap.set(cp.id, cp);
+    }
+  }
+  for (const cp of incoming.checkpoints || []) {
+    if (cp && cp.id && !deletedCpSet.has(cp.id)) {
+      const prevCp = cpMap.get(cp.id);
+      if (!prevCp) {
+        cpMap.set(cp.id, cp);
+      } else {
+        const prevCpMs =
+          Date.parse(prevCp.updatedAt || existing.updatedAt || '') || 0;
+        const incCpMs =
+          Date.parse(cp.updatedAt || incoming.updatedAt || '') || 0;
+        if (incCpMs >= prevCpMs) {
+          cpMap.set(cp.id, { ...prevCp, ...cp });
+        } else {
+          cpMap.set(cp.id, { ...cp, ...prevCp });
+        }
+      }
+    }
+  }
+
+  const mergedCps = Array.from(cpMap.values())
+    .sort((a, b) => a.orderIndex - b.orderIndex)
+    .map((cp, idx) => ({ ...cp, orderIndex: idx + 1 }));
+
+  return {
+    ...baseCourse,
+    checkpoints: mergedCps,
+    deletedCheckpointIds: Array.from(deletedCpSet),
+  };
+}
+
+/**
  * SMART MERGE (Gabung berdasarkan ID, BUKAN Timpa!):
  * Ketika berganti login antara Superadmin dan Organizer di perangkat yang sama,
  * data cadangan keduanya saling melengkapi dan tidak saling menghapus.
@@ -526,7 +582,7 @@ export function mergeAndSaveOrganizerVaultBackup(
     }
   }
 
-  // 2. Merge Courses by ID & Checkpoints secara Monotonik
+  // 2. Merge Courses by ID & Checkpoints secara Timestamp-Aware (Data Terbaru Selalu Menang)
   const courseMap = new Map<string, Course>();
   for (const c of current.courses) {
     if (c && c.id && !deletedCourseSet.has(c.id)) {
@@ -540,25 +596,7 @@ export function mergeAndSaveOrganizerVaultBackup(
         if (!existing) {
           courseMap.set(c.id, c);
         } else {
-          // Gabungkan checkpoints secara aman agar CP yang baru dibuat tidak hilang
-          const cpMap = new Map<string, Checkpoint>();
-          for (const cp of existing.checkpoints || []) {
-            if (cp && cp.id) cpMap.set(cp.id, cp);
-          }
-          for (const cp of c.checkpoints || []) {
-            if (cp && cp.id) {
-              const prevCp = cpMap.get(cp.id);
-              cpMap.set(cp.id, { ...(prevCp || {}), ...cp });
-            }
-          }
-          const mergedCps = Array.from(cpMap.values()).sort(
-            (a, b) => a.orderIndex - b.orderIndex
-          );
-          courseMap.set(c.id, {
-            ...existing,
-            ...c,
-            checkpoints: mergedCps,
-          });
+          courseMap.set(c.id, mergeCourseSmart(existing, c));
         }
       }
     }

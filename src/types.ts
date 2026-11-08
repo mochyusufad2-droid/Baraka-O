@@ -58,6 +58,7 @@ export interface Checkpoint {
   longitude: number;
   radiusMeters: number;  // Radius toleransi validasi GPS dalam meter
   points: number;        // Skor pos (jika course menggunakan sistem skor)
+  updatedAt?: string;    // Timestamp pembaruan terakhir pos agar edit koordinat/detail tidak tertimpa data lama
 }
 
 export interface OrganizerPublic {
@@ -85,6 +86,7 @@ export interface Course {
   isActive: boolean;
   scoringEnabled: boolean;
   createdAt: string;
+  updatedAt?: string;                     // Timestamp pembaruan terakhir course
   createdByOrganizerId?: string;          // ID Organizer pembuat course
   createdByOrganizerName?: string;        // Nama Organizer pembuat course
   validationMethod: ValidationMethod;
@@ -100,6 +102,7 @@ export interface Course {
   startQrCode: string;                    // Payload Start QR untuk memulai sesi
   finishQrCode: string;                   // Payload Finish QR untuk menyelesaikan sesi
   checkpoints: Checkpoint[];
+  deletedCheckpointIds?: string[];        // Tombstone ID pos yang telah dihapus agar tidak muncul lagi saat merge
 }
 
 export const ORIENTEERING_GENDER_OPTIONS = [

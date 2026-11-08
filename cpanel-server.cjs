@@ -78657,23 +78657,41 @@ function smartMergeIntoServerDb(targetDb, incoming, authScope) {
         changed = true;
       } else if ((!authScope || canAccessCourse(targetDb.courses[existingIdx], authScope)) && JSON.stringify(targetDb.courses[existingIdx]) !== JSON.stringify(normalized)) {
         const currentCourse = targetDb.courses[existingIdx];
+        const deletedCpSet = /* @__PURE__ */ new Set([
+          ...currentCourse.deletedCheckpointIds || [],
+          ...normalized.deletedCheckpointIds || []
+        ]);
+        const currentCourseMs = Date.parse(currentCourse.updatedAt || currentCourse.createdAt || "") || 0;
+        const incomingCourseMs = Date.parse(normalized.updatedAt || normalized.createdAt || "") || 0;
+        const incomingCourseIsStrictlyNewer = incomingCourseMs > currentCourseMs;
         const cpMap = /* @__PURE__ */ new Map();
         for (const cp of currentCourse.checkpoints || []) {
-          if (cp && cp.id) cpMap.set(cp.id, cp);
-        }
-        for (const cp of normalized.checkpoints || []) {
-          if (cp && cp.id) {
-            const prevCp = cpMap.get(cp.id);
-            cpMap.set(cp.id, { ...prevCp || {}, ...cp });
+          if (cp && cp.id && !deletedCpSet.has(cp.id)) {
+            cpMap.set(cp.id, cp);
           }
         }
-        const mergedCheckpoints = Array.from(cpMap.values()).sort(
-          (a, b) => a.orderIndex - b.orderIndex
-        );
+        for (const cp of normalized.checkpoints || []) {
+          if (cp && cp.id && !deletedCpSet.has(cp.id)) {
+            const prevCp = cpMap.get(cp.id);
+            if (!prevCp) {
+              cpMap.set(cp.id, cp);
+            } else {
+              const prevCpMs = Date.parse(prevCp.updatedAt || currentCourse.updatedAt || "") || 0;
+              const incCpMs = Date.parse(cp.updatedAt || normalized.updatedAt || "") || 0;
+              if (incCpMs > prevCpMs) {
+                cpMap.set(cp.id, { ...prevCp, ...cp });
+              } else {
+                cpMap.set(cp.id, { ...cp, ...prevCp });
+              }
+            }
+          }
+        }
+        const mergedCheckpoints = Array.from(cpMap.values()).sort((a, b) => a.orderIndex - b.orderIndex).map((cp, idx) => ({ ...cp, orderIndex: idx + 1 }));
+        const baseCourse = incomingCourseIsStrictlyNewer ? { ...currentCourse, ...normalized } : { ...normalized, ...currentCourse };
         const mergedCourse = {
-          ...currentCourse,
-          ...normalized,
-          checkpoints: mergedCheckpoints
+          ...baseCourse,
+          checkpoints: mergedCheckpoints,
+          deletedCheckpointIds: Array.from(deletedCpSet)
         };
         if (JSON.stringify(currentCourse) !== JSON.stringify(mergedCourse)) {
           targetDb.courses[existingIdx] = mergedCourse;
@@ -78805,9 +78823,9 @@ function syncDbFromDisk(targetDb) {
   }
 }
 function saveDb(dbToSave) {
-  syncDbFromDisk(dbToSave);
   recoverOrphanedOrganizersFromCourses(dbToSave);
   saveDbToDiskOnly(dbToSave);
+  lastCloudHydratedAt = Date.now();
   scheduleCloudSync(dbToSave);
 }
 function saveDbTelemetryOnly(dbToSave) {
@@ -78816,7 +78834,6 @@ function saveDbTelemetryOnly(dbToSave) {
   }
   telemetryDiskTimer = setTimeout(() => {
     telemetryDiskTimer = null;
-    syncDbFromDisk(dbToSave);
     saveDbToDiskOnly(dbToSave);
   }, 1500);
 }
@@ -80486,6 +80503,7 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
   const courseId = `crs-${Date.now()}`;
   const parsedDuration = durationMinutes !== void 0 && Number(durationMinutes) > 0 ? Math.round(Number(durationMinutes)) : 0;
   const parsedPenaltyRate = overtimePenaltyPointsPerMinute !== void 0 && !Number.isNaN(Number(overtimePenaltyPointsPerMinute)) ? Math.max(0, Number(overtimePenaltyPointsPerMinute)) : 0;
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const newCourse = {
     id: courseId,
     name: name4.trim(),
@@ -80494,7 +80512,8 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
     date,
     isActive: true,
     scoringEnabled: scoringEnabled !== void 0 ? Boolean(scoringEnabled) : true,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    createdAt: nowIso,
+    updatedAt: nowIso,
     createdByOrganizerId: auth.organizerId,
     createdByOrganizerName: auth.name,
     validationMethod: validationMethod || ValidationMethod.QR_ONLY,
@@ -80509,10 +80528,12 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
     setupQrCode: `BARAKA:SETUP:${courseId}`,
     startQrCode: `BARAKA:START:${courseId}`,
     finishQrCode: `BARAKA:FINISH:${courseId}`,
-    checkpoints: []
+    checkpoints: [],
+    deletedCheckpointIds: []
   };
   db.courses.push(newCourse);
   saveDb(db);
+  void pushDbToCloudNow(db);
   res.status(201).json({ course: newCourse });
 });
 app.put("/api/organizer/courses/:courseId", requireOrganizer, (req, res) => {
@@ -80575,8 +80596,10 @@ app.put("/api/organizer/courses/:courseId", requireOrganizer, (req, res) => {
   if (finishLocation !== void 0) {
     course.finishLocation = finishLocation && typeof finishLocation.latitude === "number" && typeof finishLocation.longitude === "number" ? finishLocation : void 0;
   }
+  course.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
   db.sessions.filter((s) => s.courseId === course.id).forEach((s) => recalculateSessionScore(s, course));
   saveDb(db);
+  void pushDbToCloudNow(db);
   res.json({ course });
 });
 app.post("/api/organizer/courses/sync-backup", requireOrganizer, (req, res) => {
@@ -80684,6 +80707,7 @@ app.post(
     const secretSuffix = import_crypto2.default.randomBytes(2).toString("hex").toUpperCase();
     const parsedPoints = points !== void 0 && !Number.isNaN(Number(points)) ? Math.max(0, Number(points)) : 100;
     const parsedRadius = radiusMeters !== void 0 && Number(radiusMeters) > 0 ? Number(radiusMeters) : course.defaultGpsRadiusMeters || 35;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const newCp = {
       id: `cp-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
       courseId: course.id,
@@ -80694,9 +80718,11 @@ app.post(
       latitude,
       longitude,
       radiusMeters: parsedRadius,
-      points: parsedPoints
+      points: parsedPoints,
+      updatedAt: nowIso
     };
     course.checkpoints.push(newCp);
+    course.updatedAt = nowIso;
     saveDb(db);
     void pushDbToCloudNow(db);
     res.status(201).json({ checkpoint: newCp, course });
@@ -80748,6 +80774,9 @@ app.put(
     if (points !== void 0 && !Number.isNaN(Number(points))) {
       cp.points = Math.max(0, Number(points));
     }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    cp.updatedAt = nowIso;
+    course.updatedAt = nowIso;
     db.sessions.filter((s) => s.courseId === course.id).forEach((s) => recalculateSessionScore(s, course));
     saveDb(db);
     void pushDbToCloudNow(db);
@@ -80770,7 +80799,15 @@ app.delete(
       });
       return;
     }
-    course.checkpoints = course.checkpoints.filter((cp) => cp.id !== req.params.checkpointId).map((cp, index) => ({ ...cp, orderIndex: index + 1 }));
+    const deletedCpId = req.params.checkpointId;
+    if (!Array.isArray(course.deletedCheckpointIds)) {
+      course.deletedCheckpointIds = [];
+    }
+    if (!course.deletedCheckpointIds.includes(deletedCpId)) {
+      course.deletedCheckpointIds.push(deletedCpId);
+    }
+    course.checkpoints = course.checkpoints.filter((cp) => cp.id !== deletedCpId).map((cp, index) => ({ ...cp, orderIndex: index + 1 }));
+    course.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     db.sessions.filter((s) => s.courseId === course.id).forEach((s) => recalculateSessionScore(s, course));
     saveDb(db);
     void pushDbToCloudNow(db);

@@ -63,6 +63,7 @@ import {
   clearPersistedParticipantState,
   loadOrganizerVaultBackup,
   mergeAndSaveOrganizerVaultBackup,
+  mergeCourseSmart,
   mergeSessionMonotonically,
   removeCourseFromOrganizerBackup,
   removeOrganizerFromVaultBackup,
@@ -802,24 +803,7 @@ export default function OrganizerDashboard({
             if (!existing) {
               courseMap.set(c.id, c);
             } else {
-              const cpMap = new Map<string, Checkpoint>();
-              for (const cp of existing.checkpoints || []) {
-                if (cp && cp.id) cpMap.set(cp.id, cp);
-              }
-              for (const cp of c.checkpoints || []) {
-                if (cp && cp.id) {
-                  const prevCp = cpMap.get(cp.id);
-                  cpMap.set(cp.id, { ...(prevCp || {}), ...cp });
-                }
-              }
-              const mergedCps = Array.from(cpMap.values()).sort(
-                (a, b) => a.orderIndex - b.orderIndex
-              );
-              courseMap.set(c.id, {
-                ...existing,
-                ...c,
-                checkpoints: mergedCps,
-              });
+              courseMap.set(c.id, mergeCourseSmart(existing, c));
             }
           }
         }
@@ -1188,12 +1172,19 @@ export default function OrganizerDashboard({
         setCpLng(String(roundedLng));
       }
 
-      // Optimistic UI update agar posisi tidak melompat balik saat dilepas
+      // Optimistic UI update dengan timestamp terbaru agar posisi tidak melompat balik saat dilepas
+      const nowIso = new Date().toISOString();
       const optimisticCourse: Course = {
         ...selectedCourse,
+        updatedAt: nowIso,
         checkpoints: selectedCourse.checkpoints.map((item) =>
           item.id === cp.id
-            ? { ...item, latitude: roundedLat, longitude: roundedLng }
+            ? {
+                ...item,
+                latitude: roundedLat,
+                longitude: roundedLng,
+                updatedAt: nowIso,
+              }
             : item
         ),
       };
@@ -1608,7 +1599,28 @@ export default function OrganizerDashboard({
         : Math.max(5, Number(cpRadiusInput) || 35);
 
     try {
-      if (editingCheckpointId) {
+        if (editingCheckpointId) {
+        const nowIso = new Date().toISOString();
+        const optimisticEditedCourse: Course = {
+          ...selectedCourse,
+          updatedAt: nowIso,
+          checkpoints: selectedCourse.checkpoints.map((item) =>
+            item.id === editingCheckpointId
+              ? {
+                  ...item,
+                  code: cpCode.trim().toUpperCase(),
+                  name: cpName.trim(),
+                  points: parsedPoints,
+                  latitude: parsedLat,
+                  longitude: parsedLng,
+                  radiusMeters: parsedRadius,
+                  updatedAt: nowIso,
+                }
+              : item
+          ),
+        };
+        applyUpdatedCourseLocally(optimisticEditedCourse);
+
         const res = await fetch(
           `/api/organizer/courses/${selectedCourse.id}/checkpoints/${editingCheckpointId}`,
           {
@@ -2419,42 +2431,33 @@ export default function OrganizerDashboard({
           )}
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {selectedCourse && (
-              <button
-                type="button"
-                onClick={() => setShareSpectatorCourse(selectedCourse)}
-                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-xs font-semibold transition shrink-0 cursor-pointer"
-                title="Bagikan Tautan & QR Code Live Leaderboard Penonton"
-              >
-                <Radio className="w-3.5 h-3.5 text-sky-400 animate-pulse" />
-                <span>Link Penonton</span>
-              </button>
-            )}
             <button
               onClick={fetchDashboard}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition shrink-0"
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition shrink-0 cursor-pointer"
               title="Muat Ulang Data"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setChangePassError(null);
-                setChangePassCurrent('');
-                setChangePassNew('');
-                setChangePassConfirm('');
-                setIsChangePasswordOpen(true);
-              }}
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 text-xs font-semibold transition shrink-0 cursor-pointer"
-              title="Ganti Password Akun Anda"
-            >
-              <KeyRound className="w-3.5 h-3.5 text-purple-400" />
-              <span className="hidden sm:inline">Ganti Password</span>
-            </button>
+            {!isSuperAdminUser && (
+              <button
+                type="button"
+                onClick={() => {
+                  setChangePassError(null);
+                  setChangePassCurrent('');
+                  setChangePassNew('');
+                  setChangePassConfirm('');
+                  setIsChangePasswordOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 text-xs font-semibold transition shrink-0 cursor-pointer"
+                title="Ganti Password Akun Anda"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-purple-400" />
+                <span className="hidden sm:inline">Ganti Password</span>
+              </button>
+            )}
             <button
               onClick={handleLogout}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition shrink-0"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition shrink-0 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span>Keluar</span>
@@ -2703,28 +2706,12 @@ export default function OrganizerDashboard({
                   </h2>
                 </div>
                 {selectedCourse && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => setBulkPrintCourse(selectedCourse)}
-                      className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition shadow"
-                    >
-                      <Printer className="w-3.5 h-3.5" />
-                      Print QR Code Massal
-                    </button>
-                    <button
-                      onClick={() => setInfoSheetCourse(selectedCourse)}
-                      className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold transition shadow"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      Lembar Info Course
-                    </button>
-                    <button
-                      onClick={() => setActiveTab('COURSES')}
-                      className="text-xs px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
-                    >
-                      Kelola Peta &amp; Course →
-                    </button>
-                  </div>
+                  <button
+                    onClick={() => setActiveTab('COURSES')}
+                    className="text-xs px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-semibold transition cursor-pointer"
+                  >
+                    Kelola Peta &amp; Course →
+                  </button>
                 )}
               </div>
 
@@ -3566,67 +3553,17 @@ export default function OrganizerDashboard({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShareSpectatorCourse(c);
-                            }}
-                            className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 transition cursor-pointer"
-                            title="Bagikan Link & QR Live Leaderboard Penonton"
-                          >
-                            <Radio className="w-3.5 h-3.5 text-sky-400" />
-                          </button>
-                          {!isSuperAdminReadOnly && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedCourseId(c.id);
-                                  handleStartEditCourse(c);
-                                }}
-                                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 transition"
-                                title="Edit Course Ini"
-                              >
-                                <Edit3 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setConfirmDeleteCourse(c);
-                                }}
-                                className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition"
-                                title="Hapus Course Ini"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isSelected ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-xs shadow-sm">
+                              <Check className="w-3.5 h-3.5" />
+                              Sedang Aktif
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 text-slate-300 border border-slate-700 font-medium text-xs">
+                              Pilih Course
+                            </span>
                           )}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setBulkPrintCourse(c);
-                            }}
-                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                            Print QR Massal
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setInfoSheetCourse(c);
-                            }}
-                            className="px-3 py-1.5 rounded-lg bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                            Lembar Info Course
-                          </button>
                         </div>
                       </div>
                     );
@@ -3681,16 +3618,6 @@ export default function OrganizerDashboard({
 
                 {/* Action Buttons: Edit Course, Delete Course, Bulk Print QR, and Course Info Sheet */}
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShareSpectatorCourse(effectiveSelectedCourse)}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-semibold text-xs transition cursor-pointer"
-                    title="Bagikan Tautan & QR Code Live Leaderboard untuk penonton"
-                  >
-                    <Radio className="w-3.5 h-3.5 text-sky-400 animate-pulse" />
-                    Bagikan Link Penonton
-                  </button>
-
                   {!isSuperAdminReadOnly && (
                     <>
                       <button
