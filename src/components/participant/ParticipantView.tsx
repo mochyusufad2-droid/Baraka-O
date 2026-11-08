@@ -11,6 +11,7 @@ import {
   Compass,
   Download,
   Flag,
+  KeyRound,
   LogOut,
   MapPin,
   Play,
@@ -20,7 +21,7 @@ import {
   Volume2,
   Wifi,
   WifiOff,
-  Wrench,
+  X,
   XCircle,
   Zap,
 } from 'lucide-react';
@@ -143,26 +144,6 @@ function triggerRunnerFeedback(type: 'success' | 'error') {
   }
 }
 
-// Data kode QR contoh untuk mempermudah pengujian simulasi di laptop
-const DEMO_QR_CODES = {
-  SETUP_DEFAULT: 'BARAKA:SETUP:crs-sprint-01',
-  START_SPRINT: 'BARAKA:START:crs-sprint-01',
-  FINISH_SPRINT: 'BARAKA:FINISH:crs-sprint-01',
-  CP_SPRINT: {
-    CP1: 'BARAKA:CP:crs-sprint-01:CP1:7F9A',
-    CP2: 'BARAKA:CP:crs-sprint-01:CP2:3C8B',
-    CP3: 'BARAKA:CP:crs-sprint-01:CP3:9D1E',
-    CP4: 'BARAKA:CP:crs-sprint-01:CP4:5A4F',
-  } as Record<string, string>,
-  START_AMAZING: 'BARAKA:START:crs-amazing-02',
-  FINISH_AMAZING: 'BARAKA:FINISH:crs-amazing-02',
-  CP_AMAZING: {
-    AR1: 'BARAKA:CP:crs-amazing-02:AR1:11AA',
-    AR2: 'BARAKA:CP:crs-amazing-02:AR2:22BB',
-    AR3: 'BARAKA:CP:crs-amazing-02:AR3:33CC',
-  } as Record<string, string>,
-};
-
 function SyncBadge({ status }: { status: SyncStatus }) {
   switch (status) {
     case SyncStatus.SAVED_LOCAL:
@@ -237,12 +218,15 @@ export default function ParticipantView({
   const [loginIdentity, setLoginIdentity] = useState('');
   const [loginPin, setLoginPin] = useState('');
 
-  // Input QR & Checkpoint (untuk mode manual / darurat)
-  const [setupQrInput, setSetupQrInput] = useState(DEMO_QR_CODES.SETUP_DEFAULT);
-  const [startQrInput, setStartQrInput] = useState('');
-  const [finishQrInput, setFinishQrInput] = useState('');
-  const [selectedCheckpointId, setSelectedCheckpointId] = useState<string>('');
-  const [checkpointQrInput, setCheckpointQrInput] = useState('');
+  // Ganti Password Tim (Self-service Peserta)
+  const [isChangeParticipantPasswordOpen, setIsChangeParticipantPasswordOpen] = useState(false);
+  const [partPassCurrent, setPartPassCurrent] = useState('');
+  const [partPassNew, setPartPassNew] = useState('');
+  const [partPassConfirm, setPartPassConfirm] = useState('');
+  const [partPassLoading, setPartPassLoading] = useState(false);
+  const [partPassError, setPartPassError] = useState<string | null>(null);
+
+  // Koordinat GPS peserta dari perangkat fisik
   const [gpsCoords, setGpsCoords] = useState<{
     latitude: number;
     longitude: number;
@@ -250,8 +234,7 @@ export default function ParticipantView({
   } | null>(null);
   const [isReadingGps, setIsReadingGps] = useState(false);
 
-  // Panel lipat untuk mode manual / simulasi agar layar pelari bersih tanpa perlu scroll
-  const [showManualTools, setShowManualTools] = useState(false);
+  // Panel riwayat antrean laporan lokal
   const [showHistoryLogs, setShowHistoryLogs] = useState(false);
   // Tab tampilan peserta di dalam Course: 'COURSE' (Daftar Pos) | 'MAP' (Peta Lintasan Peserta jika diizinkan Organizer)
   const [runnerViewTab, setRunnerViewTab] = useState<'COURSE' | 'MAP'>('COURSE');
@@ -365,16 +348,7 @@ export default function ParticipantView({
     }
   }, [activeSession, participant]);
 
-  // Pilih checkpoint pertama secara default ketika course dimuat
-  useEffect(() => {
-    if (
-      activeCourse &&
-      activeCourse.checkpoints.length > 0 &&
-      !selectedCheckpointId
-    ) {
-      setSelectedCheckpointId(activeCourse.checkpoints[0].id);
-    }
-  }, [activeCourse, selectedCheckpointId]);
+
 
   // Jika Organizer menonaktifkan tampilan peta untuk peserta, kembalikan tab ke 'COURSE'
   useEffect(() => {
@@ -1388,7 +1362,6 @@ export default function ParticipantView({
       const trimmed = qrValue.trim();
       if (!trimmed) return;
 
-      setSetupQrInput(trimmed);
       setFeedbackBanner(null);
 
       try {
@@ -1419,9 +1392,6 @@ export default function ParticipantView({
         setActiveCourse(data.course);
         setActiveSession(data.session);
         setConfirmingLeaveCourse(false);
-        if (data.course.checkpoints.length > 0) {
-          setSelectedCheckpointId(data.course.checkpoints[0].id);
-        }
         const attemptNum = data.session?.attemptNumber || 1;
         const attemptLabel =
           attemptNum > 1
@@ -1597,13 +1567,6 @@ export default function ParticipantView({
           );
         }
 
-        // Fallback ke pos yang sedang dipilih jika format kustom
-        if (!matchedCp && selectedCheckpointId) {
-          matchedCp = activeCourse.checkpoints.find(
-            (c) => c.id === selectedCheckpointId
-          );
-        }
-
         if (!matchedCp) {
           triggerRunnerFeedback('error');
           const msg = `QR Code (${scanned}) tidak cocok dengan pos mana pun pada Course ini.`;
@@ -1655,19 +1618,6 @@ export default function ParticipantView({
             ? `${matchedCp.code} (${matchedCp.name})`
             : matchedCp.code,
         });
-
-        // Otomatis arahkan pilihan pos berikutnya
-        const currentIndex = activeCourse.checkpoints.findIndex(
-          (c) => c.id === matchedCp!.id
-        );
-        if (
-          currentIndex >= 0 &&
-          currentIndex + 1 < activeCourse.checkpoints.length
-        ) {
-          setSelectedCheckpointId(
-            activeCourse.checkpoints[currentIndex + 1].id
-          );
-        }
       } finally {
         window.setTimeout(() => {
           isProcessingScanRef.current = false;
@@ -1683,7 +1633,6 @@ export default function ParticipantView({
       getQuickGpsCoordinates,
       gpsCoords,
       recordAndQueueReport,
-      selectedCheckpointId,
       sessionCanRecordCheckpoints,
       showRunnerToast,
       validateCheckpointBeforeRecord,
@@ -1877,6 +1826,14 @@ export default function ParticipantView({
       return;
     }
 
+    if (regPin.trim().length < 6) {
+      setFeedbackBanner({
+        type: 'error',
+        text: 'Password Tim minimal 6 karakter (huruf, angka, tanda baca, simbol, atau kombinasinya).',
+      });
+      return;
+    }
+
     try {
       const res = await fetch('/api/participant/register', {
         method: 'POST',
@@ -1887,7 +1844,8 @@ export default function ParticipantView({
           gender: regGender,
           ageGroup: regAgeGroup,
           phone: regPhone.trim(),
-          pin: regPin,
+          password: regPin.trim(),
+          pin: regPin.trim(),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1936,7 +1894,8 @@ export default function ParticipantView({
         body: JSON.stringify({
           teamName: loginIdentity.trim(),
           bibOrName: loginIdentity.trim(),
-          pin: loginPin,
+          password: loginPin.trim(),
+          pin: loginPin.trim(),
           vaultParticipants: localVault.participants,
         }),
       });
@@ -1981,6 +1940,58 @@ export default function ParticipantView({
         type: 'error',
         text: 'Gagal terhubung ke server untuk login.',
       });
+    }
+  }
+
+  // Peserta: Ganti Password Tim Sendiri
+  async function handleChangeParticipantPassword() {
+    setPartPassError(null);
+    if (!partPassCurrent.trim()) {
+      setPartPassError('Password saat ini wajib diisi.');
+      return;
+    }
+    if (partPassNew.trim().length < 6) {
+      setPartPassError('Password baru minimal 6 karakter (bebas kombinasi huruf, angka, atau simbol).');
+      return;
+    }
+    if (partPassNew.trim() !== partPassConfirm.trim()) {
+      setPartPassError('Konfirmasi Password baru tidak sesuai.');
+      return;
+    }
+    setPartPassLoading(true);
+    try {
+      const res = await fetch('/api/participant/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPassword: partPassCurrent.trim(),
+          newPassword: partPassNew.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPartPassError(data.error || 'Gagal mengubah password tim.');
+        setPartPassLoading(false);
+        return;
+      }
+      setIsChangeParticipantPasswordOpen(false);
+      setPartPassCurrent('');
+      setPartPassNew('');
+      setPartPassConfirm('');
+      if (data.participant) {
+        setParticipant(data.participant);
+      }
+      setFeedbackBanner({
+        type: 'success',
+        text: 'Password tim berhasil diperbarui!',
+      });
+    } catch {
+      setPartPassError('Kesalahan koneksi saat mengubah password tim.');
+    } finally {
+      setPartPassLoading(false);
     }
   }
 
@@ -2041,11 +2052,6 @@ export default function ParticipantView({
     setActiveCourse(null);
     setActiveSession(null);
     setLocalReports([]);
-    setSelectedCheckpointId('');
-    setSetupQrInput('');
-    setStartQrInput('');
-    setCheckpointQrInput('');
-    setFinishQrInput('');
     setConfirmingLeaveCourse(false);
     savePersistedParticipantState({
       token,
@@ -2064,204 +2070,7 @@ export default function ParticipantView({
     void handleRestartFromBeginning();
   }
 
-  async function handleLoadCourse(e: React.FormEvent) {
-    e.preventDefault();
-    await executeLoadCourseByQr(setupQrInput);
-  }
-
-  async function handleStartSession(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = startQrInput.trim();
-    if (!trimmed) {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Silakan pindai atau masukkan Start QR Code terlebih dahulu.',
-      });
-      return;
-    }
-
-    if (checkAccidentalSetupQrScan(trimmed)) {
-      setStartQrInput('');
-      return;
-    }
-
-    if (activeCourse) {
-      const upperTrimmed = trimmed.toUpperCase();
-      const expectedStart = `BARAKA:START:${activeCourse.id}`.toUpperCase();
-      if (
-        upperTrimmed !== expectedStart &&
-        trimmed !== activeCourse.startQrCode
-      ) {
-        triggerRunnerFeedback('error');
-        setFeedbackBanner({
-          type: 'error',
-          text: `Kode Start QR tidak cocok dengan Course "${activeCourse.name}". Pastikan Anda memasukkan kode Start yang benar.`,
-        });
-        return;
-      }
-    }
-
-    await recordAndQueueReport({
-      checkpointId: 'START',
-      reportType: 'START',
-      validationUsed: 'QR',
-      qrPayloadScanned: trimmed,
-      displayLabel: 'START',
-    });
-    setStartQrInput('');
-  }
-
-  async function handleReportCheckpoint(e: React.FormEvent) {
-    e.preventDefault();
-    if (!activeCourse || !selectedCheckpointId) return;
-
-    const trimmedQr = checkpointQrInput.trim();
-
-    if (trimmedQr && checkAccidentalSetupQrScan(trimmedQr)) {
-      setCheckpointQrInput('');
-      return;
-    }
-
-    const method = activeCourse.validationMethod;
-    const needsQr =
-      method === ValidationMethod.QR_ONLY ||
-      method === ValidationMethod.QR_AND_GPS;
-    const needsGps =
-      method === ValidationMethod.GPS_AUTO ||
-      method === ValidationMethod.QR_AND_GPS;
-
-    if (needsQr && !trimmedQr) {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Course ini mewajibkan pemindaian QR Code Checkpoint.',
-      });
-      return;
-    }
-
-    let coordsToUse = gpsCoords;
-    if (needsGps && !coordsToUse) {
-      coordsToUse = await getQuickGpsCoordinates();
-    }
-
-    if (needsGps && !coordsToUse) {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Course ini membutuhkan koordinat GPS peserta. Tekan tombol "Ambil Posisi GPS" terlebih dahulu.',
-      });
-      return;
-    }
-
-    if (method === ValidationMethod.QR_OR_GPS && !trimmedQr && !coordsToUse) {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Silakan pindai QR Checkpoint atau ambil posisi GPS Anda.',
-      });
-      return;
-    }
-
-    const cpObj = activeCourse.checkpoints.find(
-      (c) => c.id === selectedCheckpointId
-    );
-    if (!cpObj) return;
-
-    const cpCheck = validateCheckpointBeforeRecord({
-      checkpoint: cpObj,
-      scannedQr: trimmedQr || undefined,
-      coords: coordsToUse,
-    });
-
-    if (!cpCheck.ok) {
-      triggerRunnerFeedback('error');
-      setFeedbackBanner({
-        type: cpCheck.severity,
-        text: cpCheck.message,
-      });
-      showRunnerToast(cpCheck.severity, cpCheck.title, cpCheck.message);
-      return;
-    }
-
-    const validationUsed: 'QR' | 'GPS' | 'QR_AND_GPS' =
-      trimmedQr && coordsToUse ? 'QR_AND_GPS' : coordsToUse ? 'GPS' : 'QR';
-
-    await recordAndQueueReport({
-      checkpointId: selectedCheckpointId,
-      reportType: 'CHECKPOINT',
-      validationUsed,
-      qrPayloadScanned: trimmedQr || undefined,
-      latitude: coordsToUse?.latitude,
-      longitude: coordsToUse?.longitude,
-      accuracyMeters: coordsToUse?.accuracy,
-      displayLabel: cpObj.name ? `${cpObj.code} (${cpObj.name})` : cpObj.code,
-    });
-
-    setCheckpointQrInput('');
-
-    const currentIndex = activeCourse.checkpoints.findIndex(
-      (c) => c.id === selectedCheckpointId
-    );
-    if (
-      currentIndex >= 0 &&
-      currentIndex + 1 < activeCourse.checkpoints.length
-    ) {
-      setSelectedCheckpointId(activeCourse.checkpoints[currentIndex + 1].id);
-    }
-  }
-
-  async function handleFinishSession(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = finishQrInput.trim();
-    if (!trimmed) {
-      setFeedbackBanner({
-        type: 'error',
-        text: 'Silakan pindai Finish QR Code untuk menyelesaikan kegiatan.',
-      });
-      return;
-    }
-
-    if (checkAccidentalSetupQrScan(trimmed)) {
-      setFinishQrInput('');
-      return;
-    }
-
-    const finishCheck = validateFinishBeforeRecord(trimmed);
-    if (!finishCheck.ok) {
-      triggerRunnerFeedback('error');
-      setFeedbackBanner({
-        type: finishCheck.severity,
-        text: finishCheck.message,
-      });
-      showRunnerToast(
-        finishCheck.severity,
-        finishCheck.title,
-        finishCheck.message
-      );
-      return;
-    }
-
-    await recordAndQueueReport({
-      checkpointId: 'FINISH',
-      reportType: 'FINISH',
-      validationUsed: 'QR',
-      qrPayloadScanned: trimmed,
-      displayLabel: 'FINISH',
-    });
-    setFinishQrInput('');
-  }
-
-  function handleReadDeviceGps(simulateMatchingCheckpoint?: Checkpoint) {
-    if (simulateMatchingCheckpoint) {
-      setGpsCoords({
-        latitude: simulateMatchingCheckpoint.latitude,
-        longitude: simulateMatchingCheckpoint.longitude,
-        accuracy: 8,
-      });
-      setFeedbackBanner({
-        type: 'success',
-        text: `Koordinat GPS tepat di ${simulateMatchingCheckpoint.code} berhasil dimuat (±8m).`,
-      });
-      return;
-    }
-
+  function handleReadDeviceGps() {
     if (!navigator.geolocation) {
       setFeedbackBanner({
         type: 'error',
@@ -2284,7 +2093,7 @@ export default function ParticipantView({
         setIsReadingGps(false);
         setFeedbackBanner({
           type: 'warning',
-          text: `Gagal membaca GPS perangkat (${err.message}). Anda dapat menggunakan tombol "Simulasi GPS di Pos" untuk pengujian.`,
+          text: `Gagal membaca GPS perangkat (${err.message}). Pastikan izin lokasi (GPS) browser telah diaktifkan dan berada di area terbuka.`,
         });
       },
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
@@ -2385,10 +2194,6 @@ export default function ParticipantView({
       r.syncStatus === SyncStatus.PENDING_SYNC ||
       r.syncStatus === SyncStatus.SENDING
   ).length;
-
-  const selectedCheckpoint = activeCourse?.checkpoints.find(
-    (c) => c.id === selectedCheckpointId
-  );
 
   // Hitung jumlah pos yang sudah tercatat (baik di perangkat lokal maupun server)
   const completedCheckpointCount = useMemo(() => {
@@ -2559,85 +2364,13 @@ export default function ParticipantView({
             </div>
 
             {/* Petunjuk Mode Scan Singkat di Bagian Bawah Layar Kamera */}
-            <div className=" absolute bottom-6 left-4 right-4 z-20 flex flex-col items-center gap-2 text-center">
-              <div className="rounded-full bg-black/70 px-4 py-1.5 text-xs font-semibold text-slate-200 border border-white/15 backdrop-blur-sm">
+            <div className="absolute bottom-6 left-4 right-4 z-20 flex flex-col items-center gap-2 text-center pointer-events-none">
+              <div className="rounded-full bg-black/70 px-4 py-1.5 text-xs font-semibold text-slate-200 border border-white/15 backdrop-blur-sm shadow-lg">
                 {!activeCourse || cameraActiveFor === 'SETUP'
                   ? 'Arahkan kotak ke Setup QR Code dari Panitia'
                   : !sessionCanRecordCheckpoints
                   ? 'Arahkan kotak ke START QR Code untuk mulai waktu'
                   : 'Arahkan kotak ke QR Pos Checkpoint atau FINISH QR'}
-              </div>
-
-              {/* Tombol Cepat Simulasi di dalam Kamera (berguna jika diuji lewat Laptop) */}
-              <div className="flex flex-wrap items-center justify-center gap-1.5 mt-1">
-                {!activeCourse || cameraActiveFor === 'SETUP' ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void handleQrCodeDetectedFromCamera(
-                        DEMO_QR_CODES.SETUP_DEFAULT
-                      )
-                    }
-                    className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-[11px] font-bold text-white shadow"
-                  >
-                    Simulasi Scan Setup QR
-                  </button>
-                ) : !sessionCanRecordCheckpoints ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void handleQrCodeDetectedFromCamera(
-                        activeCourse.id === 'crs-sprint-01'
-                          ? DEMO_QR_CODES.START_SPRINT
-                          : activeCourse.id === 'crs-amazing-02'
-                          ? DEMO_QR_CODES.START_AMAZING
-                          : `BARAKA:START:${activeCourse.id}`
-                      )
-                    }
-                    className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-[11px] font-bold text-white shadow"
-                  >
-                    Simulasi Scan Start QR
-                  </button>
-                ) : (
-                  <>
-                    {activeCourse.checkpoints.map((cp) => {
-                      const codeMap =
-                        activeCourse.id === 'crs-sprint-01'
-                          ? DEMO_QR_CODES.CP_SPRINT
-                          : DEMO_QR_CODES.CP_AMAZING;
-                      const secret =
-                        codeMap[cp.code] ||
-                        `BARAKA:CP:${activeCourse.id}:${cp.code}`;
-                      return (
-                        <button
-                          key={cp.id}
-                          type="button"
-                          onClick={() =>
-                            void handleQrCodeDetectedFromCamera(secret)
-                          }
-                          className="rounded-lg bg-slate-900/90 border border-lime-400/50 px-2.5 py-1 text-[11px] font-bold text-lime-300"
-                        >
-                          Simulasi {cp.code}
-                        </button>
-                      );
-                    })}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void handleQrCodeDetectedFromCamera(
-                          activeCourse.id === 'crs-sprint-01'
-                            ? DEMO_QR_CODES.FINISH_SPRINT
-                            : activeCourse.id === 'crs-amazing-02'
-                            ? DEMO_QR_CODES.FINISH_AMAZING
-                            : `BARAKA:FINISH:${activeCourse.id}`
-                        )
-                      }
-                      className="rounded-lg bg-sky-600/90 px-2.5 py-1 text-[11px] font-bold text-white"
-                    >
-                      Simulasi Finish
-                    </button>
-                  </>
-                )}
               </div>
             </div>
           </div>
@@ -2947,22 +2680,25 @@ export default function ParticipantView({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Buat PIN Keamanan (Minimal 4 digit){' '}
+                  Buat Password Tim (Minimal 6 karakter){' '}
                   <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
                   required
-                  minLength={4}
+                  minLength={6}
                   value={regPin}
                   onChange={(e) => setRegPin(e.target.value)}
-                  placeholder="Contoh: 1234"
+                  placeholder="Contoh: baraka123"
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                 />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Boleh gabungan huruf, angka, tanda baca, simbol (min. 6 karakter). Boleh sama dengan tim lain.
+                </p>
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition"
+                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition cursor-pointer"
               >
                 Daftar &amp; Lanjut Scan Setup QR
               </button>
@@ -2971,7 +2707,7 @@ export default function ParticipantView({
             <form onSubmit={handleLogin} className="space-y-3">
               <div className="rounded-lg bg-slate-950/90 p-3 text-xs text-slate-300 border border-slate-800">
                 Masuk menggunakan <strong className="text-emerald-400">Nama Tim</strong> dan{' '}
-                <strong className="text-emerald-400">PIN</strong> Anda. Jika Anda peserta individu, masukkan nama Anda pada kolom Nama Tim.
+                <strong className="text-emerald-400">Password</strong> Anda. Jika Anda peserta individu, masukkan nama Anda pada kolom Nama Tim.
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
@@ -2988,12 +2724,13 @@ export default function ParticipantView({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  PIN Keamanan <span className="text-rose-400">*</span>
+                  Password Tim <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
                   required
-                  placeholder="Masukkan PIN"
+                  minLength={6}
+                  placeholder="Masukkan Password"
                   value={loginPin}
                   onChange={(e) => setLoginPin(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
@@ -3001,7 +2738,7 @@ export default function ParticipantView({
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition"
+                className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition cursor-pointer"
               >
                 Masuk Peserta
               </button>
@@ -3011,7 +2748,7 @@ export default function ParticipantView({
       ) : (
         <>
           {/* HEADER PROFIL PESERTA AKTIF */}
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5">
             <div className="flex items-center gap-3">
               <div className="flex h-9 px-2.5 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-bold uppercase">
                 TIM
@@ -3026,13 +2763,30 @@ export default function ParticipantView({
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 shrink-0"
-            >
-              <LogOut className="h-3.5 w-3.5" /> Keluar
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsChangeParticipantPasswordOpen(true);
+                  setPartPassError(null);
+                  setPartPassCurrent('');
+                  setPartPassNew('');
+                  setPartPassConfirm('');
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition cursor-pointer shrink-0"
+                title="Ganti Password Tim"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-amber-400" />
+                <span>Ganti Password</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 shrink-0 cursor-pointer"
+              >
+                <LogOut className="h-3.5 w-3.5" /> Keluar
+              </button>
+            </div>
           </div>
 
           {/* ==================================================================
@@ -3068,30 +2822,6 @@ export default function ParticipantView({
                 </span>
               </button>
 
-              {/* OPSI INPUT MANUAL SETUP QR JIKA DIBUTUHKAN */}
-              <form
-                onSubmit={handleLoadCourse}
-                className="pt-2 border-t border-slate-800 space-y-2"
-              >
-                <label className="block text-[11px] text-slate-400">
-                  Atau muat dengan kode Setup QR (untuk uji coba di laptop):
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={setupQrInput}
-                    onChange={(e) => setSetupQrInput(e.target.value)}
-                    placeholder="BARAKA:SETUP:..."
-                    className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:border-emerald-500 focus:outline-none"
-                  />
-                  <button
-                    type="submit"
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-3.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-slate-700"
-                  >
-                    <QrCode className="h-4 w-4" /> Muat
-                  </button>
-                </div>
-              </form>
             </div>
           ) : (
             /* ==================================================================
@@ -3450,225 +3180,7 @@ export default function ParticipantView({
                 </div>
               )}
 
-              {/* ==============================================================
-                  MENU LIPAT: MODE DARURAT / INPUT MANUAL & SIMULASI
-                  (Disembunyikan secara default agar layar pelari pendek & bersih)
-                 ============================================================== */}
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setShowManualTools((prev) => !prev)}
-                  className="w-full flex items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
-                >
-                  <span className="flex items-center gap-2">
-                    <Wrench className="h-3.5 w-3.5 text-slate-400" />
-                    Mode Bantuan / Input Kode Manual &amp; Simulasi
-                  </span>
-                  {showManualTools ? (
-                    <ChevronUp className="h-4 w-4" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4" />
-                  )}
-                </button>
 
-                {showManualTools && (
-                  <div className="border-t border-slate-800 p-4 space-y-5 bg-slate-950/50">
-                    {/* Input Manual Start QR */}
-                    {!sessionCanRecordCheckpoints && (
-                      <form onSubmit={handleStartSession} className="space-y-2">
-                        <label className="block text-xs font-bold text-emerald-400">
-                          Input Manual Start QR:
-                        </label>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={startQrInput}
-                            onChange={(e) => setStartQrInput(e.target.value)}
-                            placeholder="BARAKA:START:..."
-                            className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                          />
-                          <button
-                            type="submit"
-                            className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white"
-                          >
-                            Mulai
-                          </button>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setStartQrInput(
-                              activeCourse.id === 'crs-sprint-01'
-                                ? DEMO_QR_CODES.START_SPRINT
-                                : activeCourse.id === 'crs-amazing-02'
-                                ? DEMO_QR_CODES.START_AMAZING
-                                : `BARAKA:START:${activeCourse.id}`
-                            )
-                          }
-                          className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
-                        >
-                          Isi Contoh Start QR
-                        </button>
-                      </form>
-                    )}
-
-                    {/* Input Manual Checkpoint */}
-                    {sessionCanRecordCheckpoints &&
-                      !sessionMarkedFinishedLocallyOrServer && (
-                        <form
-                          onSubmit={handleReportCheckpoint}
-                          className="space-y-3"
-                        >
-                          <div className="text-xs font-bold text-emerald-400">
-                            Input Manual Pos Checkpoint:
-                          </div>
-                          <div>
-                            <select
-                              value={selectedCheckpointId}
-                              onChange={(e) =>
-                                setSelectedCheckpointId(e.target.value)
-                              }
-                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
-                            >
-                              {activeCourse.checkpoints.map((cp) => (
-                                <option key={cp.id} value={cp.id}>
-                                  Pos #{cp.orderIndex} — {cp.code}: {cp.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          {activeCourse.validationMethod !==
-                            ValidationMethod.GPS_AUTO && (
-                            <div className="space-y-1.5">
-                              <div className="flex gap-2">
-                                <input
-                                  type="text"
-                                  value={checkpointQrInput}
-                                  onChange={(e) =>
-                                    setCheckpointQrInput(e.target.value)
-                                  }
-                                  placeholder={`Kode QR ${
-                                    selectedCheckpoint?.code || ''
-                                  }...`}
-                                  className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                                />
-                                <button
-                                  type="submit"
-                                  className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white"
-                                >
-                                  Simpan Pos
-                                </button>
-                              </div>
-                              {selectedCheckpoint && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const codeMap =
-                                      activeCourse.id === 'crs-sprint-01'
-                                        ? DEMO_QR_CODES.CP_SPRINT
-                                        : DEMO_QR_CODES.CP_AMAZING;
-                                    const demoSecret =
-                                      codeMap[selectedCheckpoint.code] ||
-                                      `BARAKA:CP:${activeCourse.id}:${selectedCheckpoint.code}`;
-                                    setCheckpointQrInput(demoSecret);
-                                  }}
-                                  className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
-                                >
-                                  Isi Contoh QR {selectedCheckpoint.code}
-                                </button>
-                              )}
-                            </div>
-                          )}
-
-                          {activeCourse.validationMethod !==
-                            ValidationMethod.QR_ONLY && (
-                            <div className="rounded-lg border border-slate-800 bg-slate-900 p-2.5 space-y-2">
-                              <div className="flex items-center justify-between text-[11px] text-slate-300">
-                                <span className="flex items-center gap-1">
-                                  <MapPin className="h-3.5 w-3.5 text-emerald-400" />
-                                  GPS (Radius: {selectedCheckpoint?.radiusMeters}
-                                  m)
-                                </span>
-                                {gpsCoords && (
-                                  <span className="font-mono text-emerald-400">
-                                    {gpsCoords.latitude.toFixed(4)},{' '}
-                                    {gpsCoords.longitude.toFixed(4)}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex flex-wrap gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleReadDeviceGps()}
-                                  disabled={isReadingGps}
-                                  className="inline-flex items-center gap-1 rounded bg-slate-800 px-2.5 py-1 text-[11px] text-white"
-                                >
-                                  <Compass className="h-3 w-3" />
-                                  {isReadingGps ? 'Membaca...' : 'Ambil GPS HP'}
-                                </button>
-                                {selectedCheckpoint && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleReadDeviceGps(selectedCheckpoint)
-                                    }
-                                    className="rounded border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 text-[11px] text-emerald-300"
-                                  >
-                                    Simulasi GPS di {selectedCheckpoint.code}
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </form>
-                      )}
-
-                    {/* Input Manual Finish QR */}
-                    {sessionCanRecordCheckpoints &&
-                      !sessionMarkedFinishedLocallyOrServer && (
-                        <form
-                          onSubmit={handleFinishSession}
-                          className="space-y-2 pt-3 border-t border-slate-800"
-                        >
-                          <label className="block text-xs font-bold text-sky-400">
-                            Input Manual Finish QR:
-                          </label>
-                          <div className="flex gap-2">
-                            <input
-                              type="text"
-                              value={finishQrInput}
-                              onChange={(e) => setFinishQrInput(e.target.value)}
-                              placeholder="BARAKA:FINISH:..."
-                              className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white"
-                            />
-                            <button
-                              type="submit"
-                              className="rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-bold text-white"
-                            >
-                              Finish
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setFinishQrInput(
-                                activeCourse.id === 'crs-sprint-01'
-                                  ? DEMO_QR_CODES.FINISH_SPRINT
-                                  : activeCourse.id === 'crs-amazing-02'
-                                  ? DEMO_QR_CODES.FINISH_AMAZING
-                                  : `BARAKA:FINISH:${activeCourse.id}`
-                              )
-                            }
-                            className="rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300"
-                          >
-                            Isi Contoh Finish QR
-                          </button>
-                        </form>
-                      )}
-                  </div>
-                )}
-              </div>
 
               {/* ==============================================================
                   MENU LIPAT: RIWAYAT ANTREAN LAPORAN PERANGKAT (INDEXEDDB)
@@ -3784,6 +3296,131 @@ export default function ParticipantView({
             </>
           )}
         </>
+      )}
+
+      {/* Modal Ganti Password Tim Peserta */}
+      {isChangeParticipantPasswordOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Ganti Password Tim</h3>
+                  <p className="text-xs text-slate-400">
+                    Tim: {participant?.teamName}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsChangeParticipantPasswordOpen(false);
+                  setPartPassError(null);
+                  setPartPassCurrent('');
+                  setPartPassNew('');
+                  setPartPassConfirm('');
+                }}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleChangeParticipantPassword();
+              }}
+              className="space-y-3.5"
+            >
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Password Tim Saat Ini <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={partPassCurrent}
+                  onChange={(e) => setPartPassCurrent(e.target.value)}
+                  placeholder="Masukkan password saat ini"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Password Tim Baru (Min. 6 Karakter) <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={partPassNew}
+                  onChange={(e) => setPartPassNew(e.target.value)}
+                  placeholder="Minimal 6 karakter (bebas kombinasi)"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-emerald-500"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Boleh huruf, angka, tanda baca, simbol, atau gabungan. Boleh sama dengan tim lain.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Konfirmasi Password Tim Baru <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={partPassConfirm}
+                  onChange={(e) => setPartPassConfirm(e.target.value)}
+                  placeholder="Ulangi password baru"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              {partPassError && (
+                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                  {partPassError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsChangeParticipantPasswordOpen(false);
+                    setPartPassError(null);
+                    setPartPassCurrent('');
+                    setPartPassNew('');
+                    setPartPassConfirm('');
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={partPassLoading}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md shadow-emerald-500/20 disabled:opacity-50"
+                >
+                  {partPassLoading ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : (
+                    'Simpan Password Baru'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

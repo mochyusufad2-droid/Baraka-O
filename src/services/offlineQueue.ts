@@ -853,9 +853,8 @@ export async function syncPendingReportsWithServer(params: {
       remainingQueueCount: unsynced.length,
       updatedSession: null,
       allSessionReports: updatedList,
-      errorMessage: isOfflineSimulated
-        ? 'Mode Simulasi Offline aktif. Laporan disimpan aman di antrean perangkat.'
-        : 'Tidak ada koneksi internet. Laporan disimpan aman di antrean perangkat.',
+      errorMessage:
+        'Tidak ada koneksi internet. Laporan disimpan aman di antrean perangkat.',
     };
   }
 

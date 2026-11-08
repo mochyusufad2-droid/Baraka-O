@@ -69,6 +69,8 @@ export interface OrganizerPublic {
   isSuperAdmin: boolean;
   isActive: boolean;
   createdAt: string;
+  maxCourses?: number | null; // Jatah maksimal course (angka atau null/undefined = Unlimited)
+  expiresAt?: string | null;  // Masa aktif akun (ISO string atau null = Lifetime)
 }
 
 /**

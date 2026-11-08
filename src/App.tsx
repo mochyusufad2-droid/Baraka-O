@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useState, useEffect } from 'react';
-import { Compass, Shield, Smartphone, Radio } from 'lucide-react';
+import { Compass, Shield, Smartphone } from 'lucide-react';
 import OrganizerDashboard from './components/organizer/OrganizerDashboard';
 import ParticipantView from './components/participant/ParticipantView';
 import PublicLiveLeaderboard from './components/public/PublicLiveLeaderboard';
@@ -115,27 +115,13 @@ export default function App() {
             </div>
           </div>
 
-          {/* Indikator Peran Aktif khusus Organizer atau Link Cepat Nonton Live */}
-          {authenticatedRole === UserRole.ORGANIZER ? (
+          {/* Indikator Peran Aktif khusus Organizer */}
+          {authenticatedRole === UserRole.ORGANIZER && (
             <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
               <Shield className="h-3.5 w-3.5" />
               Dashboard Organizer
             </span>
-          ) : authenticatedRole === null ? (
-            <button
-              type="button"
-              onClick={() => {
-                const url = new URL(window.location.href);
-                url.searchParams.set('live', 'true');
-                window.history.pushState({}, '', url.toString());
-                setLiveInfo({ isLive: true, courseId: null });
-              }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 px-3 py-1 text-xs font-semibold text-sky-300 transition cursor-pointer"
-            >
-              <Radio className="h-3.5 w-3.5 text-sky-400 animate-pulse" />
-              Live Score Penonton
-            </button>
-          ) : null}
+          )}
         </div>
       </header>
 
@@ -147,11 +133,11 @@ export default function App() {
             <p className="mb-2 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">
               Pilih Akses Masuk Aplikasi
             </p>
-            <div className="grid grid-cols-2 gap-2 mb-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => setLoginRoleChoice(UserRole.PARTICIPANT)}
-                className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition ${
+                className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition cursor-pointer ${
                   loginRoleChoice === UserRole.PARTICIPANT
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/50'
                     : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
@@ -163,7 +149,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setLoginRoleChoice(UserRole.ORGANIZER)}
-                className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition ${
+                className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition cursor-pointer ${
                   loginRoleChoice === UserRole.ORGANIZER
                     ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-950/50'
                     : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
@@ -173,21 +159,6 @@ export default function App() {
                 Masuk Organizer
               </button>
             </div>
-
-            {/* Akses Cepat Live Score Penonton tanpa login */}
-            <button
-              type="button"
-              onClick={() => {
-                const url = new URL(window.location.href);
-                url.searchParams.set('live', 'true');
-                window.history.pushState({}, '', url.toString());
-                setLiveInfo({ isLive: true, courseId: null });
-              }}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 px-3 py-2 text-xs font-bold text-sky-300 transition cursor-pointer"
-            >
-              <Radio className="h-4 w-4 text-sky-400 animate-pulse" />
-              📺 Nonton Live Score (Penonton &amp; Publik Bebas Akses)
-            </button>
           </div>
         )}
 

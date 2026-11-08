@@ -30,6 +30,9 @@ import {
   Share2,
   KeyRound,
   ExternalLink,
+  Infinity as InfinityIcon,
+  Sliders,
+  Layers,
 } from 'lucide-react';
 import {
   Course,
@@ -53,6 +56,7 @@ import {
 } from './LiveMonitoringMap';
 import { SpectatorLiveLeaderboardModal } from './SpectatorLiveLeaderboardModal';
 import { ShareSpectatorLiveModal } from './ShareSpectatorLiveModal';
+import { EditOrganizerQuotaModal } from './EditOrganizerQuotaModal';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
@@ -104,6 +108,41 @@ function formatTimeAgo(isoString?: string): string {
   if (diffMin < 60) return `${diffMin} mnt lalu`;
   const diffHour = Math.floor(diffMin / 60);
   return `${diffHour} jam lalu`;
+}
+
+function formatExpirationStatus(expiresAt?: string | null): {
+  label: string;
+  isExpired: boolean;
+  colorClass: string;
+} {
+  if (!expiresAt) {
+    return {
+      label: 'Lifetime (Selamanya)',
+      isExpired: false,
+      colorClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    };
+  }
+  const expTime = new Date(expiresAt).getTime();
+  const diffDays = Math.ceil((expTime - Date.now()) / (1000 * 60 * 60 * 24));
+  if (diffDays <= 0) {
+    return {
+      label: 'Expired (Kedaluwarsa)',
+      isExpired: true,
+      colorClass: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+    };
+  }
+  if (diffDays <= 7) {
+    return {
+      label: `Sisa ${diffDays} hari`,
+      isExpired: false,
+      colorClass: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+    };
+  }
+  return {
+    label: `Sisa ${diffDays} hari (${new Date(expiresAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })})`,
+    isExpired: false,
+    colorClass: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+  };
 }
 
 const MONTH_NAMES_EN = [
@@ -313,6 +352,10 @@ export default function OrganizerDashboard({
   const [orgUsernameInput, setOrgUsernameInput] = useState('');
   const [orgOrganizationInput, setOrgOrganizationInput] = useState('');
   const [orgPinInput, setOrgPinInput] = useState('');
+  const [orgMaxCoursesInput, setOrgMaxCoursesInput] = useState<string>('3');
+  const [orgIsUnlimited, setOrgIsUnlimited] = useState<boolean>(false);
+  const [orgDurationMonths, setOrgDurationMonths] = useState<string>('3');
+  const [selectedEditOrg, setSelectedEditOrg] = useState<OrganizerPublic | null>(null);
   const [orgManageMsg, setOrgManageMsg] = useState<string | null>(null);
   const [resetPinOrgId, setResetPinOrgId] = useState<string | null>(null);
   const [resetPinValue, setResetPinValue] = useState<string>('');
@@ -321,12 +364,24 @@ export default function OrganizerDashboard({
   const [shareSpectatorCourse, setShareSpectatorCourse] = useState<Course | null>(null);
   const [copiedLiveCourseId, setCopiedLiveCourseId] = useState<string | null>(null);
 
-  // Superadmin Account Credential States (Ganti Username & PIN)
+  // Superadmin Account Credential States (Ganti Username & Password)
   const [superCurrentPin, setSuperCurrentPin] = useState<string>('');
   const [superNewUsername, setSuperNewUsername] = useState<string>('');
   const [superNewPin, setSuperNewPin] = useState<string>('');
   const [superCredLoading, setSuperCredLoading] = useState<boolean>(false);
   const [superCredMsg, setSuperCredMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Organizer Self-Service Change Password Modal States
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState<boolean>(false);
+  const [changePassCurrent, setChangePassCurrent] = useState<string>('');
+  const [changePassNew, setChangePassNew] = useState<string>('');
+  const [changePassConfirm, setChangePassConfirm] = useState<string>('');
+  const [changePassLoading, setChangePassLoading] = useState<boolean>(false);
+  const [changePassError, setChangePassError] = useState<string | null>(null);
+
+  // Participant Password Reset by Organizer / Superadmin
+  const [resetParticipantPasswordId, setResetParticipantPasswordId] = useState<string | null>(null);
+  const [resetParticipantPasswordValue, setResetParticipantPasswordValue] = useState<string>('');
 
   // Live timer tick for active sessions
   const [nowTick, setNowTick] = useState<number>(Date.now());
@@ -373,29 +428,36 @@ export default function OrganizerDashboard({
     if (!superCurrentPin.trim()) {
       setSuperCredMsg({
         type: 'error',
-        text: 'PIN Superadmin saat ini wajib diisi untuk verifikasi keamanan.',
+        text: 'Password Superadmin saat ini wajib diisi untuk verifikasi keamanan.',
       });
       return;
     }
     if (!superNewUsername.trim() && !superNewPin.trim()) {
       setSuperCredMsg({
         type: 'error',
-        text: 'Harap masukkan Username baru atau PIN baru yang ingin diubah.',
+        text: 'Harap masukkan Username baru atau Password baru yang ingin diubah.',
+      });
+      return;
+    }
+    if (superNewPin.trim() && superNewPin.trim().length < 6) {
+      setSuperCredMsg({
+        type: 'error',
+        text: 'Password baru minimal 6 karakter (huruf, angka, atau simbol).',
       });
       return;
     }
     setSuperCredLoading(true);
     try {
-      const res = await fetch('/api/organizer/change-pin', {
+      const res = await fetch('/api/organizer/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          currentPin: superCurrentPin.trim(),
+          currentPassword: superCurrentPin.trim(),
           newUsername: superNewUsername.trim() || undefined,
-          newPin: superNewPin.trim() || undefined,
+          newPassword: superNewPin.trim() || undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -415,7 +477,7 @@ export default function OrganizerDashboard({
       setSuperNewUsername('');
       setSuperNewPin('');
       await fetchDashboard();
-      showTemporarySuccess('Kredensial Superadmin (Username & PIN) berhasil diperbarui!');
+      showTemporarySuccess('Kredensial Superadmin (Username & Password) berhasil diperbarui!');
     } catch {
       setSuperCredMsg({
         type: 'error',
@@ -423,6 +485,88 @@ export default function OrganizerDashboard({
       });
     } finally {
       setSuperCredLoading(false);
+    }
+  };
+
+  // Organizer: Ganti Password Mandiri
+  const handleChangeOwnPassword = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setChangePassError(null);
+    if (!token) return;
+    if (!changePassCurrent.trim()) {
+      setChangePassError('Password saat ini wajib diisi.');
+      return;
+    }
+    if (changePassNew.trim().length < 6) {
+      setChangePassError('Password baru minimal 6 karakter (bebas kombinasi).');
+      return;
+    }
+    if (changePassNew.trim() !== changePassConfirm.trim()) {
+      setChangePassError('Konfirmasi Password baru tidak sesuai.');
+      return;
+    }
+    setChangePassLoading(true);
+    try {
+      const res = await fetch('/api/organizer/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPassword: changePassCurrent.trim(),
+          newPassword: changePassNew.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setChangePassError(data.error || 'Gagal mengubah password akun.');
+        setChangePassLoading(false);
+        return;
+      }
+      setIsChangePasswordOpen(false);
+      setChangePassCurrent('');
+      setChangePassNew('');
+      setChangePassConfirm('');
+      showTemporarySuccess('Password akun Anda berhasil diperbarui!');
+    } catch {
+      setChangePassError('Kesalahan jaringan saat mengubah password.');
+    } finally {
+      setChangePassLoading(false);
+    }
+  };
+
+  // Organizer / Superadmin: Reset Password Peserta
+  const handleSaveResetParticipantPassword = async (participantId: string) => {
+    if (!token || resetParticipantPasswordValue.trim().length < 6) {
+      setErrorMsg('Password baru peserta minimal 6 karakter.');
+      return;
+    }
+    try {
+      const res = await fetch(`/api/organizer/participants/${participantId}/password`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ newPassword: resetParticipantPasswordValue.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal mereset password peserta.');
+        return;
+      }
+      if (data.participantBackup) {
+        mergeAndSaveOrganizerVaultBackup({
+          participants: [data.participantBackup],
+        });
+      }
+      setResetParticipantPasswordId(null);
+      setResetParticipantPasswordValue('');
+      showTemporarySuccess(data.message || 'Password peserta berhasil diperbarui.');
+      await fetchDashboard();
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat mereset password peserta.');
     }
   };
 
@@ -450,6 +594,7 @@ export default function OrganizerDashboard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: usernameInput.trim() || undefined,
+          password: pinInput,
           pin: pinInput,
           vaultBackup: localVault,
         }),
@@ -457,7 +602,7 @@ export default function OrganizerDashboard({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setLoginError(
-          data.error || `PIN Organizer tidak valid (HTTP ${res.status}).`
+          data.error || `Password Organizer tidak valid (HTTP ${res.status}).`
         );
         return;
       }
@@ -1554,9 +1699,9 @@ export default function OrganizerDashboard({
     e.preventDefault();
     setPartStatusMsg(null);
     if (!token) return;
-    if (!partName.trim() || !partTeam.trim() || partPin.trim().length < 4) {
+    if (!partName.trim() || !partTeam.trim() || partPin.trim().length < 6) {
       setPartStatusMsg(
-        'Nama Peserta, Nama Tim (Wajib), dan PIN (min. 4 digit) harus diisi.'
+        'Nama Peserta, Nama Tim (Wajib), dan Password (min. 6 karakter) harus diisi.'
       );
       return;
     }
@@ -1573,7 +1718,8 @@ export default function OrganizerDashboard({
           gender: partGender,
           ageGroup: partAgeGroup,
           phone: partPhone,
-          pin: partPin,
+          password: partPin.trim(),
+          pin: partPin.trim(),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1730,9 +1876,9 @@ export default function OrganizerDashboard({
     e.preventDefault();
     setOrgManageMsg(null);
     if (!token) return;
-    if (!orgNameInput.trim() || orgPinInput.trim().length < 4) {
+    if (!orgNameInput.trim() || orgPinInput.trim().length < 6) {
       setOrgManageMsg(
-        'Nama Organizer dan PIN Login (minimal 4 karakter) wajib diisi.'
+        'Nama Organizer dan Password Login (minimal 6 karakter) wajib diisi.'
       );
       return;
     }
@@ -1747,7 +1893,12 @@ export default function OrganizerDashboard({
           name: orgNameInput.trim(),
           username: orgUsernameInput.trim() || undefined,
           organization: orgOrganizationInput.trim(),
+          password: orgPinInput.trim(),
           pin: orgPinInput.trim(),
+          maxCourses: orgIsUnlimited
+            ? null
+            : Math.max(1, parseInt(orgMaxCoursesInput, 10) || 1),
+          durationMonths: orgDurationMonths,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1764,6 +1915,9 @@ export default function OrganizerDashboard({
       setOrgUsernameInput('');
       setOrgOrganizationInput('');
       setOrgPinInput('');
+      setOrgMaxCoursesInput('3');
+      setOrgIsUnlimited(false);
+      setOrgDurationMonths('3');
       showTemporarySuccess(
         `Akun Organizer "${data.organizer?.name}" (${data.organizer?.code} / Username: ${data.organizer?.username}) berhasil dibuat!`
       );
@@ -1806,10 +1960,10 @@ export default function OrganizerDashboard({
     }
   };
 
-  // Superadmin: Reset PIN Organizer
+  // Superadmin: Reset Password Organizer
   const handleSaveResetOrganizerPin = async (orgId: string) => {
-    if (!token || resetPinValue.trim().length < 4) {
-      setErrorMsg('PIN baru minimal 4 karakter.');
+    if (!token || resetPinValue.trim().length < 6) {
+      setErrorMsg('Password baru minimal 6 karakter.');
       return;
     }
     try {
@@ -1819,11 +1973,14 @@ export default function OrganizerDashboard({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ newPin: resetPinValue.trim() }),
+        body: JSON.stringify({
+          newPassword: resetPinValue.trim(),
+          newPin: resetPinValue.trim(),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setErrorMsg(data.error || 'Gagal mereset PIN Organizer.');
+        setErrorMsg(data.error || 'Gagal mereset Password Organizer.');
         return;
       }
       if (data.organizerBackup) {
@@ -1833,10 +1990,10 @@ export default function OrganizerDashboard({
       }
       setResetPinOrgId(null);
       setResetPinValue('');
-      showTemporarySuccess('PIN Organizer berhasil diperbarui.');
+      showTemporarySuccess('Password Organizer berhasil diperbarui.');
       await fetchDashboard();
     } catch {
-      setErrorMsg('Kesalahan jaringan saat mereset PIN Organizer.');
+      setErrorMsg('Kesalahan jaringan saat mereset Password Organizer.');
     }
   };
 
@@ -2084,9 +2241,8 @@ export default function OrganizerDashboard({
           </div>
 
           <p className="text-xs text-slate-400 leading-relaxed">
-            Organizer &amp; Superadmin dapat login menggunakan{' '}
-            <strong className="text-slate-200">Username + PIN</strong> atau langsung menggunakan{' '}
-            <strong className="text-slate-200">PIN unik</strong>. Superadmin memiliki akses penuh ke seluruh Course &amp; akun panitia, sedangkan Organizer hanya dapat mengelola Course buatannya sendiri.
+            Organizer &amp; Superadmin login menggunakan{' '}
+            <strong className="text-slate-200">Username + Password</strong> (minimal 6 karakter). Superadmin memiliki akses penuh ke seluruh Course &amp; akun panitia, sedangkan Organizer mengelola Course buatannya sendiri.
           </p>
 
           <form onSubmit={handleLogin} className="space-y-4">
@@ -2094,7 +2250,7 @@ export default function OrganizerDashboard({
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
                 Username Organizer / Superadmin{' '}
                 <span className="text-slate-500 font-normal">
-                  (Boleh dikosongkan jika login pakai PIN)
+                  (Boleh dikosongkan jika Password unik)
                 </span>
               </label>
               <input
@@ -2108,7 +2264,7 @@ export default function OrganizerDashboard({
 
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                PIN Keamanan Organizer / Superadmin{' '}
+                Password Keamanan Organizer / Superadmin{' '}
                 <span className="text-rose-400">*</span>
               </label>
               <div className="relative">
@@ -2116,14 +2272,15 @@ export default function OrganizerDashboard({
                 <input
                   type="password"
                   required
+                  minLength={6}
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
-                  placeholder="Masukkan PIN Organizer / Superadmin"
+                  placeholder="Masukkan Password (minimal 6 karakter)"
                   className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-sm font-mono focus:outline-none focus:border-amber-400"
                 />
               </div>
               <p className="text-[11px] text-slate-500 mt-1">
-                Akun Organizer baru dibuatkan oleh Superadmin di dalam Dashboard.
+                Password minimal 6 karakter (bebas kombinasi huruf, angka, atau simbol).
               </p>
             </div>
 
@@ -2157,6 +2314,15 @@ export default function OrganizerDashboard({
     );
   }
 
+  const isSuperAdminUser = Boolean(dashboard?.currentOrganizer?.isSuperAdmin);
+  const currentOrgMaxCourses = dashboard?.currentOrganizer?.maxCourses;
+  const isOrgQuotaUnlimited = isSuperAdminUser || currentOrgMaxCourses === null || currentOrgMaxCourses === undefined;
+  const currentOrgCoursesCount = dashboard?.courses.length || 0;
+  const isOrgQuotaReached = !isOrgQuotaUnlimited && currentOrgCoursesCount >= (currentOrgMaxCourses ?? 0);
+  const currentOrgExpiresAt = dashboard?.currentOrganizer?.expiresAt;
+  const isOrgExpired = !isSuperAdminUser && currentOrgExpiresAt ? new Date(currentOrgExpiresAt).getTime() <= Date.now() : false;
+  const isCourseCreationDisabled = isOrgQuotaReached || isOrgExpired;
+
   return (
     <div className="space-y-6">
       {/* Sub-header Organizer Controls (Responsif Mobile & Desktop Tanpa Overflow) */}
@@ -2189,6 +2355,21 @@ export default function OrganizerDashboard({
                 ? 'Akses penuh seluruh Course, Peserta, dan pembuatan akun login Organizer'
                 : 'Hanya menampilkan Course yang Anda buat & peserta yang ikut di Course Anda'}
             </p>
+            {!dashboard?.currentOrganizer?.isSuperAdmin && (
+              <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-950/80 border border-slate-700/80 text-slate-300 font-mono">
+                  <Layers className="w-3 h-3 text-amber-400" />
+                  <span>Kuota:</span>
+                  <strong className="text-amber-300">
+                    {dashboard?.courses.length} / {dashboard?.currentOrganizer?.maxCourses === null || dashboard?.currentOrganizer?.maxCourses === undefined ? '∞ (Tak Terbatas)' : `${dashboard?.currentOrganizer?.maxCourses} Course`}
+                  </strong>
+                </span>
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[10px] font-mono font-medium ${formatExpirationStatus(dashboard?.currentOrganizer?.expiresAt).colorClass}`}>
+                  <Clock className="w-3 h-3" />
+                  <span>{formatExpirationStatus(dashboard?.currentOrganizer?.expiresAt).label}</span>
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2240,6 +2421,21 @@ export default function OrganizerDashboard({
               title="Muat Ulang Data"
             >
               <RefreshCw className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setChangePassError(null);
+                setChangePassCurrent('');
+                setChangePassNew('');
+                setChangePassConfirm('');
+                setIsChangePasswordOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 text-xs font-semibold transition shrink-0 cursor-pointer"
+              title="Ganti Password Akun Anda"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-purple-400" />
+              <span className="hidden sm:inline">Ganti Password</span>
             </button>
             <button
               onClick={handleLogout}
@@ -2507,7 +2703,7 @@ export default function OrganizerDashboard({
             <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
                 <span className="text-[11px] font-mono uppercase text-sky-400">
-                  Registrasi Peserta &amp; PIN
+                  Registrasi Peserta &amp; Password
                 </span>
                 <h3 className="text-base font-bold text-white">
                   Tambah Akun Peserta / Tim
@@ -2607,18 +2803,18 @@ export default function OrganizerDashboard({
                 </div>
                 <div>
                   <label className="block text-slate-300 mb-1">
-                    PIN Keamanan (Min. 4 Digit) *
+                    Password Tim (Min. 6 Karakter) *
                   </label>
                   <div className="relative">
                     <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
                     <input
                       type="password"
                       required
-                      minLength={4}
-                      placeholder="••••"
+                      minLength={6}
+                      placeholder="Minimal 6 karakter (bebas kombinasi)"
                       value={partPin}
                       onChange={(e) => setPartPin(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400 font-mono"
+                      className="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400 font-mono text-xs"
                     />
                   </div>
                 </div>
@@ -2735,27 +2931,72 @@ export default function OrganizerDashboard({
                             </div>
                           </div>
 
-                          {canDeleteThisParticipant ? (
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteParticipant(p)}
-                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition shrink-0 cursor-pointer"
-                              title={
-                                isSuperAdmin
-                                  ? `Hapus peserta ${p.name} (Akses Superadmin)`
-                                  : `Hapus peserta buatan Anda (${p.name})`
-                              }
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          ) : (
-                            <span
-                              className="text-[10px] text-slate-500 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 shrink-0"
-                              title="Hanya Superadmin yang dapat menghapus peserta daftar mandiri atau buatan organizer lain"
-                            >
-                              Terkunci
-                            </span>
-                          )}
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {canDeleteThisParticipant && (
+                              resetParticipantPasswordId === p.id ? (
+                                <div className="flex items-center gap-1 bg-slate-950 p-1 rounded border border-slate-700">
+                                  <input
+                                    type="text"
+                                    value={resetParticipantPasswordValue}
+                                    onChange={(e) => setResetParticipantPasswordValue(e.target.value)}
+                                    placeholder="Password baru (min 6)..."
+                                    className="w-32 px-1.5 py-0.5 rounded bg-slate-900 text-white text-[11px] font-mono focus:outline-none"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveResetParticipantPassword(p.id)}
+                                    className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-500 cursor-pointer"
+                                  >
+                                    Simpan
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setResetParticipantPasswordId(null);
+                                      setResetParticipantPasswordValue('');
+                                    }}
+                                    className="p-0.5 text-slate-400 hover:text-white cursor-pointer"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setResetParticipantPasswordId(p.id);
+                                    setResetParticipantPasswordValue('');
+                                  }}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer"
+                                  title={`Reset Password untuk tim ${p.teamName}`}
+                                >
+                                  <KeyRound className="w-3.5 h-3.5 text-purple-400" />
+                                </button>
+                              )
+                            )}
+
+                            {canDeleteThisParticipant ? (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteParticipant(p)}
+                                className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition shrink-0 cursor-pointer"
+                                title={
+                                  isSuperAdmin
+                                    ? `Hapus peserta ${p.name} (Akses Superadmin)`
+                                    : `Hapus peserta buatan Anda (${p.name})`
+                                }
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <span
+                                className="text-[10px] text-slate-500 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 shrink-0"
+                                title="Hanya Superadmin yang dapat menghapus peserta daftar mandiri atau buatan organizer lain"
+                              >
+                                Terkunci
+                              </span>
+                            )}
+                          </div>
                         </div>
                       );
                     })
@@ -2781,6 +3022,67 @@ export default function OrganizerDashboard({
                   Buat Course Baru, Durasi &amp; Aturan Penalti
                 </h3>
               </div>
+
+              {/* Status Kuota & Masa Aktif untuk Organizer */}
+              {!isSuperAdminUser && (
+                <div className="p-3 rounded-lg bg-slate-900 border border-slate-700 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="flex items-center gap-1.5 text-slate-300 font-medium">
+                      <Layers className="w-3.5 h-3.5 text-amber-400" />
+                      Kuota Course:
+                    </span>
+                    <span
+                      className={`font-mono font-bold px-2 py-0.5 rounded text-[11px] ${
+                        isOrgQuotaReached
+                          ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                          : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                      }`}
+                    >
+                      {isOrgQuotaUnlimited
+                        ? '∞ Tak Terbatas'
+                        : `${currentOrgCoursesCount} / ${currentOrgMaxCourses} Course`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="flex items-center gap-1.5 text-slate-300 font-medium">
+                      <Clock className="w-3.5 h-3.5 text-sky-400" />
+                      Masa Aktif Akun:
+                    </span>
+                    <span
+                      className={`font-mono text-[10px] px-2 py-0.5 rounded border ${
+                        formatExpirationStatus(currentOrgExpiresAt).colorClass
+                      }`}
+                    >
+                      {formatExpirationStatus(currentOrgExpiresAt).label}
+                    </span>
+                  </div>
+
+                  {isOrgQuotaReached && (
+                    <div className="p-2 rounded bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div>
+                        <strong>Batas Kuota Tercapai!</strong>
+                        <p className="text-[11px] text-rose-300 mt-0.5">
+                          Anda telah menggunakan seluruh jatah kuota ({currentOrgCoursesCount} dari {currentOrgMaxCourses} Course). Silakan hubungi Superadmin untuk menambah jatah course.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {isOrgExpired && (
+                    <div className="p-2 rounded bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div>
+                        <strong>Akun Kedaluwarsa!</strong>
+                        <p className="text-[11px] text-rose-300 mt-0.5">
+                          Masa aktif akun Organizer Anda telah habis. Anda tidak dapat membuat course baru. Silakan hubungi Superadmin untuk memperpanjang masa aktif.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <form onSubmit={handleCreateCourse} className="space-y-3 text-xs">
                 <div>
                   <label className="block text-slate-300 mb-1">
@@ -2993,10 +3295,19 @@ export default function OrganizerDashboard({
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition flex items-center justify-center gap-1.5"
+                  disabled={isCourseCreationDisabled}
+                  className={`w-full py-2.5 rounded-lg font-bold transition flex items-center justify-center gap-1.5 ${
+                    isCourseCreationDisabled
+                      ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                      : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer shadow-md shadow-amber-500/20'
+                  }`}
                 >
                   <Plus className="w-4 h-4" />
-                  Buat Course Baru
+                  {isOrgQuotaReached
+                    ? 'Batas Kuota Course Tercapai'
+                    : isOrgExpired
+                      ? 'Masa Aktif Akun Kedaluwarsa'
+                      : 'Buat Course Baru'}
                 </button>
               </form>
             </div>
@@ -4345,10 +4656,10 @@ export default function OrganizerDashboard({
                     </span>
                   </div>
                   <h2 className="text-base font-bold text-white mt-1">
-                    Ubah Username &amp; PIN Superadmin
+                    Ubah Username &amp; Password Superadmin
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                    Ubah username login Superadmin (agar tidak kosong) dan perbarui PIN utama secara aman.
+                    Ubah username login Superadmin (agar tidak kosong) dan perbarui Password utama secara aman.
                   </p>
                 </div>
 
@@ -4379,28 +4690,28 @@ export default function OrganizerDashboard({
 
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">
-                      PIN Superadmin Saat Ini <span className="text-rose-400">*</span>
+                      Password Superadmin Saat Ini <span className="text-rose-400">*</span>
                     </label>
                     <input
                       type="password"
                       required
                       value={superCurrentPin}
                       onChange={(e) => setSuperCurrentPin(e.target.value)}
-                      placeholder="Masukkan PIN saat ini untuk verifikasi"
+                      placeholder="Masukkan Password saat ini untuk verifikasi"
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                     />
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">
-                      PIN Superadmin Baru{' '}
+                      Password Superadmin Baru{' '}
                       <span className="text-slate-500 font-normal">(Opsional)</span>
                     </label>
                     <input
                       type="password"
                       value={superNewPin}
                       onChange={(e) => setSuperNewPin(e.target.value)}
-                      placeholder="Minimal 4 karakter (kosongkan jika tidak ganti PIN)"
+                      placeholder="Minimal 6 karakter (kosongkan jika tidak ganti)"
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                     />
                   </div>
@@ -4496,18 +4807,127 @@ export default function OrganizerDashboard({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    PIN Login Organizer (Unik, min. 4 karakter){' '}
+                    Password Login Organizer (Min. 6 karakter){' '}
                     <span className="text-rose-400">*</span>
                   </label>
                   <input
                     type="text"
                     required
-                    minLength={4}
+                    minLength={6}
                     value={orgPinInput}
                     onChange={(e) => setOrgPinInput(e.target.value)}
-                    placeholder="Contoh: 7788"
+                    placeholder="Contoh: baraka123 atau 778899"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                   />
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Boleh huruf, angka, tanda baca, simbol, minimal 6 karakter. Boleh sama dengan akun organizer lain.
+                  </p>
+                </div>
+
+                {/* Pengaturan Jatah Kuota Course */}
+                <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Jatah Kuota Course</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs text-amber-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={orgIsUnlimited}
+                        onChange={(e) => setOrgIsUnlimited(e.target.checked)}
+                        className="rounded border-slate-700 text-amber-500 focus:ring-0"
+                      />
+                      <span>Tak Terbatas (Unlimited)</span>
+                    </label>
+                  </div>
+
+                  {!orgIsUnlimited ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={orgMaxCoursesInput}
+                          onChange={(e) => setOrgMaxCoursesInput(e.target.value)}
+                          placeholder="Jumlah course (cth: 3)"
+                          className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                        />
+                        <span className="text-xs text-slate-400 shrink-0 font-medium">Course</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] text-slate-500">Pilihan cepat:</span>
+                        {[1, 2, 3, 5, 10].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => {
+                              setOrgMaxCoursesInput(String(preset));
+                              setOrgIsUnlimited(false);
+                            }}
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono transition cursor-pointer ${
+                              !orgIsUnlimited && orgMaxCoursesInput === String(preset)
+                                ? 'bg-amber-500 text-slate-950 font-bold'
+                                : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
+                            }`}
+                          >
+                            {preset} Course
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1.5">
+                      <InfinityIcon className="w-3.5 h-3.5 shrink-0" />
+                      <span>Organizer ini dapat membuat Course sebanyak-banyaknya tanpa batasan.</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Pengaturan Masa Aktif Akun */}
+                <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Masa Aktif Akun</span>
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      { id: '1', label: '1 Bulan' },
+                      { id: '3', label: '3 Bulan' },
+                      { id: '6', label: '6 Bulan' },
+                      { id: '9', label: '9 Bulan' },
+                      { id: '12', label: '12 Bulan' },
+                      { id: 'lifetime', label: 'Lifetime' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setOrgDurationMonths(opt.id)}
+                        className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition cursor-pointer ${
+                          orgDurationMonths === opt.id
+                            ? 'bg-sky-500/20 border-sky-400 text-sky-300 font-bold shadow'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Pratinjau Tanggal Expired */}
+                  <div className="text-[11px] text-sky-300 font-mono bg-sky-950/30 p-2 rounded border border-sky-800/40">
+                    {(() => {
+                      if (orgDurationMonths === 'lifetime') return '♾️ Masa Aktif: Lifetime (Selamanya tanpa batas waktu)';
+                      const m = parseInt(orgDurationMonths, 10) || 3;
+                      const d = new Date();
+                      d.setMonth(d.getMonth() + m);
+                      return `📅 Berlaku s/d: ${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+                    })()}
+                  </div>
                 </div>
 
                 {orgManageMsg && (
@@ -4603,17 +5023,58 @@ export default function OrganizerDashboard({
                               </strong>
                             </span>
                           </div>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-950 border border-slate-700/80 text-[11px] font-mono">
+                              <Layers className="w-3 h-3 text-amber-400" />
+                              <span className="text-slate-400">Kuota Course:</span>
+                              <strong
+                                className={
+                                  org.maxCourses !== null &&
+                                  org.maxCourses !== undefined &&
+                                  orgCourses.length >= org.maxCourses
+                                    ? 'text-rose-400 font-bold'
+                                    : 'text-amber-300'
+                                }
+                              >
+                                {orgCourses.length} /{' '}
+                                {org.maxCourses === null || org.maxCourses === undefined
+                                  ? '∞ (Tak Terbatas)'
+                                  : `${org.maxCourses} Course`}
+                              </strong>
+                            </span>
+                            <span
+                              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[10px] font-mono font-medium ${
+                                formatExpirationStatus(org.expiresAt).colorClass
+                              }`}
+                            >
+                              <Clock className="w-3 h-3" />
+                              <span>
+                                Masa Aktif: {formatExpirationStatus(org.expiresAt).label}
+                              </span>
+                            </span>
+                          </div>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedEditOrg(org)}
+                            className="px-2.5 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 text-xs font-semibold border border-purple-500/40 transition cursor-pointer flex items-center gap-1.5 shadow"
+                            title="Edit Kuota Course &amp; Perpanjang Masa Aktif Akun"
+                          >
+                            <Sliders className="w-3.5 h-3.5" />
+                            <span>Edit Kuota / Masa Aktif</span>
+                          </button>
+
                           {resetPinOrgId === org.id ? (
                             <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-lg border border-slate-700">
                               <input
                                 type="text"
                                 value={resetPinValue}
                                 onChange={(e) => setResetPinValue(e.target.value)}
-                                placeholder="PIN Baru..."
-                                className="w-24 px-2 py-1 rounded bg-slate-900 text-white text-xs font-mono focus:outline-none"
+                                placeholder="Password Baru (min 6)..."
+                                className="w-36 px-2 py-1 rounded bg-slate-900 text-white text-xs font-mono focus:outline-none"
                               />
                               <button
                                 type="button"
@@ -4642,7 +5103,7 @@ export default function OrganizerDashboard({
                               }}
                               className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition cursor-pointer"
                             >
-                              Ubah PIN
+                              Ubah Password
                             </button>
                           )}
 
@@ -5023,6 +5484,147 @@ export default function OrganizerDashboard({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal Ganti Password Organizer Sendiri */}
+      {isChangePasswordOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Ganti Password Akun</h3>
+                  <p className="text-xs text-slate-400">
+                    {dashboard?.currentOrganizer?.name || 'Organizer / Superadmin'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsChangePasswordOpen(false);
+                  setChangePassError(null);
+                  setChangePassCurrent('');
+                  setChangePassNew('');
+                  setChangePassConfirm('');
+                }}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleChangeOwnPassword();
+              }}
+              className="space-y-3.5"
+            >
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Password Saat Ini <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={changePassCurrent}
+                  onChange={(e) => setChangePassCurrent(e.target.value)}
+                  placeholder="Masukkan password saat ini"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Password Baru (Min. 6 Karakter) <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={changePassNew}
+                  onChange={(e) => setChangePassNew(e.target.value)}
+                  placeholder="Minimal 6 karakter (bebas kombinasi)"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Boleh huruf, angka, tanda baca, simbol, atau gabungan.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Konfirmasi Password Baru <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={changePassConfirm}
+                  onChange={(e) => setChangePassConfirm(e.target.value)}
+                  placeholder="Ulangi password baru"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              {changePassError && (
+                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                  {changePassError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsChangePasswordOpen(false);
+                    setChangePassError(null);
+                    setChangePassCurrent('');
+                    setChangePassNew('');
+                    setChangePassConfirm('');
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={changePassLoading}
+                  className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-500/20 disabled:opacity-50"
+                >
+                  {changePassLoading ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : (
+                    'Simpan Password Baru'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Edit Kuota Course & Masa Aktif Organizer */}
+      {selectedEditOrg && token && (
+        <EditOrganizerQuotaModal
+          organizer={selectedEditOrg}
+          token={token}
+          onClose={() => setSelectedEditOrg(null)}
+          onSuccess={async () => {
+            setSelectedEditOrg(null);
+            await fetchDashboard();
+            showTemporarySuccess(
+              'Pengaturan kuota course & masa aktif organizer berhasil diperbarui!'
+            );
+          }}
+        />
       )}
     </div>
   );

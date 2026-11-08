@@ -78907,7 +78907,9 @@ function toPublicOrganizer(o) {
     organization: o.organization,
     isSuperAdmin: Boolean(o.isSuperAdmin),
     isActive: o.isActive !== false,
-    createdAt: o.createdAt
+    createdAt: o.createdAt,
+    maxCourses: o.maxCourses !== void 0 ? o.maxCourses : null,
+    expiresAt: o.expiresAt || null
   };
 }
 function getSuperAdminPublicProfile() {
@@ -78919,7 +78921,9 @@ function getSuperAdminPublicProfile() {
     organization: "BARAKA Pusat",
     isSuperAdmin: true,
     isActive: true,
-    createdAt: "2026-01-01T00:00:00.000Z"
+    createdAt: "2026-01-01T00:00:00.000Z",
+    maxCourses: null,
+    expiresAt: null
   };
 }
 function resolveOrganizerAuth(token) {
@@ -79478,9 +79482,10 @@ app.get("/api/health", (_req, res) => {
   });
 });
 app.post("/api/organizer/login", (req, res) => {
-  const { username, pin, vaultBackup } = req.body;
-  if (!pin || !String(pin).trim()) {
-    res.status(400).json({ error: "PIN Organizer / Superadmin wajib diisi." });
+  const { username, pin, password, vaultBackup } = req.body;
+  const rawInputPassword = String(password || pin || "").trim();
+  if (!rawInputPassword) {
+    res.status(400).json({ error: "Password Organizer / Superadmin wajib diisi." });
     return;
   }
   if (vaultBackup && typeof vaultBackup === "object") {
@@ -79488,7 +79493,7 @@ app.post("/api/organizer/login", (req, res) => {
       saveDb(db);
     }
   }
-  const trimmedPin = String(pin).trim();
+  const trimmedPin = rawInputPassword;
   const trimmedUsername = (username || "").trim().toLowerCase();
   const orgList = db.organizers || [];
   const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || "").trim();
@@ -79503,7 +79508,7 @@ app.post("/api/organizer/login", (req, res) => {
         db.organizerAuth.pinSalt
       );
       if (!validSuper) {
-        res.status(401).json({ error: "PIN Superadmin tidak sesuai." });
+        res.status(401).json({ error: "Password Superadmin tidak sesuai." });
         return;
       }
       if (isMasterRecoveryMatch) {
@@ -79525,7 +79530,7 @@ app.post("/api/organizer/login", (req, res) => {
     );
     if (!matchedOrg || !verifyPin(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt)) {
       res.status(401).json({
-        error: "Username/ID Organizer atau PIN tidak cocok."
+        error: "Username/ID Organizer atau Password tidak cocok."
       });
       return;
     }
@@ -79534,6 +79539,15 @@ app.post("/api/organizer/login", (req, res) => {
         error: "Akun Organizer ini sedang dinonaktifkan oleh Superadmin."
       });
       return;
+    }
+    if (matchedOrg.expiresAt) {
+      const expTime = new Date(matchedOrg.expiresAt).getTime();
+      if (!Number.isNaN(expTime) && Date.now() > expTime) {
+        res.status(403).json({
+          error: `Masa aktif akun Organizer ini telah berakhir pada ${new Date(matchedOrg.expiresAt).toLocaleDateString("id-ID")}. Silakan hubungi Superadmin untuk perpanjangan masa aktif.`
+        });
+        return;
+      }
     }
     const token2 = createOrganizerToken(matchedOrg.id, false);
     saveDb(db);
@@ -79565,12 +79579,19 @@ app.post("/api/organizer/login", (req, res) => {
     });
     return;
   }
-  const matchedByPin = orgList.find(
+  const matchesByPassword = orgList.filter(
     (o) => verifyPin(trimmedPin, o.pinHash, o.pinSalt)
   );
+  if (matchesByPassword.length > 1) {
+    res.status(400).json({
+      error: "Terdapat lebih dari satu akun dengan Password ini. Harap masukkan Username Anda untuk masuk."
+    });
+    return;
+  }
+  const matchedByPin = matchesByPassword[0];
   if (!matchedByPin) {
     res.status(401).json({
-      error: "PIN Organizer tidak dikenali. Pastikan PIN benar atau masukkan Username."
+      error: "Password Organizer tidak dikenali. Pastikan Password benar atau masukkan Username."
     });
     return;
   }
@@ -79579,6 +79600,15 @@ app.post("/api/organizer/login", (req, res) => {
       error: "Akun Organizer ini sedang dinonaktifkan oleh Superadmin."
     });
     return;
+  }
+  if (matchedByPin.expiresAt) {
+    const expTime = new Date(matchedByPin.expiresAt).getTime();
+    if (!Number.isNaN(expTime) && Date.now() > expTime) {
+      res.status(403).json({
+        error: `Masa aktif akun Organizer ini telah berakhir pada ${new Date(matchedByPin.expiresAt).toLocaleDateString("id-ID")}. Silakan hubungi Superadmin untuk perpanjangan masa aktif.`
+      });
+      return;
+    }
   }
   const token = createOrganizerToken(matchedByPin.id, false);
   saveDb(db);
@@ -79589,26 +79619,26 @@ app.post("/api/organizer/login", (req, res) => {
     organizerBackup: matchedByPin
   });
 });
-app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
+var handleChangeOrganizerPasswordHandler = (req, res) => {
   const auth = req.organizerAuth;
-  const { currentPin, newPin, newUsername } = req.body;
-  if (!currentPin || !String(currentPin).trim()) {
-    res.status(400).json({ error: "PIN saat ini wajib diisi untuk verifikasi keamanan." });
-    return;
-  }
-  const cleanCurrentPin = String(currentPin).trim();
-  const cleanNewPin = newPin ? String(newPin).trim() : "";
+  const { currentPin, currentPassword, newPin, newPassword, newUsername } = req.body;
+  const rawCurrent = String(currentPassword || currentPin || "").trim();
+  const rawNew = String(newPassword || newPin || "").trim();
   const cleanNewUsername = newUsername ? String(newUsername).trim().toLowerCase() : "";
   const orgList = db.organizers || [];
   const masterRecoveryPin = (process.env.BARAKA_MASTER_PIN || "").trim();
-  const isMasterCurrentMatch = masterRecoveryPin.length >= 4 && cleanCurrentPin === masterRecoveryPin;
+  const isMasterCurrentMatch = masterRecoveryPin.length >= 4 && rawCurrent === masterRecoveryPin;
+  if (!rawCurrent) {
+    res.status(400).json({ error: "Password saat ini wajib diisi untuk verifikasi keamanan." });
+    return;
+  }
   if (auth.isSuperAdmin) {
-    if (!isMasterCurrentMatch && !verifyPin(cleanCurrentPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
-      res.status(401).json({ error: "PIN Superadmin saat ini tidak sesuai." });
+    if (!isMasterCurrentMatch && !verifyPin(rawCurrent, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+      res.status(401).json({ error: "Password Superadmin saat ini tidak sesuai." });
       return;
     }
-    if (!cleanNewPin && !cleanNewUsername) {
-      res.status(400).json({ error: "Harap masukkan Username baru atau PIN baru yang ingin diubah." });
+    if (!rawNew && !cleanNewUsername) {
+      res.status(400).json({ error: "Harap masukkan Username baru atau Password baru yang ingin diubah." });
       return;
     }
     if (cleanNewUsername) {
@@ -79631,25 +79661,18 @@ app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
       }
       db.organizerAuth.username = cleanNewUsername;
     }
-    if (cleanNewPin) {
-      if (cleanNewPin.length < 4) {
-        res.status(400).json({ error: "PIN baru minimal 4 karakter." });
+    if (rawNew) {
+      if (rawNew.length < 6) {
+        res.status(400).json({ error: "Password baru minimal 6 karakter." });
         return;
       }
-      const conflictOrg = orgList.find((o) => verifyPin(cleanNewPin, o.pinHash, o.pinSalt));
-      if (conflictOrg) {
-        res.status(400).json({
-          error: `PIN tersebut sudah dipakai oleh Organizer "${conflictOrg.name}". Gunakan PIN lain agar login cepat tetap unik.`
-        });
-        return;
-      }
-      const updated2 = hashPin(cleanNewPin);
+      const updated2 = hashPin(rawNew);
       db.organizerAuth.pinHash = updated2.hash;
       db.organizerAuth.pinSalt = updated2.salt;
     }
     saveDb(db);
     res.json({
-      message: "Kredensial Superadmin (Username/PIN) berhasil diperbarui dengan aman.",
+      message: "Kredensial Superadmin (Username/Password) berhasil diperbarui dengan aman.",
       organizer: getSuperAdminPublicProfile()
     });
     return;
@@ -79659,33 +79682,22 @@ app.post("/api/organizer/change-pin", requireOrganizer, (req, res) => {
     res.status(404).json({ error: "Akun Organizer tidak ditemukan." });
     return;
   }
-  if (!verifyPin(cleanCurrentPin, targetOrg.pinHash, targetOrg.pinSalt)) {
-    res.status(401).json({ error: "PIN Organizer saat ini tidak sesuai." });
+  if (!verifyPin(rawCurrent, targetOrg.pinHash, targetOrg.pinSalt)) {
+    res.status(401).json({ error: "Password Organizer saat ini tidak sesuai." });
     return;
   }
-  if (!cleanNewPin || cleanNewPin.length < 4) {
-    res.status(400).json({ error: "PIN baru minimal 4 karakter." });
+  if (!rawNew || rawNew.length < 6) {
+    res.status(400).json({ error: "Password baru minimal 6 karakter." });
     return;
   }
-  if (verifyPin(cleanNewPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
-    res.status(400).json({ error: "PIN baru tidak boleh sama dengan PIN Superadmin." });
-    return;
-  }
-  const conflictOther = orgList.find(
-    (o) => o.id !== targetOrg.id && verifyPin(cleanNewPin, o.pinHash, o.pinSalt)
-  );
-  if (conflictOther) {
-    res.status(400).json({
-      error: "PIN baru tersebut sudah digunakan Organizer lain. Silakan pilih kombinasi PIN berbeda."
-    });
-    return;
-  }
-  const updated = hashPin(cleanNewPin);
+  const updated = hashPin(rawNew);
   targetOrg.pinHash = updated.hash;
   targetOrg.pinSalt = updated.salt;
   saveDb(db);
-  res.json({ message: "PIN Organizer berhasil diperbarui." });
-});
+  res.json({ message: "Password Organizer berhasil diperbarui." });
+};
+app.post("/api/organizer/change-pin", requireOrganizer, handleChangeOrganizerPasswordHandler);
+app.post("/api/organizer/change-password", requireOrganizer, handleChangeOrganizerPasswordHandler);
 app.get("/api/organizer/accounts", requireSuperAdmin, (_req, res) => {
   const orgList = db.organizers || [];
   res.json({
@@ -79693,31 +79705,26 @@ app.get("/api/organizer/accounts", requireSuperAdmin, (_req, res) => {
   });
 });
 app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
-  const { name: name4, username, organization, pin } = req.body;
-  if (!name4 || !name4.trim() || !pin || String(pin).trim().length < 4) {
+  const {
+    name: name4,
+    username,
+    organization,
+    pin,
+    password,
+    maxCourses,
+    durationMonths,
+    expiresAt
+  } = req.body;
+  const rawPassword = String(password || pin || "").trim();
+  if (!name4 || !name4.trim() || rawPassword.length < 6) {
     res.status(400).json({
-      error: "Nama Organizer dan PIN Login (minimal 4 karakter) wajib diisi."
+      error: "Nama Organizer dan Password Login (minimal 6 karakter) wajib diisi."
     });
     return;
   }
-  const cleanPin = String(pin).trim();
+  const cleanPin = rawPassword;
   if (!Array.isArray(db.organizers)) {
     db.organizers = [];
-  }
-  if (verifyPin(cleanPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
-    res.status(400).json({
-      error: "PIN Organizer tidak boleh sama dengan PIN Superadmin Utama."
-    });
-    return;
-  }
-  const pinConflict = db.organizers.find(
-    (o) => verifyPin(cleanPin, o.pinHash, o.pinSalt)
-  );
-  if (pinConflict) {
-    res.status(400).json({
-      error: `PIN ini sudah digunakan oleh Organizer "${pinConflict.name}" (${pinConflict.code}). Gunakan PIN unik agar panitia bisa login langsung dengan PIN.`
-    });
-    return;
   }
   const nextIndex = db.organizers.length + 1;
   const code = `ORG-${String(nextIndex).padStart(2, "0")}`;
@@ -79730,6 +79737,24 @@ app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
     });
     return;
   }
+  let computedExpiresAt = null;
+  if (expiresAt && typeof expiresAt === "string" && expiresAt.trim()) {
+    computedExpiresAt = new Date(expiresAt).toISOString();
+  } else if (durationMonths !== void 0 && durationMonths !== null && durationMonths !== "lifetime" && durationMonths !== "") {
+    const months = Number(durationMonths);
+    if (!Number.isNaN(months) && months > 0) {
+      const d = /* @__PURE__ */ new Date();
+      d.setMonth(d.getMonth() + months);
+      computedExpiresAt = d.toISOString();
+    }
+  }
+  let parsedMaxCourses = null;
+  if (maxCourses !== void 0 && maxCourses !== null && maxCourses !== "" && maxCourses !== "unlimited") {
+    const num = Number(maxCourses);
+    if (!Number.isNaN(num) && num > 0) {
+      parsedMaxCourses = Math.max(1, Math.round(num));
+    }
+  }
   const { hash, salt } = hashPin(cleanPin);
   const newOrganizer = {
     id: `org-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -79741,7 +79766,9 @@ app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
     isActive: true,
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     pinHash: hash,
-    pinSalt: salt
+    pinSalt: salt,
+    maxCourses: parsedMaxCourses,
+    expiresAt: computedExpiresAt
   };
   db.organizers.push(newOrganizer);
   saveDb(db);
@@ -79758,7 +79785,17 @@ app.put("/api/organizer/accounts/:organizerId", requireSuperAdmin, (req, res) =>
     res.status(404).json({ error: "Akun Organizer tidak ditemukan." });
     return;
   }
-  const { name: name4, username, organization, isActive, newPin } = req.body;
+  const {
+    name: name4,
+    username,
+    organization,
+    isActive,
+    newPin,
+    newPassword,
+    maxCourses,
+    durationMonths,
+    expiresAt
+  } = req.body;
   if (name4 !== void 0 && name4.trim()) {
     target.name = name4.trim();
     db.courses.forEach((c) => {
@@ -79784,28 +79821,37 @@ app.put("/api/organizer/accounts/:organizerId", requireSuperAdmin, (req, res) =>
   if (typeof isActive === "boolean") {
     target.isActive = isActive;
   }
-  if (newPin !== void 0 && String(newPin).trim() !== "") {
-    const cleanPin = String(newPin).trim();
-    if (cleanPin.length < 4) {
-      res.status(400).json({ error: "PIN baru minimal 4 karakter." });
+  const rawNewPass = newPassword !== void 0 ? String(newPassword).trim() : newPin !== void 0 ? String(newPin).trim() : "";
+  if (rawNewPass !== "") {
+    if (rawNewPass.length < 6) {
+      res.status(400).json({ error: "Password baru minimal 6 karakter." });
       return;
     }
-    if (verifyPin(cleanPin, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
-      res.status(400).json({ error: "PIN Organizer tidak boleh sama dengan PIN Superadmin." });
-      return;
-    }
-    const pinConflict = orgList.find(
-      (o) => o.id !== target.id && verifyPin(cleanPin, o.pinHash, o.pinSalt)
-    );
-    if (pinConflict) {
-      res.status(400).json({
-        error: `PIN tersebut sudah digunakan oleh Organizer "${pinConflict.name}".`
-      });
-      return;
-    }
-    const updatedHash = hashPin(cleanPin);
+    const updatedHash = hashPin(rawNewPass);
     target.pinHash = updatedHash.hash;
     target.pinSalt = updatedHash.salt;
+  }
+  if (maxCourses !== void 0) {
+    if (maxCourses === null || maxCourses === "" || maxCourses === "unlimited") {
+      target.maxCourses = null;
+    } else {
+      const num = Number(maxCourses);
+      target.maxCourses = !Number.isNaN(num) && num > 0 ? Math.max(1, Math.round(num)) : null;
+    }
+  }
+  if (expiresAt !== void 0) {
+    target.expiresAt = expiresAt && String(expiresAt).trim() ? new Date(expiresAt).toISOString() : null;
+  } else if (durationMonths !== void 0) {
+    if (durationMonths === "lifetime" || durationMonths === null || durationMonths === "") {
+      target.expiresAt = null;
+    } else {
+      const months = Number(durationMonths);
+      if (!Number.isNaN(months) && months > 0) {
+        const baseDate = target.expiresAt && new Date(target.expiresAt).getTime() > Date.now() ? new Date(target.expiresAt) : /* @__PURE__ */ new Date();
+        baseDate.setMonth(baseDate.getMonth() + months);
+        target.expiresAt = baseDate.toISOString();
+      }
+    }
   }
   saveDb(db);
   res.json({
@@ -79924,14 +79970,15 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
   });
 });
 app.post("/api/participant/register", (req, res) => {
-  const { name: name4, teamName, gender, ageGroup, phone, pin } = req.body;
-  if (!name4 || !name4.trim() || !teamName || !teamName.trim() || !pin || String(pin).trim().length < 4) {
+  const { name: name4, teamName, gender, ageGroup, phone, pin, password } = req.body;
+  const rawPassword = String(password || pin || "").trim();
+  if (!name4 || !name4.trim() || !teamName || !teamName.trim() || rawPassword.length < 6) {
     res.status(400).json({
-      error: "Nama peserta, Nama Tim, dan PIN (minimal 4 digit) wajib diisi."
+      error: "Nama peserta, Nama Tim, dan Password (minimal 6 karakter) wajib diisi."
     });
     return;
   }
-  const { hash, salt } = hashPin(pin);
+  const { hash, salt } = hashPin(rawPassword);
   const newParticipant = {
     id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     name: name4.trim(),
@@ -79955,10 +80002,11 @@ app.post("/api/participant/register", (req, res) => {
   });
 });
 app.post("/api/participant/login", (req, res) => {
-  const { teamName, bibOrName, pin, participantBackup, vaultParticipants } = req.body;
+  const { teamName, bibOrName, pin, password, participantBackup, vaultParticipants } = req.body;
   const rawIdentity = (teamName || bibOrName || "").trim();
-  if (!rawIdentity || !pin) {
-    res.status(400).json({ error: "Nama Tim dan PIN wajib diisi." });
+  const rawPassword = String(password || pin || "").trim();
+  if (!rawIdentity || !rawPassword) {
+    res.status(400).json({ error: "Nama Tim dan Password wajib diisi." });
     return;
   }
   const incomingBackups = [];
@@ -79975,14 +80023,14 @@ app.post("/api/participant/login", (req, res) => {
   }
   const query = rawIdentity.toLowerCase();
   const foundByTeam = db.participants.find(
-    (p) => p.teamName.trim().toLowerCase() === query && verifyPin(pin, p.pinHash, p.pinSalt)
+    (p) => p.teamName.trim().toLowerCase() === query && verifyPin(rawPassword, p.pinHash, p.pinSalt)
   );
   const found = foundByTeam || db.participants.find(
-    (p) => p.name.trim().toLowerCase() === query && verifyPin(pin, p.pinHash, p.pinSalt)
+    (p) => p.name.trim().toLowerCase() === query && verifyPin(rawPassword, p.pinHash, p.pinSalt)
   );
   if (!found) {
     res.status(401).json({
-      error: "Nama Tim atau PIN tidak cocok. Pastikan Nama Tim dan PIN sesuai saat pendaftaran."
+      error: "Nama Tim atau Password tidak cocok. Pastikan Nama Tim dan Password sesuai saat pendaftaran."
     });
     return;
   }
@@ -80009,6 +80057,38 @@ app.post("/api/participant/login", (req, res) => {
     sessions: activeSessions,
     latestSession,
     activeCourse: sanitizedCourse
+  });
+});
+app.post("/api/participant/change-password", requireParticipant, (req, res) => {
+  const participantId = req.participantId;
+  const { currentPassword, newPassword } = req.body;
+  const rawCurrent = String(currentPassword || "").trim();
+  const rawNew = String(newPassword || "").trim();
+  if (!rawCurrent) {
+    res.status(400).json({ error: "Password saat ini wajib diisi." });
+    return;
+  }
+  if (!rawNew || rawNew.length < 6) {
+    res.status(400).json({ error: "Password baru minimal 6 karakter." });
+    return;
+  }
+  const participant = db.participants.find((p) => p.id === participantId);
+  if (!participant) {
+    res.status(404).json({ error: "Data peserta tidak ditemukan." });
+    return;
+  }
+  if (!verifyPin(rawCurrent, participant.pinHash, participant.pinSalt)) {
+    res.status(401).json({ error: "Password saat ini tidak sesuai." });
+    return;
+  }
+  const updated = hashPin(rawNew);
+  participant.pinHash = updated.hash;
+  participant.pinSalt = updated.salt;
+  saveDb(db);
+  res.json({
+    message: "Password akun Tim Peserta berhasil diperbarui.",
+    participant: toPublicParticipant(participant),
+    participantBackup: participant
   });
 });
 app.post("/api/participant/load-event", requireParticipant, (req, res) => {
@@ -80317,7 +80397,8 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
   );
   const visibleParticipants = visibleStoredParticipants.map(toPublicParticipant);
   const visibleStoredOrganizers = auth.isSuperAdmin ? db.organizers || [] : (db.organizers || []).filter((o) => o.id === auth.organizerId);
-  const currentOrganizer = auth.isSuperAdmin ? getSuperAdminPublicProfile() : {
+  const currentOrgDb = (db.organizers || []).find((o) => o.id === auth.organizerId);
+  const currentOrganizer = auth.isSuperAdmin ? getSuperAdminPublicProfile() : currentOrgDb ? toPublicOrganizer(currentOrgDb) : {
     id: auth.organizerId,
     code: auth.code,
     username: auth.username,
@@ -80325,7 +80406,9 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
     organization: auth.organization,
     isSuperAdmin: false,
     isActive: true,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    maxCourses: null,
+    expiresAt: null
   };
   const vaultSnapshot = {
     organizers: visibleStoredOrganizers,
@@ -80373,6 +80456,32 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
   if (!name4 || !name4.trim() || !date) {
     res.status(400).json({ error: "Nama Course dan Tanggal wajib diisi." });
     return;
+  }
+  if (!auth.isSuperAdmin) {
+    const orgList = db.organizers || [];
+    const currentOrg = orgList.find((o) => o.id === auth.organizerId);
+    if (currentOrg) {
+      if (currentOrg.expiresAt) {
+        const expTime = new Date(currentOrg.expiresAt).getTime();
+        if (!Number.isNaN(expTime) && Date.now() > expTime) {
+          res.status(403).json({
+            error: `Masa aktif akun Organizer Anda telah berakhir pada ${new Date(currentOrg.expiresAt).toLocaleDateString("id-ID")}. Anda tidak dapat membuat Course baru. Silakan hubungi Superadmin.`
+          });
+          return;
+        }
+      }
+      if (currentOrg.maxCourses !== void 0 && currentOrg.maxCourses !== null && currentOrg.maxCourses > 0) {
+        const existingCourses = (db.courses || []).filter(
+          (c) => c.createdByOrganizerId === auth.organizerId
+        );
+        if (existingCourses.length >= currentOrg.maxCourses) {
+          res.status(400).json({
+            error: `Batas kuota tercapai: Akun Anda dibatasi maksimal membuat ${currentOrg.maxCourses} Course (saat ini sudah memiliki ${existingCourses.length} Course). Silakan hubungi Superadmin untuk penambahan kuota atau kelola Course yang sudah ada.`
+          });
+          return;
+        }
+      }
+    }
   }
   const courseId = `crs-${Date.now()}`;
   const parsedDuration = durationMinutes !== void 0 && Number(durationMinutes) > 0 ? Math.round(Number(durationMinutes)) : 0;
@@ -80670,14 +80779,15 @@ app.delete(
 );
 app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
   const auth = req.organizerAuth;
-  const { name: name4, teamName, gender, ageGroup, phone, pin } = req.body;
-  if (!name4 || !name4.trim() || !teamName || !teamName.trim() || !pin || String(pin).trim().length < 4) {
+  const { name: name4, teamName, gender, ageGroup, phone, pin, password } = req.body;
+  const rawPassword = String(password || pin || "").trim();
+  if (!name4 || !name4.trim() || !teamName || !teamName.trim() || rawPassword.length < 6) {
     res.status(400).json({
-      error: "Nama peserta, Nama Tim, dan PIN (minimal 4 digit) wajib diisi."
+      error: "Nama peserta, Nama Tim, dan Password (minimal 6 karakter) wajib diisi."
     });
     return;
   }
-  const { hash, salt } = hashPin(pin);
+  const { hash, salt } = hashPin(rawPassword);
   const newParticipant = {
     id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     name: name4.trim(),
@@ -80698,6 +80808,42 @@ app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
     participantBackup: newParticipant
   });
 });
+app.put(
+  "/api/organizer/participants/:participantId/password",
+  requireOrganizer,
+  (req, res) => {
+    const auth = req.organizerAuth;
+    const participantId = req.params.participantId;
+    const { newPassword, newPin } = req.body;
+    const rawNew = String(newPassword || newPin || "").trim();
+    if (!rawNew || rawNew.length < 6) {
+      res.status(400).json({ error: "Password baru minimal 6 karakter." });
+      return;
+    }
+    const targetParticipant = db.participants.find((p) => p.id === participantId);
+    if (!targetParticipant) {
+      res.status(404).json({ error: "Data peserta tidak ditemukan." });
+      return;
+    }
+    if (!auth.isSuperAdmin) {
+      if (!targetParticipant.createdByOrganizerId || targetParticipant.createdByOrganizerId !== auth.organizerId) {
+        res.status(403).json({
+          error: "Anda hanya dapat mereset password peserta yang Anda daftarkan sendiri."
+        });
+        return;
+      }
+    }
+    const updated = hashPin(rawNew);
+    targetParticipant.pinHash = updated.hash;
+    targetParticipant.pinSalt = updated.salt;
+    saveDb(db);
+    res.json({
+      message: `Password untuk peserta "${targetParticipant.name}" (${targetParticipant.teamName}) berhasil diperbarui.`,
+      participant: toPublicParticipant(targetParticipant),
+      participantBackup: targetParticipant
+    });
+  }
+);
 app.delete(
   "/api/organizer/participants/:participantId",
   requireOrganizer,

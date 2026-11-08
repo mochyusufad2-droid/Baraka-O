@@ -285,8 +285,8 @@ export default function PublicLiveLeaderboard({
 
       {/* KONTEN UTAMA */}
       <main className="flex-1 mx-auto max-w-7xl w-full p-4 sm:p-6 space-y-6">
-        {/* JIKA BELUM MEMILIH COURSE ATAU INGIN GANTI COURSE */}
-        {courses.length > 1 && (
+        {/* JIKA BELUM MEMILIH COURSE (HANYA MUNCUL JIKA TIDAK ADA COURSE DI TAUTAN) */}
+        {!selectedCourseId && courses.length > 1 && (
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-xl">
             <div className="flex items-center justify-between gap-2 mb-3">
               <span className="text-xs font-mono uppercase font-bold text-amber-400 flex items-center gap-1.5">
