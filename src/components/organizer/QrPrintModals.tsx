@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import { Copy, Download, FileText, Printer, RefreshCw } from 'lucide-react';
-import { Course } from '../../types';
+import { Course, ValidationMethod } from '../../types';
 
 export interface PrintableQrItem {
   id: string;
@@ -655,4 +655,687 @@ export function BulkQrPrintModal({
     </div>
   );
 }
+
+/**
+ * MODAL LEMBAR INFO COURSE (SPESIFIKASI COURSE + TABEL DAFTAR POS CHECKPOINT)
+ */
+export function CourseInfoSheetModal({
+  course,
+  onClose,
+}: {
+  course: Course;
+  onClose: () => void;
+}) {
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [isGeneratingPng, setIsGeneratingPng] = useState(false);
+
+  const sortedCheckpoints = useMemo(() => {
+    return [...course.checkpoints].sort((a, b) => a.orderIndex - b.orderIndex);
+  }, [course.checkpoints]);
+
+  const totalPoints = useMemo(() => {
+    return sortedCheckpoints.reduce((sum, cp) => sum + (Number(cp.points) || 0), 0);
+  }, [sortedCheckpoints]);
+
+  // Format informasi spesifikasi course
+  const orderText =
+    course.enforceOrder !== false
+      ? 'Wajib Berurutan (CP1 → CP2 → dst.)'
+      : 'Bebas / Acak (Score-O)';
+
+  const durationText =
+    course.durationMinutes && course.durationMinutes > 0
+      ? `${course.durationMinutes} Menit`
+      : 'Tanpa Batas Waktu';
+
+  const validationText = (() => {
+    switch (course.validationMethod) {
+      case ValidationMethod.QR_ONLY:
+        return 'QR Code Saja (QR_ONLY)';
+      case ValidationMethod.GPS_AUTO:
+        return 'GPS Otomatis (GPS_AUTO)';
+      case ValidationMethod.QR_AND_GPS:
+        return 'Wajib QR + GPS (QR_AND_GPS)';
+      case ValidationMethod.QR_OR_GPS:
+        return 'QR atau GPS (QR_OR_GPS)';
+      default:
+        return String(course.validationMethod);
+    }
+  })();
+
+  const penaltyText =
+    course.durationMinutes &&
+    course.durationMinutes > 0 &&
+    course.overtimePenaltyEnabled &&
+    course.overtimePenaltyPointsPerMinute &&
+    course.overtimePenaltyPointsPerMinute > 0
+      ? `-${course.overtimePenaltyPointsPerMinute} Poin / Menit Keterlambatan`
+      : 'Tidak Ada Penalti Waktu';
+
+  const gpsRadiusText =
+    course.validationMethod === ValidationMethod.QR_ONLY
+      ? 'Tanpa Radius GPS'
+      : `${course.defaultGpsRadiusMeters} Meter`;
+
+  // Paginasi tabel jika jumlah CP sangat banyak (Halaman 1 maks 20 baris karena ada kotak spesifikasi di atas, halaman berikutnya 28 baris)
+  const pages = useMemo(() => {
+    if (sortedCheckpoints.length === 0) {
+      return [[]];
+    }
+    const result: typeof sortedCheckpoints[] = [];
+    const firstPageMax = 20;
+    const nextPageMax = 28;
+
+    result.push(sortedCheckpoints.slice(0, firstPageMax));
+    let offset = firstPageMax;
+    while (offset < sortedCheckpoints.length) {
+      result.push(sortedCheckpoints.slice(offset, offset + nextPageMax));
+      offset += nextPageMax;
+    }
+    return result;
+  }, [sortedCheckpoints]);
+
+  async function renderInfoPageToCanvas(
+    pageCheckpoints: typeof sortedCheckpoints,
+    pageIndex: number
+  ): Promise<HTMLCanvasElement> {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1240;
+    canvas.height = 1754;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    // Latar belakang putih A4
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const marginX = 60;
+    const contentW = canvas.width - marginX * 2;
+    let cursorY = 60;
+
+    // Header Dokumen
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#0284c7';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText(
+      `LEMBAR INFORMASI COURSE & DAFTAR POS CHECKPOINT${
+        pages.length > 1 ? ` (HALAMAN ${pageIndex + 1} DARI ${pages.length})` : ''
+      }`,
+      marginX,
+      cursorY
+    );
+
+    cursorY += 36;
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 30px sans-serif';
+    ctx.fillText(course.name, marginX, cursorY);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#475569';
+    ctx.font = 'bold 18px sans-serif';
+    const locDateStr = course.locationName
+      ? `${course.locationName} • ${course.date}`
+      : course.date;
+    ctx.fillText(locDateStr, canvas.width - marginX, cursorY);
+
+    cursorY += 18;
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(marginX, cursorY);
+    ctx.lineTo(canvas.width - marginX, cursorY);
+    ctx.stroke();
+
+    cursorY += 24;
+
+    // Kotak Spesifikasi Course (Ditampilkan penuh di Halaman 1, atau ringkas di halaman lanjutan)
+    if (pageIndex === 0) {
+      const boxH = 220;
+      ctx.fillStyle = '#f8fafc';
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(marginX, cursorY, contentW, boxH);
+      ctx.strokeRect(marginX, cursorY, contentW, boxH);
+
+      const specs = [
+        {
+          label: 'NAMA KEGIATAN / COURSE',
+          value: `${course.name}${course.locationName ? ` (${course.locationName})` : ''}`,
+        },
+        {
+          label: 'ATURAN URUTAN POS',
+          value: orderText,
+        },
+        {
+          label: 'DURASI LOMBA',
+          value: durationText,
+        },
+        {
+          label: 'METODE VALIDASI POS',
+          value: validationText,
+        },
+        {
+          label: 'INFO PENALTI POINT',
+          value: penaltyText,
+        },
+        {
+          label: 'RADIUS GPS',
+          value: gpsRadiusText,
+        },
+      ];
+
+      const colW = contentW / 2;
+      const rowH = boxH / 3;
+
+      specs.forEach((spec, idx) => {
+        const col = idx % 2;
+        const row = Math.floor(idx / 2);
+        const cellX = marginX + col * colW;
+        const cellY = cursorY + row * rowH;
+
+        // Garis pemisah grid dalam kotak
+        if (row > 0) {
+          ctx.strokeStyle = '#e2e8f0';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cellX, cellY);
+          ctx.lineTo(cellX + colW, cellY);
+          ctx.stroke();
+        }
+        if (col === 1) {
+          ctx.strokeStyle = '#e2e8f0';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cellX, cellY);
+          ctx.lineTo(cellX, cellY + rowH);
+          ctx.stroke();
+        }
+
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#64748b';
+        ctx.font = 'bold 13px sans-serif';
+        ctx.fillText(spec.label, cellX + 18, cellY + 26);
+
+        ctx.fillStyle = '#0f172a';
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillText(spec.value.slice(0, 48), cellX + 18, cellY + 52);
+      });
+
+      cursorY += boxH + 32;
+    }
+
+    // Judul Tabel
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText(
+      `DAFTAR POS CHECKPOINT (${sortedCheckpoints.length} Pos • Total ${totalPoints} Poin)`,
+      marginX,
+      cursorY
+    );
+
+    cursorY += 16;
+
+    // Konfigurasi Kolom Tabel: No. Urut | CP | Point CP | Keterangan
+    const colWidths = [
+      120, // Nomor Urut
+      190, // CP
+      180, // Point CP
+      contentW - 120 - 190 - 180, // Keterangan
+    ];
+    const colX = [
+      marginX,
+      marginX + colWidths[0],
+      marginX + colWidths[0] + colWidths[1],
+      marginX + colWidths[0] + colWidths[1] + colWidths[2],
+    ];
+
+    const headerH = 44;
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(marginX, cursorY, contentW, headerH);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('NO. URUT', colX[0] + colWidths[0] / 2, cursorY + 28);
+    ctx.fillText('CP', colX[1] + colWidths[1] / 2, cursorY + 28);
+    ctx.fillText('POINT CP', colX[2] + colWidths[2] / 2, cursorY + 28);
+    ctx.textAlign = 'left';
+    ctx.fillText('KETERANGAN / DESKRIPSI POS', colX[3] + 18, cursorY + 28);
+
+    cursorY += headerH;
+
+    const rowHeight = 44;
+
+    if (pageCheckpoints.length === 0) {
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(marginX, cursorY, contentW, rowHeight * 2);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.strokeRect(marginX, cursorY, contentW, rowHeight * 2);
+      ctx.fillStyle = '#64748b';
+      ctx.font = 'italic 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        'Belum ada pos checkpoint yang ditambahkan pada course ini.',
+        marginX + contentW / 2,
+        cursorY + rowHeight + 6
+      );
+      cursorY += rowHeight * 2;
+    } else {
+      pageCheckpoints.forEach((cp, idx) => {
+        // Zebra striping
+        ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+        ctx.fillRect(marginX, cursorY, contentW, rowHeight);
+
+        // Border baris dan kolom
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(marginX, cursorY, contentW, rowHeight);
+
+        for (let c = 1; c < colX.length; c++) {
+          ctx.beginPath();
+          ctx.moveTo(colX[c], cursorY);
+          ctx.lineTo(colX[c], cursorY + rowHeight);
+          ctx.stroke();
+        }
+
+        const textY = cursorY + 28;
+
+        // Kolom 1: Nomor Urut
+        ctx.fillStyle = '#334155';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(cp.orderIndex), colX[0] + colWidths[0] / 2, textY);
+
+        // Kolom 2: Kode CP
+        ctx.fillStyle = '#0284c7';
+        ctx.font = 'bold 17px sans-serif';
+        ctx.fillText(cp.code, colX[1] + colWidths[1] / 2, textY);
+
+        // Kolom 3: Point CP
+        ctx.fillStyle = '#059669';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillText(`${cp.points} Poin`, colX[2] + colWidths[2] / 2, textY);
+
+        // Kolom 4: Keterangan
+        ctx.fillStyle = '#0f172a';
+        ctx.font = '16px sans-serif';
+        ctx.textAlign = 'left';
+        const desc = cp.name && cp.name.trim() ? cp.name.trim() : '-';
+        ctx.fillText(desc.slice(0, 58), colX[3] + 18, textY);
+
+        cursorY += rowHeight;
+      });
+    }
+
+    // Baris Total di halaman terakhir
+    if (pageIndex === pages.length - 1 && sortedCheckpoints.length > 0) {
+      ctx.fillStyle = '#f1f5f9';
+      ctx.fillRect(marginX, cursorY, contentW, rowHeight);
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(marginX, cursorY, contentW, rowHeight);
+
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        `TOTAL: ${sortedCheckpoints.length} POS`,
+        colX[0] + (colWidths[0] + colWidths[1]) / 2,
+        cursorY + 28
+      );
+
+      ctx.fillStyle = '#059669';
+      ctx.font = 'bold 17px sans-serif';
+      ctx.fillText(
+        `${totalPoints} Poin`,
+        colX[2] + colWidths[2] / 2,
+        cursorY + 28
+      );
+
+      ctx.fillStyle = '#475569';
+      ctx.font = 'italic 15px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        course.enforceOrder !== false
+          ? 'Pos wajib diambil secara berurutan sesuai nomor urut'
+          : 'Pos dapat diambil secara acak / bebas (Score-O)',
+        colX[3] + 18,
+        cursorY + 28
+      );
+    }
+
+    // Footer halaman
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '13px sans-serif';
+    ctx.fillText(
+      `Dicetak dari Sistem Manajemen Orienteering • ${course.name} • Halaman ${
+        pageIndex + 1
+      } dari ${pages.length}`,
+      canvas.width / 2,
+      canvas.height - 32
+    );
+
+    ctx.textAlign = 'left';
+    return canvas;
+  }
+
+  async function handleDownloadPdf() {
+    setIsGeneratingPdf(true);
+    try {
+      const canvases: HTMLCanvasElement[] = [];
+      for (let i = 0; i < pages.length; i++) {
+        const c = await renderInfoPageToCanvas(pages[i], i);
+        canvases.push(c);
+      }
+      const pdfBlob = buildMultiPagePdfFromCanvases(canvases);
+      const url = URL.createObjectURL(pdfBlob);
+      const safeName = course.name
+        .replace(/[^a-zA-Z0-9-_]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Lembar-Info-Course-${safeName || course.id}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  }
+
+  async function handleDownloadPagePng(
+    pageCheckpoints: typeof sortedCheckpoints,
+    pageIndex: number
+  ) {
+    setIsGeneratingPng(true);
+    try {
+      const canvas = await renderInfoPageToCanvas(pageCheckpoints, pageIndex);
+      const url = canvas.toDataURL('image/png');
+      const safeName = course.name
+        .replace(/[^a-zA-Z0-9-_]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Lembar-Info-Course-${safeName || course.id}-Hal-${pageIndex + 1}.png`;
+      a.click();
+    } finally {
+      setIsGeneratingPng(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80 p-4">
+      <div className="mx-auto max-w-5xl rounded-xl border border-slate-700 bg-slate-900 p-5 space-y-5 shadow-2xl">
+        {/* Top Action Bar Modal */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-teal-400">
+              Lembar Informasi Course &amp; Daftar Pos Checkpoint
+            </span>
+            <h3 className="text-lg font-bold text-white">{course.name}</h3>
+            <p className="text-xs text-slate-400">
+              Dokumen panduan teknis berisi spesifikasi aturan course dan tabel{' '}
+              <strong className="text-teal-300">{sortedCheckpoints.length} pos checkpoint</strong>{' '}
+              (Total <strong className="text-emerald-300">{totalPoints} Poin</strong>).
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              disabled={isGeneratingPdf || isGeneratingPng}
+              onClick={handleDownloadPdf}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-teal-600 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-teal-950/60 hover:bg-teal-500 disabled:opacity-50 cursor-pointer transition"
+            >
+              {isGeneratingPdf ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Menyusun PDF...
+                </>
+              ) : (
+                <>
+                  <FileText className="h-4 w-4" />
+                  Unduh PDF (A4)
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              disabled={isGeneratingPdf || isGeneratingPng}
+              onClick={() => handleDownloadPagePng(pages[0], 0)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50 cursor-pointer transition"
+            >
+              <Download className="h-4 w-4" />
+              Unduh Gambar PNG
+            </button>
+
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700 cursor-pointer transition"
+            >
+              <Printer className="h-4 w-4 text-teal-400" />
+              Print Langsung
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+
+        {/* Lembar Pratinjau A4 Putih */}
+        <div className="space-y-6">
+          {pages.map((pageCheckpoints, pageIndex) => (
+            <div
+              key={pageIndex}
+              className="rounded-xl border border-slate-300 bg-white p-6 sm:p-8 text-slate-900 space-y-6 shadow-xl"
+            >
+              {/* Header Lembar Info Course */}
+              <div className="flex flex-wrap items-start justify-between gap-2 border-b-2 border-slate-200 pb-4">
+                <div>
+                  <div className="text-xs font-extrabold uppercase tracking-wider text-sky-700">
+                    LEMBAR INFORMASI COURSE &amp; DAFTAR POS CHECKPOINT
+                    {pages.length > 1 ? ` (HALAMAN ${pageIndex + 1} DARI ${pages.length})` : ''}
+                  </div>
+                  <h2 className="text-2xl font-black text-slate-900 mt-0.5">
+                    {course.name}
+                  </h2>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-bold text-slate-600">
+                    {course.locationName ? `${course.locationName} • ${course.date}` : course.date}
+                  </div>
+                  {pages.length > 1 && (
+                    <button
+                      type="button"
+                      disabled={isGeneratingPng || isGeneratingPdf}
+                      onClick={() => handleDownloadPagePng(pageCheckpoints, pageIndex)}
+                      className="mt-1 inline-flex items-center gap-1 rounded bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-slate-800 cursor-pointer"
+                    >
+                      <Download className="h-3 w-3" />
+                      Unduh Hal {pageIndex + 1} (PNG)
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Bagian Atas: Kotak Spesifikasi Course (6 Poin Utama sesuai permintaan) */}
+              {pageIndex === 0 && (
+                <div className="rounded-xl border-2 border-slate-300 bg-slate-50 overflow-hidden">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
+                    {/* Kolom Kiri */}
+                    <div className="divide-y divide-slate-200">
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          1. Nama Kegiatan / Course
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          {course.name}
+                          {course.locationName ? ` — ${course.locationName}` : ''}
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          2. Harus Berurut atau Tidak
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          <span
+                            className={`inline-block rounded px-2 py-0.5 text-xs font-bold ${
+                              course.enforceOrder !== false
+                                ? 'bg-fuchsia-100 text-fuchsia-900 border border-fuchsia-300'
+                                : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                            }`}
+                          >
+                            {orderText}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          3. Durasi Lomba
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          {durationText}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Kolom Kanan */}
+                    <div className="divide-y divide-slate-200">
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          4. Metode Validasi Pos
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          {validationText}
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          5. Info Penalti Point
+                        </div>
+                        <div
+                          className={`text-sm font-extrabold mt-0.5 ${
+                            penaltyText.startsWith('-') ? 'text-rose-700' : 'text-slate-900'
+                          }`}
+                        >
+                          {penaltyText}
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          6. Radius GPS
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          {gpsRadiusText}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Bagian Bawah: Tabel Daftar Pos Checkpoint */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-black uppercase tracking-wider text-slate-800">
+                    Tabel Daftar Pos Checkpoint ({sortedCheckpoints.length} Pos)
+                  </h4>
+                  <span className="text-xs font-bold text-emerald-700">
+                    Total Nilai Maksimal: {totalPoints} Poin
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto rounded-lg border border-slate-300">
+                  <table className="w-full border-collapse text-left text-xs sm:text-sm">
+                    <thead>
+                      <tr className="bg-slate-900 text-white">
+                        <th className="w-28 border-r border-slate-700 px-3 py-2.5 text-center font-bold uppercase tracking-wider">
+                          Nomor Urut
+                        </th>
+                        <th className="w-36 border-r border-slate-700 px-3 py-2.5 text-center font-bold uppercase tracking-wider">
+                          CP
+                        </th>
+                        <th className="w-36 border-r border-slate-700 px-3 py-2.5 text-center font-bold uppercase tracking-wider">
+                          Point CP
+                        </th>
+                        <th className="px-4 py-2.5 font-bold uppercase tracking-wider">
+                          Keterangan
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {pageCheckpoints.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="py-8 text-center text-slate-500 italic"
+                          >
+                            Belum ada pos checkpoint yang ditambahkan pada course ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        pageCheckpoints.map((cp, idx) => (
+                          <tr
+                            key={cp.id}
+                            className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}
+                          >
+                            <td className="border-r border-slate-200 px-3 py-2.5 text-center font-bold text-slate-700">
+                              {cp.orderIndex}
+                            </td>
+                            <td className="border-r border-slate-200 px-3 py-2.5 text-center font-extrabold text-sky-700">
+                              {cp.code}
+                            </td>
+                            <td className="border-r border-slate-200 px-3 py-2.5 text-center font-bold text-emerald-700">
+                              {cp.points} Poin
+                            </td>
+                            <td className="px-4 py-2.5 font-medium text-slate-900">
+                              {cp.name && cp.name.trim() ? cp.name : '-'}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {pageIndex === pages.length - 1 && sortedCheckpoints.length > 0 && (
+                      <tfoot>
+                        <tr className="border-t-2 border-slate-300 bg-slate-100 font-bold text-slate-900">
+                          <td
+                            colSpan={2}
+                            className="border-r border-slate-300 px-3 py-2.5 text-center uppercase"
+                          >
+                            Total ({sortedCheckpoints.length} Pos)
+                          </td>
+                          <td className="border-r border-slate-300 px-3 py-2.5 text-center text-emerald-700 font-extrabold">
+                            {totalPoints} Poin
+                          </td>
+                          <td className="px-4 py-2.5 text-xs italic text-slate-600 font-medium">
+                            {course.enforceOrder !== false
+                              ? 'Pos wajib diambil secara berurutan sesuai Nomor Urut.'
+                              : 'Pos dapat diambil secara bebas / acak (Score-O).'}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 

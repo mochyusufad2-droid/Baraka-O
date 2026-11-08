@@ -33,6 +33,7 @@ import {
   Infinity as InfinityIcon,
   Sliders,
   Layers,
+  FileText,
 } from 'lucide-react';
 import {
   Course,
@@ -48,7 +49,7 @@ import {
   SessionStatus,
   ValidationMethod,
 } from '../../types';
-import { BulkQrPrintModal } from './QrPrintModals';
+import { BulkQrPrintModal, CourseInfoSheetModal } from './QrPrintModals';
 import { CourseMapPlanner } from './CourseMapPlanner';
 import {
   LiveMonitoringMap,
@@ -242,6 +243,7 @@ export default function OrganizerDashboard({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [bulkPrintCourse, setBulkPrintCourse] = useState<Course | null>(null);
+  const [infoSheetCourse, setInfoSheetCourse] = useState<Course | null>(null);
 
   // Otomatis hilangkan banner pemberitahuan setelah 4 detik (Auto-Dismiss)
   useEffect(() => {
@@ -2609,6 +2611,13 @@ export default function OrganizerDashboard({
                       Print QR Code Massal
                     </button>
                     <button
+                      onClick={() => setInfoSheetCourse(selectedCourse)}
+                      className="flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold transition shadow"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      Lembar Info Course
+                    </button>
+                    <button
                       onClick={() => setActiveTab('COURSES')}
                       className="text-xs px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
                     >
@@ -3434,6 +3443,17 @@ export default function OrganizerDashboard({
                             <Printer className="w-3.5 h-3.5" />
                             Print QR Massal
                           </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInfoSheetCourse(c);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            Lembar Info Course
+                          </button>
                         </div>
                       </div>
                     );
@@ -3523,10 +3543,19 @@ export default function OrganizerDashboard({
                   <button
                     type="button"
                     onClick={() => setBulkPrintCourse(effectiveSelectedCourse)}
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition"
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition cursor-pointer"
                   >
                     <Printer className="w-4 h-4" />
                     Print QR Code Massal (2 - 8 QR / Halaman)
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setInfoSheetCourse(effectiveSelectedCourse)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs shadow-lg shadow-teal-500/10 transition cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4" />
+                    Lembar Info Course
                   </button>
                 </div>
               </div>
@@ -5389,6 +5418,14 @@ export default function OrganizerDashboard({
         <BulkQrPrintModal
           course={bulkPrintCourse}
           onClose={() => setBulkPrintCourse(null)}
+        />
+      )}
+
+      {/* Modal Lembar Informasi Course & Tabel Pos Checkpoint */}
+      {infoSheetCourse && (
+        <CourseInfoSheetModal
+          course={infoSheetCourse}
+          onClose={() => setInfoSheetCourse(null)}
         />
       )}
 
