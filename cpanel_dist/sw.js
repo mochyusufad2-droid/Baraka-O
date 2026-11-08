@@ -86,8 +86,11 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "pwa-192x192.png",
     "revision": "aae9edae4116e9b1b931e5e0f14ca670"
   }, {
+    "url": "orientra-logo.jpeg",
+    "revision": "3a9cc8ab1bd0f8cf146c17ce75d862d4"
+  }, {
     "url": "index.html",
-    "revision": "25cb8b17398bca087370bcaff958661f"
+    "revision": "bdfcda58a3bc857223300af236da8d85"
   }, {
     "url": "icon.svg",
     "revision": "ebb1b56e78a40d9610f8974a53f189f7"
@@ -95,13 +98,25 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "apple-touch-icon.png",
     "revision": "aec4d193bf8dfaac8b6cce066d10378c"
   }, {
-    "url": "assets/index-dubKOhSZ.css",
+    "url": "assets/index-D6MlLiju.js",
     "revision": null
   }, {
-    "url": "assets/index-CnF50pif.js",
+    "url": "assets/index-BtB0Ud02.css",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/yfTZrz5kgBJzML9teQMFlHSQ3K0CQnSIz97TcRbL58EoMG_aWCABjcqvIKhOHg8kDRaRTQpCKNFEW4g-lA63hsGpJGmMNxYvjZHKcuihrLISDk4k7YxHCOObBqRnZlTbqs3bExO0dJCSZVz8Ym2mH89VIRFK7sjbPzSvZK-vzbIj1HO7m2hTNTZZl5gEnDJb-3_f65a9ec9.jpeg",
     "revision": null
   }, {
     "url": "assets/aistudio/result_c44c58f8.png",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/course___map_io_871f5074.jpg",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/WhatsApp_Image_2026-10-30_at_19.26.44-2_f085c1a4.jpeg",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/Screenshot_2026-11-08_at_23.39.16_5c402695.png",
     "revision": null
   }, {
     "url": "assets/aistudio/Screenshot_2026-11-08_at_21.15.41_17f1ae3a.png",
@@ -158,6 +173,9 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "icon.svg",
     "revision": "ebb1b56e78a40d9610f8974a53f189f7"
   }, {
+    "url": "orientra-logo.jpeg",
+    "revision": "3a9cc8ab1bd0f8cf146c17ce75d862d4"
+  }, {
     "url": "pwa-192x192.png",
     "revision": "aae9edae4116e9b1b931e5e0f14ca670"
   }, {
@@ -168,7 +186,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "696166f35f564a2ccc998889bebb4b10"
   }, {
     "url": "manifest.webmanifest",
-    "revision": "89abe0bf106f4fabbc345087530acbf4"
+    "revision": "8d79449d111b2a9c7b1e1f58ae948c7f"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("/index.html"), {

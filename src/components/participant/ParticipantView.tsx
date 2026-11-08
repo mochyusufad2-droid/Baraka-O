@@ -2109,15 +2109,15 @@ export default function ParticipantView({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.fillStyle = '#090d16';
+    ctx.fillStyle = '#051224';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    ctx.fillStyle = '#10b981';
+    ctx.fillStyle = '#ff6b00';
     ctx.fillRect(0, 0, canvas.width, 8);
 
-    ctx.fillStyle = '#10b981';
+    ctx.fillStyle = '#38bdf8';
     ctx.font = 'bold 20px sans-serif';
-    ctx.fillText('BARAKA ADVENTURE — BUKTI CADANGAN PESERTA', 32, 48);
+    ctx.fillText('ORIENTRA — BUKTI CADANGAN PESERTA', 32, 48);
 
     ctx.fillStyle = '#f8fafc';
     ctx.font = 'bold 26px sans-serif';
@@ -2184,7 +2184,7 @@ export default function ParticipantView({
     a.href = dataUrl;
     const safeTeamSlug =
       participant.teamName.replace(/[^a-zA-Z0-9-_]/g, '_') || 'Peserta';
-    a.download = `Bukti-Baraka-${safeTeamSlug}.png`;
+    a.download = `Bukti-Orientra-${safeTeamSlug}.png`;
     a.click();
   }
 
@@ -2305,9 +2305,16 @@ export default function ParticipantView({
       {cameraActiveFor && (
         <div className="fixed inset-0 z-50 flex flex-col bg-black select-none">
           {/* TOP BAR GAYA iOrienteering: Nama Aplikasi di Kiri, FLASH ON & CANCEL di Kanan */}
-          <div className="flex h-14 shrink-0 items-center justify-between bg-[#221c1d] px-4 text-white shadow-md z-20">
-            <div className="text-lg font-normal tracking-wide text-white truncate">
-              BARAKA ADVENTURE
+          <div className="flex h-14 shrink-0 items-center justify-between bg-[#051224] border-b border-sky-500/30 px-4 text-white shadow-md z-20">
+            <div className="flex items-center gap-2.5 truncate">
+              <img
+                src="/orientra-logo.jpeg"
+                alt="ORIENTRA"
+                className="h-7 w-7 rounded-md bg-white object-contain p-0.5 shrink-0"
+              />
+              <span className="text-base font-black tracking-wider text-white truncate">
+                ORIENT<span className="text-amber-400">RA</span>
+              </span>
             </div>
             <div className="flex items-center gap-5">
               {flashSupported && (
@@ -2689,7 +2696,7 @@ export default function ParticipantView({
                   minLength={6}
                   value={regPin}
                   onChange={(e) => setRegPin(e.target.value)}
-                  placeholder="Contoh: baraka123"
+                  placeholder="Contoh: orientra123"
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">

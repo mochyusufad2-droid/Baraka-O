@@ -58,6 +58,12 @@ import {
 import { SpectatorLiveLeaderboardModal } from './SpectatorLiveLeaderboardModal';
 import { ShareSpectatorLiveModal } from './ShareSpectatorLiveModal';
 import { EditOrganizerQuotaModal } from './EditOrganizerQuotaModal';
+import {
+  SuperAdminBreadcrumb,
+  SuperAdminLevel2Courses,
+  SuperAdminLevel3Participants,
+  SuperAdminLevel4ParticipantDetail,
+} from './SuperAdminExplorerPanel';
 import { syncCourseToFirestore } from '../../firebase';
 import {
   clearPersistedParticipantState,
@@ -249,6 +255,23 @@ export default function OrganizerDashboard({
     useState<boolean>(false);
   const [isConfirmEmergencyOpen, setIsConfirmEmergencyOpen] =
     useState<boolean>(false);
+
+  // State Alur Eksplorasi Bertingkat 4 Level Khusus Superadmin
+  const [superExplorerMode, setSuperExplorerMode] = useState<boolean>(true);
+  const [explorerLevel, setExplorerLevel] = useState<1 | 2 | 3 | 4>(1);
+  const [explorerOrganizerId, setExplorerOrganizerId] = useState<string | null>(
+    null
+  );
+  const [explorerInspectMapCourseId, setExplorerInspectMapCourseId] = useState<
+    string | null
+  >(null);
+  const [explorerShowLiveMonitoring, setExplorerShowLiveMonitoring] =
+    useState<boolean>(false);
+  const [explorerParticipant, setExplorerParticipant] =
+    useState<ParticipantPublic | null>(null);
+  const [explorerSessionId, setExplorerSessionId] = useState<string | null>(
+    null
+  );
 
   // Otomatis hilangkan banner pemberitahuan setelah 4 detik (Auto-Dismiss)
   useEffect(() => {
@@ -1451,6 +1474,7 @@ export default function OrganizerDashboard({
 
       return {
         sessionId: sess.id,
+        participantId: sess.participantId,
         bibNumber: participant?.bibNumber || '-',
         participantName: participant?.name || 'Peserta',
         teamName: participant?.teamName || participant?.name || '-',
@@ -1470,6 +1494,8 @@ export default function OrganizerDashboard({
         penaltyPoints,
         totalScore: netScore,
         durationSeconds: liveDurationSec,
+        startedAt: sess.startedAt,
+        finishedAt: sess.finishedAt,
         entryDateLabel: entryDateParts.dateLabel,
         entryTimeLabel: entryDateParts.timeLabel,
         splits: orderedSplits,
@@ -2056,7 +2082,7 @@ export default function OrganizerDashboard({
       const link = document.createElement('a');
       link.href = url;
       const dateStr = new Date().toISOString().slice(0, 10);
-      link.download = `baraka-full-database-${dateStr}.json`;
+      link.download = `orientra-full-database-${dateStr}.json`;
       link.click();
       URL.revokeObjectURL(url);
       showTemporarySuccess('File database berhasil diunduh ke perangkat Anda.');
@@ -2085,7 +2111,7 @@ export default function OrganizerDashboard({
       const link = document.createElement('a');
       link.href = url;
       const dateStr = new Date().toISOString().slice(0, 10);
-      link.download = `baraka-cpanel-ready-${dateStr}.zip`;
+      link.download = `orientra-cpanel-ready-${dateStr}.zip`;
       link.click();
       URL.revokeObjectURL(url);
       showTemporarySuccess(
@@ -2109,7 +2135,7 @@ export default function OrganizerDashboard({
         const text = event.target?.result as string;
         const parsed = JSON.parse(text);
         if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.courses)) {
-          setErrorMsg('File bukan backup database BARAKA yang valid (format courses tidak ditemukan).');
+          setErrorMsg('File bukan backup database ORIENTRA yang valid (format courses tidak ditemukan).');
           return;
         }
         setPendingRestoreData(parsed);
@@ -2234,7 +2260,7 @@ export default function OrganizerDashboard({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `baraka-result-${showResultSplits ? 'split' : 'summary'}-${
+    link.download = `orientra-result-${showResultSplits ? 'split' : 'summary'}-${
       selectedCourse?.name.toLowerCase().replace(/\s+/g, '-') || 'all'
     }.csv`;
     link.click();
@@ -2247,12 +2273,16 @@ export default function OrganizerDashboard({
       <div className="mx-auto max-w-md py-12">
         <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-6 shadow-2xl space-y-5">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
-              <Shield className="h-6 w-6" />
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white p-1 border border-sky-400/50 shadow-md shadow-sky-950/60 shrink-0">
+              <img
+                src="/orientra-logo.jpeg"
+                alt="ORIENTRA Logo"
+                className="h-full w-full object-contain"
+              />
             </div>
             <div>
-              <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
-                Otorisasi Panitia &amp; Superadmin
+              <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
+                ORIENTRA • Otorisasi Panitia &amp; Superadmin
               </span>
               <h2 className="text-lg font-bold text-white">
                 Login Dashboard Organizer
@@ -2328,7 +2358,7 @@ export default function OrganizerDashboard({
       <div className="py-16 flex items-center justify-center">
         <div className="flex items-center gap-3 text-amber-400 font-mono text-sm">
           <RefreshCw className="w-5 h-5 animate-spin" />
-          Memuat Data Organizer BARAKA ADVENTURE...
+          Memuat Data Organizer ORIENTRA...
         </div>
       </div>
     );
@@ -2513,7 +2543,36 @@ export default function OrganizerDashboard({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {activeTab !== 'ORGANIZERS' && (
+            {/* Saklar Mode Tampilan Superadmin: Alur 4 Level vs Tab Klasik */}
+            <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setSuperExplorerMode(true);
+                  setExplorerLevel(1);
+                }}
+                className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                  superExplorerMode
+                    ? 'bg-amber-500 text-slate-950 shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Alur 4 Level
+              </button>
+              <button
+                type="button"
+                onClick={() => setSuperExplorerMode(false)}
+                className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                  !superExplorerMode
+                    ? 'bg-amber-500 text-slate-950 shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Tab Klasik
+              </button>
+            </div>
+
+            {!superExplorerMode && activeTab !== 'ORGANIZERS' && (
               <button
                 type="button"
                 onClick={() => setActiveTab('ORGANIZERS')}
@@ -2554,43 +2613,66 @@ export default function OrganizerDashboard({
         </div>
       )}
 
-      {/* Main Navigation Tabs (5 Tabs for Superadmin, 4 Tabs for Regular Organizer) */}
-      <div className="flex overflow-x-auto border-b border-slate-800">
-        {[
-          { id: 'OVERVIEW', label: '1. Overview', icon: LayoutDashboard },
-          { id: 'COURSES', label: '2. Course & Peta Pos', icon: MapIcon },
-          { id: 'MONITORING', label: '3. Live Monitoring', icon: Radio },
-          { id: 'RESULT', label: '4. Result & Leaderboard', icon: Trophy },
-          ...(dashboard?.currentOrganizer?.isSuperAdmin
-            ? [
-                {
-                  id: 'ORGANIZERS',
-                  label: `5. Kelola Organizer (${
-                    dashboard.organizers?.length || 0
-                  })`,
-                  icon: Shield,
-                },
-              ]
-            : []),
-        ].map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as OrganizerTab)}
-              className={`flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-medium border-b-2 whitespace-nowrap transition ${
-                isActive
-                  ? 'border-amber-400 text-amber-400 bg-amber-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
+      {/* Breadcrumb Navigasi 4 Level (Khusus Superadmin Mode Eksplorasi 4 Level) */}
+      {isSuperAdminUser && superExplorerMode && dashboard && (
+        <SuperAdminBreadcrumb
+          level={explorerLevel}
+          selectedOrganizerName={
+            explorerOrganizerId === '__SUPERADMIN__'
+              ? 'Course Internal / Superadmin'
+              : dashboard.organizers?.find((o) => o.id === explorerOrganizerId)
+                  ?.name
+          }
+          selectedCourseName={selectedCourse?.name}
+          selectedParticipantTeamName={explorerParticipant?.teamName}
+          organizersCount={dashboard.organizers?.length || 0}
+          onSelectLevel={(target) => {
+            setExplorerLevel(target);
+            setExplorerInspectMapCourseId(null);
+            setExplorerShowLiveMonitoring(false);
+          }}
+        />
+      )}
+
+      {/* Main Navigation Tabs (Ditampilkan untuk Organizer Biasa atau jika Superadmin memilih Tab Klasik) */}
+      {(!isSuperAdminUser || !superExplorerMode) && (
+        <div className="flex overflow-x-auto border-b border-slate-800">
+          {[
+            { id: 'OVERVIEW', label: '1. Overview', icon: LayoutDashboard },
+            { id: 'COURSES', label: '2. Course & Peta Pos', icon: MapIcon },
+            { id: 'MONITORING', label: '3. Live Monitoring', icon: Radio },
+            { id: 'RESULT', label: '4. Result & Leaderboard', icon: Trophy },
+            ...(dashboard?.currentOrganizer?.isSuperAdmin
+              ? [
+                  {
+                    id: 'ORGANIZERS',
+                    label: `5. Kelola Organizer (${
+                      dashboard.organizers?.length || 0
+                    })`,
+                    icon: Shield,
+                  },
+                ]
+              : []),
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as OrganizerTab)}
+                className={`flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-medium border-b-2 whitespace-nowrap transition ${
+                  isActive
+                    ? 'border-amber-400 text-amber-400 bg-amber-500/5'
+                    : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {errorMsg && (
         <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
@@ -2616,11 +2698,155 @@ export default function OrganizerDashboard({
         </div>
       )}
 
+      {/* ====================================================================
+          KHUSUS SUPERADMIN (MODE EKSPLORASI 4 LEVEL):
+          LEVEL 2 (DAFTAR COURSE), LEVEL 3 (DAFTAR PESERTA), LEVEL 4 (DETAIL PESERTA)
+         ==================================================================== */}
+      {isSuperAdminUser && superExplorerMode && dashboard && explorerLevel === 2 && (
+        <SuperAdminLevel2Courses
+          organizer={
+            explorerOrganizerId === '__SUPERADMIN__'
+              ? null
+              : dashboard.organizers?.find((o) => o.id === explorerOrganizerId) ||
+                null
+          }
+          isUnassignedGroup={explorerOrganizerId === '__SUPERADMIN__'}
+          courses={
+            explorerOrganizerId === '__SUPERADMIN__'
+              ? dashboard.courses.filter(
+                  (c) =>
+                    !c.createdByOrganizerId ||
+                    !(dashboard.organizers || []).some(
+                      (o) => o.id === c.createdByOrganizerId
+                    )
+                )
+              : dashboard.courses.filter(
+                  (c) => c.createdByOrganizerId === explorerOrganizerId
+                )
+          }
+          sessions={dashboard.sessions}
+          participants={dashboard.participants}
+          selectedCourseId={selectedCourseId}
+          inspectingMapCourseId={explorerInspectMapCourseId}
+          isSuperAdminReadOnly={isSuperAdminReadOnly}
+          onBackToOrganizers={() => {
+            setExplorerInspectMapCourseId(null);
+            setExplorerLevel(1);
+          }}
+          onOpenCourseParticipants={(c) => {
+            setSelectedCourseId(c.id);
+            setExplorerInspectMapCourseId(null);
+            setExplorerShowLiveMonitoring(false);
+            setExplorerLevel(3);
+          }}
+          onToggleInspectCourseMap={(c) => {
+            setSelectedCourseId(c.id);
+            setIsEditingCourse(false);
+            setEditingCheckpointId(null);
+            setExplorerInspectMapCourseId((prev) =>
+              prev === c.id ? null : c.id
+            );
+          }}
+          onBulkPrintCourse={(c) => setBulkPrintCourse(c)}
+          onInfoSheetCourse={(c) => setInfoSheetCourse(c)}
+          onDeleteCourse={(c) => setConfirmDeleteCourse(c)}
+        />
+      )}
+
+      {isSuperAdminUser &&
+        superExplorerMode &&
+        dashboard &&
+        explorerLevel === 3 &&
+        selectedCourse && (
+          <SuperAdminLevel3Participants
+            course={selectedCourse}
+            organizerName={
+              explorerOrganizerId === '__SUPERADMIN__'
+                ? 'Superadmin'
+                : dashboard.organizers?.find((o) => o.id === explorerOrganizerId)
+                    ?.name ||
+                  selectedCourse.createdByOrganizerName ||
+                  'Organizer'
+            }
+            leaderboardRows={leaderboardRows}
+            allParticipants={dashboard.participants}
+            allSessions={dashboard.sessions}
+            splitColumnCount={splitColumnCount}
+            showResultSplits={showResultSplits}
+            resultGenderFilter={resultGenderFilter}
+            resultAgeGroupFilter={resultAgeGroupFilter}
+            isSuperAdminReadOnly={isSuperAdminReadOnly}
+            showLiveMonitoringMap={explorerShowLiveMonitoring}
+            onBackToCourses={() => {
+              setExplorerShowLiveMonitoring(false);
+              setExplorerLevel(2);
+            }}
+            onSelectParticipantDetail={(partObj, row) => {
+              setExplorerParticipant(partObj);
+              setExplorerSessionId(row?.sessionId || null);
+              setExplorerLevel(4);
+            }}
+            onToggleShowResultSplits={(show) => setShowResultSplits(show)}
+            onChangeGenderFilter={(val) => setResultGenderFilter(val)}
+            onChangeAgeGroupFilter={(val) => setResultAgeGroupFilter(val)}
+            onToggleLiveMonitoringMap={() =>
+              setExplorerShowLiveMonitoring((prev) => !prev)
+            }
+            onShareSpectatorCourse={(c) => setShareSpectatorCourse(c)}
+            onOpenSpectatorFullscreen={() => setIsSpectatorFullscreen(true)}
+            onExportCsv={handleExportCsv}
+            onDeleteSessionResult={handleDeleteSessionResult}
+          />
+        )}
+
+      {isSuperAdminUser &&
+        superExplorerMode &&
+        dashboard &&
+        explorerLevel === 4 &&
+        explorerParticipant &&
+        selectedCourse && (
+          <SuperAdminLevel4ParticipantDetail
+            participant={
+              dashboard.participants.find(
+                (p) => p.id === explorerParticipant.id
+              ) || explorerParticipant
+            }
+            course={selectedCourse}
+            organizerName={
+              explorerOrganizerId === '__SUPERADMIN__'
+                ? 'Superadmin'
+                : dashboard.organizers?.find((o) => o.id === explorerOrganizerId)
+                    ?.name ||
+                  selectedCourse.createdByOrganizerName ||
+                  'Organizer'
+            }
+            participantCourseRows={leaderboardRows.filter(
+              (r) =>
+                r.courseId === selectedCourse.id &&
+                r.participantId === explorerParticipant.id
+            )}
+            initialSessionId={explorerSessionId}
+            reports={dashboard.reports}
+            isSuperAdminReadOnly={isSuperAdminReadOnly}
+            resetParticipantPasswordId={resetParticipantPasswordId}
+            resetParticipantPasswordValue={resetParticipantPasswordValue}
+            onBackToParticipants={() => setExplorerLevel(3)}
+            onSetResetParticipantPasswordId={setResetParticipantPasswordId}
+            onSetResetParticipantPasswordValue={
+              setResetParticipantPasswordValue
+            }
+            onSaveResetParticipantPassword={handleSaveResetParticipantPassword}
+            onConfirmDeleteParticipant={(p) => setConfirmDeleteParticipant(p)}
+          />
+        )}
+
       {/* TAB 1: OVERVIEW */}
-      {activeTab === 'OVERVIEW' && dashboard && (
+      {(!isSuperAdminUser || !superExplorerMode) &&
+        activeTab === 'OVERVIEW' &&
+        dashboard && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-4">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
                 <span>Total Peserta Terdaftar</span>
                 <Users className="w-4 h-4 text-sky-400" />
@@ -2633,7 +2859,7 @@ export default function OrganizerDashboard({
               </div>
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-4">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
                 <span>Sedang Berlomba (ACTIVE)</span>
                 <Radio className="w-4 h-4 text-emerald-400" />
@@ -2657,7 +2883,7 @@ export default function OrganizerDashboard({
               </div>
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-4">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
                 <span>Sudah Finish (FINISHED)</span>
                 <CheckCircle2 className="w-4 h-4 text-amber-400" />
@@ -2674,7 +2900,7 @@ export default function OrganizerDashboard({
               </div>
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-4">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
                 <span>Total Course &amp; Pos CP</span>
                 <MapIcon className="w-4 h-4 text-purple-400" />
@@ -2695,7 +2921,7 @@ export default function OrganizerDashboard({
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Selected Course Summary Card (Tanpa kotak QR individual — terpusat di Print QR Massal) */}
-            <div className="lg:col-span-2 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="lg:col-span-2 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[11px] font-mono uppercase text-amber-400">
@@ -2797,7 +3023,7 @@ export default function OrganizerDashboard({
             </div>
 
             {/* Register Participant Form / Read-Only Participant Monitor */}
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
                 <span className="text-[11px] font-mono uppercase text-sky-400">
                   {isSuperAdminReadOnly
@@ -3129,12 +3355,18 @@ export default function OrganizerDashboard({
         </div>
       )}
 
-      {/* TAB 2: UNIFIED COURSE MANAGEMENT + INTERACTIVE MAP */}
-      {activeTab === 'COURSES' && dashboard && (
+      {/* TAB 2: UNIFIED COURSE MANAGEMENT + INTERACTIVE MAP (atau saat Superadmin klik Info Peta & Pos CP di Level 2) */}
+      {(((!isSuperAdminUser || !superExplorerMode) && activeTab === 'COURSES') ||
+        (isSuperAdminUser &&
+          superExplorerMode &&
+          explorerLevel === 2 &&
+          Boolean(explorerInspectMapCourseId))) &&
+        dashboard && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Left 5 cols: Create Unified Course Form (or Read-Only Superadmin Monitor Panel) */}
-            <div className="lg:col-span-5 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+          {(!isSuperAdminUser || !superExplorerMode) && (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left 5 cols: Create Unified Course Form (or Read-Only Superadmin Monitor Panel) */}
+              <div className="lg:col-span-5 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
                 <span className="text-[11px] font-mono uppercase text-amber-400">
                   {isSuperAdminReadOnly
@@ -3254,7 +3486,7 @@ export default function OrganizerDashboard({
                       <input
                         type="text"
                         required
-                        placeholder="Contoh: BARAKA SPRINT ORIENTEERING — KATEGORI UMUM"
+                        placeholder="Contoh: ORIENTRA SPRINT ORIENTEERING — KATEGORI UMUM"
                         value={newCourseName}
                         onChange={(e) => setNewCourseName(e.target.value)}
                         className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
@@ -3478,7 +3710,7 @@ export default function OrganizerDashboard({
             </div>
 
             {/* Right 7 cols: Existing Courses List */}
-            <div className="lg:col-span-7 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="lg:col-span-7 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[11px] font-mono uppercase text-emerald-400">
@@ -3572,10 +3804,11 @@ export default function OrganizerDashboard({
               )}
             </div>
           </div>
+          )}
 
           {/* Bottom Row: Selected Course Active Management, Map Planner & Checkpoint Table */}
           {selectedCourse && effectiveSelectedCourse && (
-            <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
+            <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-5">
               {/* Header Course Aktif + Tombol Edit Course, Hapus Course & Print QR Massal */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
                 <div>
@@ -4177,10 +4410,16 @@ export default function OrganizerDashboard({
         </div>
       )}
 
-      {/* TAB 3: LIVE MONITORING */}
-      {activeTab === 'MONITORING' && dashboard && (
+      {/* TAB 3: LIVE MONITORING (atau saat Superadmin klik Lihat Peta Live Monitoring di Level 3) */}
+      {(((!isSuperAdminUser || !superExplorerMode) &&
+        activeTab === 'MONITORING') ||
+        (isSuperAdminUser &&
+          superExplorerMode &&
+          explorerLevel === 3 &&
+          explorerShowLiveMonitoring)) &&
+        dashboard && (
         <div className="space-y-6">
-          <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
+          <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
                 <span className="text-[11px] font-mono uppercase text-emerald-400 flex items-center gap-1.5">
@@ -4414,9 +4653,11 @@ export default function OrganizerDashboard({
       )}
 
       {/* TAB 4: RESULT & LEADERBOARD (TETAP SEPERTI TABEL ASLI APLIKASI + OPSI SHOW SPLIT / HIDE SPLIT) */}
-      {activeTab === 'RESULT' && dashboard && (
+      {(!isSuperAdminUser || !superExplorerMode) &&
+        activeTab === 'RESULT' &&
+        dashboard && (
         <div className="space-y-6">
-          <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+          <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
                 <span className="text-[11px] font-mono uppercase text-amber-400">
@@ -4786,14 +5027,94 @@ export default function OrganizerDashboard({
         </div>
       )}
 
-      {/* TAB 5: KELOLA AKUN ORGANIZER (KHUSUS SUPERADMIN) */}
-      {activeTab === 'ORGANIZERS' &&
-        dashboard &&
-        dashboard.currentOrganizer?.isSuperAdmin && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* LEVEL 1 SUPERADMIN (DAFTAR & KELOLA ORGANIZER) / TAB 5: KELOLA AKUN ORGANIZER */}
+      {dashboard &&
+        dashboard.currentOrganizer?.isSuperAdmin &&
+        ((superExplorerMode && explorerLevel === 1) ||
+          (!superExplorerMode && activeTab === 'ORGANIZERS')) && (
+          <div className="space-y-6">
+            {/* Ringkasan Global Level 1 untuk Superadmin */}
+            {superExplorerMode && (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
+                  <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                    <span>Total Akun Organizer</span>
+                    <Shield className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-white">
+                    {dashboard.organizers?.length || 0}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    Klik Organizer di bawah untuk membuka Course
+                  </div>
+                </div>
+
+                <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
+                  <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                    <span>Total Course &amp; Pos CP</span>
+                    <MapIcon className="w-4 h-4 text-amber-400" />
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-amber-400">
+                    {dashboard.courses.length}{' '}
+                    <span className="text-sm text-slate-400 font-normal">
+                      Course (
+                      {dashboard.courses.reduce(
+                        (acc, c) => acc + c.checkpoints.length,
+                        0
+                      )}{' '}
+                      CP)
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    Tersebar di seluruh akun panitia
+                  </div>
+                </div>
+
+                <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
+                  <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                    <span>Total Peserta Terdaftar</span>
+                    <Users className="w-4 h-4 text-sky-400" />
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-sky-400">
+                    {dashboard.participants.length}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    Terdaftar di seluruh Course
+                  </div>
+                </div>
+
+                <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
+                  <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                    <span>Sesi Aktif / Selesai</span>
+                    <Radio className="w-4 h-4 text-emerald-400" />
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-emerald-400">
+                    {
+                      dashboard.sessions.filter(
+                        (s) => s.status === SessionStatus.ACTIVE && !s.isDnf
+                      ).length
+                    }{' '}
+                    <span className="text-sm text-slate-400 font-normal">
+                      Aktif •{' '}
+                      {
+                        dashboard.sessions.filter(
+                          (s) => s.status === SessionStatus.FINISHED && !s.isDnf
+                        ).length
+                      }{' '}
+                      Finish
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    Total {dashboard.sessions.length} sesi terekam
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="space-y-6">
               {/* Form Pengaturan Kredensial Superadmin (Ganti Username & PIN) */}
-              <div className="bg-[#111827] border border-purple-500/30 rounded-xl p-5 space-y-4 shadow-lg shadow-purple-950/20">
+              <div className="bg-[#0a1f38] border border-purple-500/30 rounded-xl p-5 space-y-4 shadow-lg shadow-purple-950/20">
                 <div className="border-b border-slate-800 pb-3">
                   <div className="flex items-center gap-2">
                     <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/20 text-purple-400">
@@ -4888,7 +5209,7 @@ export default function OrganizerDashboard({
               </div>
 
               {/* Form Buat Akun Organizer Baru */}
-              <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+              <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div>
                 <span className="text-[11px] font-mono uppercase text-purple-400">
                   Otoritas Superadmin
@@ -4964,7 +5285,7 @@ export default function OrganizerDashboard({
                     minLength={6}
                     value={orgPinInput}
                     onChange={(e) => setOrgPinInput(e.target.value)}
-                    placeholder="Contoh: baraka123 atau 778899"
+                    placeholder="Contoh: orientra123 atau 778899"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                   />
                   <p className="text-[10px] text-slate-400 mt-1">
@@ -5096,7 +5417,7 @@ export default function OrganizerDashboard({
           </div>
 
           {/* Daftar Akun Organizer */}
-            <div className="lg:col-span-2 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="lg:col-span-2 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div>
                   <span className="text-[11px] font-mono uppercase text-amber-400">
@@ -5207,6 +5528,27 @@ export default function OrganizerDashboard({
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => {
+                              setExplorerOrganizerId(org.id);
+                              setExplorerInspectMapCourseId(null);
+                              setExplorerShowLiveMonitoring(false);
+                              if (orgCourses[0]) {
+                                setSelectedCourseId(orgCourses[0].id);
+                              }
+                              setSuperExplorerMode(true);
+                              setExplorerLevel(2);
+                            }}
+                            className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 shadow-lg shadow-amber-500/20"
+                            title="Buka Daftar Course yang dibuat oleh Organizer ini (Level 2)"
+                          >
+                            <MapIcon className="w-4 h-4" />
+                            <span>
+                              Buka Course ({orgCourses.length})
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => setSelectedEditOrg(org)}
                             className="px-2.5 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 text-xs font-semibold border border-purple-500/40 transition cursor-pointer flex items-center gap-1.5 shadow"
                             title="Edit Kuota Course &amp; Perpanjang Masa Aktif Akun"
@@ -5279,12 +5621,83 @@ export default function OrganizerDashboard({
                       </div>
                     );
                   })}
+
+                  {/* Kartu Tambahan Jika Ada Course Internal / Dibuat Langsung oleh Superadmin */}
+                  {(() => {
+                    const orgIdSet = new Set(
+                      (dashboard.organizers || []).map((o) => o.id)
+                    );
+                    const internalCourses = dashboard.courses.filter(
+                      (c) =>
+                        !c.createdByOrganizerId ||
+                        !orgIdSet.has(c.createdByOrganizerId)
+                    );
+                    if (internalCourses.length === 0) return null;
+                    const internalCourseIds = new Set(
+                      internalCourses.map((c) => c.id)
+                    );
+                    const internalSessionsCount = dashboard.sessions.filter(
+                      (s) => internalCourseIds.has(s.courseId)
+                    ).length;
+
+                    return (
+                      <div className="rounded-xl border border-sky-500/30 bg-sky-950/20 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                              SUPERADMIN
+                            </span>
+                            <span className="font-bold text-white text-sm">
+                              Course Internal / Dibuat Superadmin
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-300 flex flex-wrap items-center gap-3">
+                            <span>
+                              • Course Tersedia:{' '}
+                              <strong className="text-amber-300">
+                                {internalCourses.length}
+                              </strong>
+                            </span>
+                            <span>
+                              • Sesi Peserta:{' '}
+                              <strong className="text-emerald-300">
+                                {internalSessionsCount}
+                              </strong>
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExplorerOrganizerId('__SUPERADMIN__');
+                            setExplorerInspectMapCourseId(null);
+                            setExplorerShowLiveMonitoring(false);
+                            if (internalCourses[0]) {
+                              setSelectedCourseId(internalCourses[0].id);
+                            }
+                            setSuperExplorerMode(true);
+                            setExplorerLevel(2);
+                          }}
+                          className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 shadow-lg shadow-amber-500/20 shrink-0"
+                        >
+                          <MapIcon className="w-4 h-4" />
+                          <span>
+                            Buka Course ({internalCourses.length})
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
+            </div>
+          </div>
+        )}
 
-            {/* Kartu Manajemen Database Mandiri (Full Backup & Restore 1-Klik) */}
-            <div className="lg:col-span-3 bg-[#111827] border border-amber-500/30 rounded-xl p-5 space-y-4 shadow-xl">
+      {/* KARTU KESIAPAN HOSTING MANDIRI (SELF-HOSTED) — KONSISTEN MUNCUL DI BAGIAN BAWAH DILUAR TAB ATAU LEVEL APAPUN */}
+      {dashboard && dashboard.currentOrganizer?.isSuperAdmin && (
+        <div className="bg-[#0a1f38] border border-amber-500/30 rounded-xl p-5 space-y-4 shadow-xl">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
@@ -5359,7 +5772,6 @@ export default function OrganizerDashboard({
                 </div>
               </div>
             </div>
-          </div>
         )}
 
       {/* Modal Konfirmasi Hapus 1 Peserta */}

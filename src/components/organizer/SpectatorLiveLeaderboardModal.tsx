@@ -381,13 +381,17 @@ export function SpectatorLiveLeaderboardModal({
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* Logo & Event Title */}
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-black shadow-lg shadow-amber-500/20">
-              <Trophy className="h-6 w-6" />
+            <div className="h-10 w-10 rounded-xl bg-white p-0.5 flex items-center justify-center ring-2 ring-sky-400/50 shadow-lg overflow-hidden shrink-0">
+              <img
+                src="/orientra-logo.jpeg"
+                alt="ORIENTRA Logo"
+                className="h-full w-full object-contain scale-125"
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-mono uppercase tracking-widest text-amber-400 font-bold">
-                  BARAKA ADVENTURE
+                  ORIENTRA — Digital Orienteering &amp; Race Platform
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-mono font-bold animate-pulse">
                   <span className="h-1.5 w-1.5 rounded-full bg-rose-500"></span>
@@ -882,7 +886,7 @@ export function SpectatorLiveLeaderboardModal({
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
           <span>
-            AUTO-UPDATE REAL-TIME • DILAYANI SERVER BARAKA ADVENTURE
+            AUTO-UPDATE REAL-TIME • DILAYANI SERVER ORIENTRA
           </span>
         </div>
         <div className="flex items-center gap-4 text-slate-400">

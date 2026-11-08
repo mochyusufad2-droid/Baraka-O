@@ -168,8 +168,8 @@ export function QrCardModal({
       <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 space-y-4 shadow-2xl">
         <div className="flex items-start justify-between border-b border-slate-800 pb-3">
           <div>
-            <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-              BARAKA ADVENTURE — QR Resmi
+            <span className="text-xs font-semibold uppercase tracking-wider text-sky-400">
+              ORIENTRA — QR Resmi
             </span>
             <h3 className="text-base font-bold text-white">{title}</h3>
             <p className="text-xs text-slate-400">{subtitle}</p>
@@ -326,10 +326,10 @@ export function BulkQrPrintModal({
 
     // Header Lembar A4
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#059669';
+    ctx.fillStyle = '#0284c7';
     ctx.font = 'bold 20px sans-serif';
     ctx.fillText(
-      `BARAKA ADVENTURE — LEMBAR QR RESMI (HALAMAN ${pageIndex + 1} DARI ${pages.length})`,
+      `ORIENTRA — LEMBAR QR RESMI (HALAMAN ${pageIndex + 1} DARI ${pages.length})`,
       50,
       52
     );
@@ -567,12 +567,19 @@ export function BulkQrPrintModal({
               className="rounded-xl border border-slate-700 bg-white p-6 text-slate-900 space-y-4 shadow"
             >
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
-                <div>
-                  <div className="text-xs font-bold uppercase tracking-wider text-emerald-700">
-                    BARAKA ADVENTURE — LEMBAR QR RESMI (HALAMAN {pageIndex + 1} DARI {pages.length})
-                  </div>
-                  <div className="text-sm font-bold text-slate-900">
-                    {course.name} • {course.locationName} ({course.date}) — Opsi: {qrPerPage} QR / Page
+                <div className="flex items-center gap-3">
+                  <img
+                    src="/orientra-logo.jpeg"
+                    alt="ORIENTRA"
+                    className="h-10 w-10 rounded-lg border border-slate-200 object-contain p-0.5"
+                  />
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-wider text-sky-700">
+                      ORIENTRA — LEMBAR QR RESMI (HALAMAN {pageIndex + 1} DARI {pages.length})
+                    </div>
+                    <div className="text-sm font-bold text-slate-900">
+                      {course.name} • {course.locationName} ({course.date}) — Opsi: {qrPerPage} QR / Page
+                    </div>
                   </div>
                 </div>
                 <button
@@ -758,7 +765,7 @@ export function CourseInfoSheetModal({
     ctx.fillStyle = '#0284c7';
     ctx.font = 'bold 20px sans-serif';
     ctx.fillText(
-      `LEMBAR INFORMASI COURSE & DAFTAR POS CHECKPOINT${
+      `ORIENTRA — LEMBAR INFORMASI COURSE & POS CHECKPOINT${
         pages.length > 1 ? ` (HALAMAN ${pageIndex + 1} DARI ${pages.length})` : ''
       }`,
       marginX,
@@ -1010,7 +1017,7 @@ export function CourseInfoSheetModal({
     ctx.fillStyle = '#94a3b8';
     ctx.font = '13px sans-serif';
     ctx.fillText(
-      `Dicetak dari Sistem Manajemen Orienteering • ${course.name} • Halaman ${
+      `Dicetak dari ORIENTRA (Digital Orienteering & Race Platform) • ${course.name} • Halaman ${
         pageIndex + 1
       } dari ${pages.length}`,
       canvas.width / 2,
@@ -1143,14 +1150,21 @@ export function CourseInfoSheetModal({
             >
               {/* Header Lembar Info Course */}
               <div className="flex flex-wrap items-start justify-between gap-2 border-b-2 border-slate-200 pb-4">
-                <div>
-                  <div className="text-xs font-extrabold uppercase tracking-wider text-sky-700">
-                    LEMBAR INFORMASI COURSE &amp; DAFTAR POS CHECKPOINT
-                    {pages.length > 1 ? ` (HALAMAN ${pageIndex + 1} DARI ${pages.length})` : ''}
+                <div className="flex items-center gap-3">
+                  <img
+                    src="/orientra-logo.jpeg"
+                    alt="ORIENTRA"
+                    className="h-12 w-12 rounded-xl border border-slate-200 object-contain p-0.5 shrink-0"
+                  />
+                  <div>
+                    <div className="text-xs font-extrabold uppercase tracking-wider text-sky-700">
+                      ORIENTRA — LEMBAR INFORMASI COURSE &amp; DAFTAR POS CHECKPOINT
+                      {pages.length > 1 ? ` (HALAMAN ${pageIndex + 1} DARI ${pages.length})` : ''}
+                    </div>
+                    <h2 className="text-2xl font-black text-slate-900 mt-0.5">
+                      {course.name}
+                    </h2>
                   </div>
-                  <h2 className="text-2xl font-black text-slate-900 mt-0.5">
-                    {course.name}
-                  </h2>
                 </div>
                 <div className="text-right">
                   <div className="text-xs font-bold text-slate-600">

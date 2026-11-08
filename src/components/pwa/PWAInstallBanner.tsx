@@ -102,7 +102,7 @@ export const PWAInstallBanner: React.FC = () => {
                   Opsional &amp; Sangat Ringan (&lt; 1 MB)
                 </span>
                 <h3 className="text-sm font-bold text-white mt-0.5">
-                  Pasang Ikon BARAKA di Layar Depan HP
+                  Pasang Ikon ORIENTRA di Layar Depan HP
                 </h3>
               </div>
               <button
@@ -121,7 +121,7 @@ export const PWAInstallBanner: React.FC = () => {
                 </li>
                 <li>
                   Geser ke bawah lalu pilih{' '}
-                  <strong className="text-emerald-300">
+                  <strong className="text-sky-300">
                     Tambah ke Layar Utama (Add to Home Screen)
                   </strong>
                   .
@@ -137,13 +137,13 @@ export const PWAInstallBanner: React.FC = () => {
                 </li>
                 <li>
                   Pilih{' '}
-                  <strong className="text-emerald-300">
+                  <strong className="text-sky-300">
                     Tambahkan ke Layar Utama (Add to Home screen / Install App)
                   </strong>
                   .
                 </li>
                 <li>
-                  Ikon <strong>BARAKA</strong> langsung muncul di layar HP Anda tanpa perlu download dari Play Store.
+                  Ikon <strong>ORIENTRA</strong> langsung muncul di layar HP Anda tanpa perlu download dari Play Store.
                 </li>
               </ol>
             )}

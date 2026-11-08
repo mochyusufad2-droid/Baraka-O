@@ -1,3 +1,35 @@
 @import "tailwindcss";
 @import "leaflet/dist/leaflet.css";
 
+@theme {
+  /* ORIENTRA Deep Navy & Cerulean Navigation Blue Scale (menggantikan abu-abu slate standar) */
+  --color-slate-50: #f4f9ff;
+  --color-slate-100: #e6f2ff;
+  --color-slate-200: #cce3fb;
+  --color-slate-300: #9ec8f2;
+  --color-slate-400: #6ba3d6;
+  --color-slate-500: #467eb3;
+  --color-slate-600: #2c5d8f;
+  --color-slate-700: #1d446e;
+  --color-slate-800: #133052;
+  --color-slate-900: #0a1f38;
+  --color-slate-950: #051224;
+
+  /* ORIENTRA Blaze Orange Scale (warna jarum kompas & bendera pos Orienteering) */
+  --color-amber-50: #fff7ed;
+  --color-amber-100: #ffedd5;
+  --color-amber-200: #fed7aa;
+  --color-amber-300: #fdba74;
+  --color-amber-400: #fb923c;
+  --color-amber-500: #ff6b00;
+  --color-amber-600: #ea580c;
+  --color-amber-700: #c2410c;
+  --color-amber-800: #9a3412;
+  --color-amber-900: #7c2d12;
+  --color-amber-950: #431407;
+}
+
+body {
+  background-color: #051224;
+  color: #e6f2ff;
+}

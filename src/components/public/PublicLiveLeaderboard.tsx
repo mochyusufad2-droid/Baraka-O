@@ -229,14 +229,18 @@ export default function PublicLiveLeaderboard({
                 <ArrowLeft className="w-4 h-4" />
               </button>
             )}
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
-              <Trophy className="h-5 w-5" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white p-0.5 ring-2 ring-sky-400/50 shadow-md overflow-hidden shrink-0">
+              <img
+                src="/orientra-logo.jpeg"
+                alt="ORIENTRA Logo"
+                className="h-full w-full object-contain scale-125"
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <span className="flex h-2 w-2 rounded-full bg-rose-500 animate-ping" />
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-rose-400">
-                  LIVE ARENA LEADERBOARD
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-sky-300">
+                  ORIENTRA • LIVE ARENA LEADERBOARD
                 </span>
               </div>
               <h1 className="text-base sm:text-lg font-black tracking-wide text-white">
@@ -645,7 +649,7 @@ export default function PublicLiveLeaderboard({
 
       {/* FOOTER */}
       <footer className="border-t border-slate-900 bg-slate-950 py-3 text-center text-[11px] text-slate-500 font-mono">
-        BARAKA ADVENTURE — Digital Orienteering Live Timing • Pembaruan otomatis setiap 5 detik
+        ORIENTRA — Digital Orienteering &amp; Race Platform • Pembaruan otomatis setiap 5 detik
       </footer>
     </div>
   );
