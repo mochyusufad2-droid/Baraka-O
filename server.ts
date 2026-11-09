@@ -4673,6 +4673,10 @@ process.on('uncaughtException', (err) => {
 });
 
 async function startServer() {
+  // Cegah Vite 8 mematikan proses (parentSigtermCallback) saat stdin ditutup oleh daemon pre-warming
+  process.env.CI = 'true';
+  process.env.DISABLE_HMR = 'true';
+
   const primaryDistPath = path.join(ROOT_DIR, 'dist');
   const cpanelDistPath = path.join(ROOT_DIR, 'cpanel_dist');
   const distPath = fs.existsSync(path.join(primaryDistPath, 'index.html'))
@@ -4688,6 +4692,29 @@ async function startServer() {
     process.env.NODE_ENV === 'production' ||
     process.env.STANDALONE_MODE === 'true' ||
     (!isDevScript && hasBuiltDist);
+
+  const primaryServer = http.createServer(app);
+  primaryServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
+  });
+
+  // Buka port HTTP seketika di awal agar pre-warming health check langsung terlayani tanpa jeda
+  if (process.env.STANDALONE_MODE === 'true') {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Standalone Server berjalan di port/socket ${PORT}`);
+    });
+  } else if (typeof PORT === 'number') {
+    primaryServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
+    });
+  } else {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
+    });
+  }
+
+  // Jaga agar event loop proses dev server selalu tetap hidup selama pre-warming / container daemon
+  setInterval(() => {}, 60_000);
 
   const registerStaticFallback = () => {
     app.all('/api/*', (req, res) => {
@@ -4706,7 +4733,6 @@ async function startServer() {
 
   if (!useStaticDist) {
     try {
-      process.env.DISABLE_HMR = 'true';
       const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true, hmr: false, ws: false, watch: null },
@@ -4760,35 +4786,12 @@ async function startServer() {
     registerStaticFallback();
   }
 
-  const primaryServer = http.createServer(app);
-  primaryServer.on('error', (err: NodeJS.ErrnoException) => {
-    console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
-  });
-
-  if (process.env.STANDALONE_MODE === 'true') {
-    // Pada cPanel Phusion Passenger / LiteSpeed lsnode.js, gunakan 1 pemanggilan listen(PORT) tanpa host '0.0.0.0'
-    // agar socket internal Passenger tidak terganggu.
-    primaryServer.listen(PORT, () => {
-      console.log(`BARAKA ADVENTURE Standalone Server berjalan di port/socket ${PORT}`);
-    });
-    return;
-  }
-
-  if (typeof PORT === 'number') {
-    primaryServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
-    });
-  } else {
-    primaryServer.listen(PORT, () => {
-      console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
-    });
-  }
-
-  // Jaga agar event loop proses dev server selalu tetap hidup selama pre-warming / container daemon
-  setInterval(() => {}, 60_000);
-
-  // Hanya aktifkan fallback port jika BUKAN di belakang AI Studio Preview Proxy (agar tidak berbenturan dengan port Nginx)
-  if (!isAiStudioPreviewProxy && !process.env.CPANEL_PORT) {
+  // Hanya aktifkan fallback port jika BUKAN di belakang AI Studio Preview Proxy dan bukan mode standalone
+  if (
+    process.env.STANDALONE_MODE !== 'true' &&
+    !isAiStudioPreviewProxy &&
+    !process.env.CPANEL_PORT
+  ) {
     const fallbackPorts = [3000, Number(process.env.PORT)].filter(
       (p) => p && !Number.isNaN(p) && p !== PORT
     );

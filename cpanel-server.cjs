@@ -81351,12 +81351,33 @@ process.on("uncaughtException", (err) => {
   console.warn("[BARAKA SERVER] Uncaught Exception:", err);
 });
 async function startServer() {
+  process.env.CI = "true";
+  process.env.DISABLE_HMR = "true";
   const primaryDistPath = import_path.default.join(ROOT_DIR, "dist");
   const cpanelDistPath = import_path.default.join(ROOT_DIR, "cpanel_dist");
   const distPath = import_fs.default.existsSync(import_path.default.join(primaryDistPath, "index.html")) ? primaryDistPath : import_fs.default.existsSync(import_path.default.join(cpanelDistPath, "index.html")) ? cpanelDistPath : primaryDistPath;
   const hasBuiltDist = import_fs.default.existsSync(import_path.default.join(distPath, "index.html"));
   const isDevScript = process.env.npm_lifecycle_event === "dev" || process.execArgv.some((arg) => arg.includes("tsx"));
   const useStaticDist = process.env.NODE_ENV === "production" || true;
+  const primaryServer = import_http.default.createServer(app);
+  primaryServer.on("error", (err) => {
+    console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
+  });
+  if (true) {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Standalone Server berjalan di port/socket ${PORT}`);
+    });
+  } else if (typeof PORT === "number") {
+    primaryServer.listen(PORT, "0.0.0.0", () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
+    });
+  } else {
+    primaryServer.listen(PORT, () => {
+      console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
+    });
+  }
+  setInterval(() => {
+  }, 6e4);
   const registerStaticFallback = () => {
     app.all("/api/*", (req, res) => {
       res.status(404).json({
@@ -81371,7 +81392,6 @@ async function startServer() {
   };
   if (!useStaticDist) {
     try {
-      process.env.DISABLE_HMR = "true";
       const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true, hmr: false, ws: false, watch: null },
@@ -81415,28 +81435,7 @@ async function startServer() {
   } else {
     registerStaticFallback();
   }
-  const primaryServer = import_http.default.createServer(app);
-  primaryServer.on("error", (err) => {
-    console.warn(`[BARAKA SERVER] Port ${PORT} notice:`, err.message);
-  });
-  if (true) {
-    primaryServer.listen(PORT, () => {
-      console.log(`BARAKA ADVENTURE Standalone Server berjalan di port/socket ${PORT}`);
-    });
-    return;
-  }
-  if (typeof PORT === "number") {
-    primaryServer.listen(PORT, "0.0.0.0", () => {
-      console.log(`BARAKA ADVENTURE Server berjalan di http://0.0.0.0:${PORT}`);
-    });
-  } else {
-    primaryServer.listen(PORT, () => {
-      console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
-    });
-  }
-  setInterval(() => {
-  }, 6e4);
-  if (!isAiStudioPreviewProxy && !process.env.CPANEL_PORT) {
+  if (false) {
     const fallbackPorts = [3e3, Number(process.env.PORT)].filter(
       (p) => p && !Number.isNaN(p) && p !== PORT
     );
