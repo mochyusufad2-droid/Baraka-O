@@ -209,6 +209,29 @@ export interface ParticipantBackupRecord extends ParticipantPublic {
   pinSalt: string;
 }
 
+export interface AllTimeLocationEntry {
+  locationName: string;
+  coursesCount: number;
+  lastUsedDate?: string;
+}
+
+export interface AllTimeOrganizerEntry {
+  id: string;
+  name: string;
+  organization?: string;
+  isActive: boolean;
+}
+
+export interface AllTimePlatformStats {
+  totalOrganizersEver: number;
+  totalCoursesEver: number;
+  totalParticipantsEver: number;
+  totalSessionsEver: number;
+  totalLocationsEver: number;
+  locations: AllTimeLocationEntry[];
+  organizers: AllTimeOrganizerEntry[];
+}
+
 export interface OrganizerVaultBackup {
   organizers: OrganizerBackupRecord[];
   deletedOrganizerIds: string[];
@@ -221,5 +244,6 @@ export interface OrganizerVaultBackup {
   reports: CheckpointReport[];
   updatedAt?: string;
 }
+
 
 

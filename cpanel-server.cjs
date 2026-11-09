@@ -80439,6 +80439,103 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
     reports: visibleReports,
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+  if (!db.historicalCourses || typeof db.historicalCourses !== "object") {
+    db.historicalCourses = {};
+  }
+  if (!db.historicalOrganizers || typeof db.historicalOrganizers !== "object") {
+    db.historicalOrganizers = {};
+  }
+  let historyUpdated = false;
+  for (const c of db.courses || []) {
+    if (c && c.id) {
+      const loc = (c.locationName || "").trim();
+      const prev = db.historicalCourses[c.id];
+      if (!prev || prev.locationName !== loc || prev.name !== c.name) {
+        db.historicalCourses[c.id] = {
+          name: c.name,
+          locationName: loc,
+          date: c.date
+        };
+        historyUpdated = true;
+      }
+    }
+  }
+  for (const o of db.organizers || []) {
+    if (o && o.id) {
+      const prev = db.historicalOrganizers[o.id];
+      if (!prev || prev.name !== o.name || prev.organization !== o.organization) {
+        db.historicalOrganizers[o.id] = {
+          name: o.name,
+          organization: o.organization
+        };
+        historyUpdated = true;
+      }
+    }
+  }
+  if (historyUpdated) {
+    saveDb(db);
+  }
+  const allOrganizerIdSet = /* @__PURE__ */ new Set([
+    ...(db.organizers || []).map((o) => o.id),
+    ...db.deletedOrganizerIds || [],
+    ...Object.keys(db.historicalOrganizers || {})
+  ]);
+  const allCourseIdSet = /* @__PURE__ */ new Set([
+    ...(db.courses || []).map((c) => c.id),
+    ...db.deletedCourseIds || [],
+    ...Object.keys(db.historicalCourses || {})
+  ]);
+  const allParticipantIdSet = /* @__PURE__ */ new Set([
+    ...(db.participants || []).map((p) => p.id),
+    ...db.deletedParticipantIds || []
+  ]);
+  const allSessionIdSet = /* @__PURE__ */ new Set([
+    ...(db.sessions || []).map((s) => s.id),
+    ...db.deletedSessionIds || []
+  ]);
+  const locMap = /* @__PURE__ */ new Map();
+  for (const entry of Object.values(db.historicalCourses || {})) {
+    const cleanLoc = (entry.locationName || "").trim();
+    if (!cleanLoc) continue;
+    const key = cleanLoc.toLowerCase();
+    const existing = locMap.get(key);
+    if (!existing) {
+      locMap.set(key, {
+        locationName: cleanLoc,
+        coursesCount: 1,
+        lastUsedDate: entry.date
+      });
+    } else {
+      existing.coursesCount += 1;
+      if (entry.date && (!existing.lastUsedDate || entry.date > existing.lastUsedDate)) {
+        existing.lastUsedDate = entry.date;
+      }
+    }
+  }
+  const activeOrgMap = new Map((db.organizers || []).map((o) => [o.id, o]));
+  const allTimeOrganizersList = Array.from(allOrganizerIdSet).map((id) => {
+    const active = activeOrgMap.get(id);
+    const hist = db.historicalOrganizers?.[id];
+    const name4 = active?.name || hist?.name;
+    if (!name4) return null;
+    return {
+      id,
+      name: name4,
+      organization: active?.organization || hist?.organization,
+      isActive: Boolean(active?.isActive)
+    };
+  }).filter(Boolean);
+  const allTimeStats = auth.isSuperAdmin ? {
+    totalOrganizersEver: allOrganizerIdSet.size,
+    totalCoursesEver: allCourseIdSet.size,
+    totalParticipantsEver: allParticipantIdSet.size,
+    totalSessionsEver: allSessionIdSet.size,
+    totalLocationsEver: locMap.size,
+    locations: Array.from(locMap.values()).sort(
+      (a, b) => b.coursesCount - a.coursesCount
+    ),
+    organizers: allTimeOrganizersList
+  } : void 0;
   res.json({
     serverTime: (/* @__PURE__ */ new Date()).toISOString(),
     currentOrganizer,
@@ -80449,7 +80546,8 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
     sessions: visibleSessions,
     deletedSessionIds: db.deletedSessionIds || [],
     reports: visibleReports,
-    vaultSnapshot
+    vaultSnapshot,
+    allTimeStats
   });
 });
 app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
@@ -81336,17 +81434,20 @@ async function startServer() {
       console.log(`BARAKA ADVENTURE Server berjalan di socket/port ${PORT}`);
     });
   }
-  const fallbackPorts = [3e3, Number(process.env.PORT)].filter(
-    (p) => p && !Number.isNaN(p) && p !== PORT
-  );
-  for (const extraPort of new Set(fallbackPorts)) {
-    if (process.env.CPANEL_PORT) continue;
-    const extraServer = import_http.default.createServer(app);
-    extraServer.on("error", () => {
-    });
-    extraServer.listen(extraPort, "0.0.0.0", () => {
-      console.log(`BARAKA ADVENTURE Server juga aktif di port ${extraPort}`);
-    });
+  setInterval(() => {
+  }, 6e4);
+  if (!isAiStudioPreviewProxy && !process.env.CPANEL_PORT) {
+    const fallbackPorts = [3e3, Number(process.env.PORT)].filter(
+      (p) => p && !Number.isNaN(p) && p !== PORT
+    );
+    for (const extraPort of new Set(fallbackPorts)) {
+      const extraServer = import_http.default.createServer(app);
+      extraServer.on("error", () => {
+      });
+      extraServer.listen(extraPort, "0.0.0.0", () => {
+        console.log(`BARAKA ADVENTURE Server juga aktif di port ${extraPort}`);
+      });
+    }
   }
 }
 if (!process.env.VERCEL) {

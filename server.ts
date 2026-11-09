@@ -230,6 +230,14 @@ interface DatabaseSchema {
   sessions: ParticipantSession[];
   deletedSessionIds?: string[];
   reports: CheckpointReport[];
+  historicalCourses?: Record<
+    string,
+    { name: string; locationName: string; date?: string }
+  >;
+  historicalOrganizers?: Record<
+    string,
+    { name: string; organization?: string }
+  >;
 }
 
 function createInitialDatabase(): DatabaseSchema {
@@ -3479,6 +3487,122 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       updatedAt: new Date().toISOString(),
     };
 
+    // Catat & akumulasikan riwayat penggunaan sepanjang masa (All-Time Ledger)
+    if (!db.historicalCourses || typeof db.historicalCourses !== 'object') {
+      db.historicalCourses = {};
+    }
+    if (
+      !db.historicalOrganizers ||
+      typeof db.historicalOrganizers !== 'object'
+    ) {
+      db.historicalOrganizers = {};
+    }
+    let historyUpdated = false;
+    for (const c of db.courses || []) {
+      if (c && c.id) {
+        const loc = (c.locationName || '').trim();
+        const prev = db.historicalCourses[c.id];
+        if (!prev || prev.locationName !== loc || prev.name !== c.name) {
+          db.historicalCourses[c.id] = {
+            name: c.name,
+            locationName: loc,
+            date: c.date,
+          };
+          historyUpdated = true;
+        }
+      }
+    }
+    for (const o of db.organizers || []) {
+      if (o && o.id) {
+        const prev = db.historicalOrganizers[o.id];
+        if (!prev || prev.name !== o.name || prev.organization !== o.organization) {
+          db.historicalOrganizers[o.id] = {
+            name: o.name,
+            organization: o.organization,
+          };
+          historyUpdated = true;
+        }
+      }
+    }
+    if (historyUpdated) {
+      saveDb(db);
+    }
+
+    const allOrganizerIdSet = new Set<string>([
+      ...(db.organizers || []).map((o) => o.id),
+      ...(db.deletedOrganizerIds || []),
+      ...Object.keys(db.historicalOrganizers || {}),
+    ]);
+    const allCourseIdSet = new Set<string>([
+      ...(db.courses || []).map((c) => c.id),
+      ...(db.deletedCourseIds || []),
+      ...Object.keys(db.historicalCourses || {}),
+    ]);
+    const allParticipantIdSet = new Set<string>([
+      ...(db.participants || []).map((p) => p.id),
+      ...(db.deletedParticipantIds || []),
+    ]);
+    const allSessionIdSet = new Set<string>([
+      ...(db.sessions || []).map((s) => s.id),
+      ...(db.deletedSessionIds || []),
+    ]);
+
+    const locMap = new Map<
+      string,
+      { locationName: string; coursesCount: number; lastUsedDate?: string }
+    >();
+    for (const entry of Object.values(db.historicalCourses || {})) {
+      const cleanLoc = (entry.locationName || '').trim();
+      if (!cleanLoc) continue;
+      const key = cleanLoc.toLowerCase();
+      const existing = locMap.get(key);
+      if (!existing) {
+        locMap.set(key, {
+          locationName: cleanLoc,
+          coursesCount: 1,
+          lastUsedDate: entry.date,
+        });
+      } else {
+        existing.coursesCount += 1;
+        if (
+          entry.date &&
+          (!existing.lastUsedDate || entry.date > existing.lastUsedDate)
+        ) {
+          existing.lastUsedDate = entry.date;
+        }
+      }
+    }
+
+    const activeOrgMap = new Map((db.organizers || []).map((o) => [o.id, o]));
+    const allTimeOrganizersList = Array.from(allOrganizerIdSet)
+      .map((id) => {
+        const active = activeOrgMap.get(id);
+        const hist = db.historicalOrganizers?.[id];
+        const name = active?.name || hist?.name;
+        if (!name) return null;
+        return {
+          id,
+          name,
+          organization: active?.organization || hist?.organization,
+          isActive: Boolean(active?.isActive),
+        };
+      })
+      .filter(Boolean);
+
+    const allTimeStats = auth.isSuperAdmin
+      ? {
+          totalOrganizersEver: allOrganizerIdSet.size,
+          totalCoursesEver: allCourseIdSet.size,
+          totalParticipantsEver: allParticipantIdSet.size,
+          totalSessionsEver: allSessionIdSet.size,
+          totalLocationsEver: locMap.size,
+          locations: Array.from(locMap.values()).sort(
+            (a, b) => b.coursesCount - a.coursesCount
+          ),
+          organizers: allTimeOrganizersList,
+        }
+      : undefined;
+
     res.json({
       serverTime: new Date().toISOString(),
       currentOrganizer,
@@ -3492,6 +3616,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       deletedSessionIds: db.deletedSessionIds || [],
       reports: visibleReports,
       vaultSnapshot,
+      allTimeStats,
     });
   });
 
@@ -4659,19 +4784,23 @@ async function startServer() {
     });
   }
 
-  // Pastikan port 3000 dan process.env.PORT sama-sama terlayani jika berbeda (khusus Cloud Run)
-  const fallbackPorts = [3000, Number(process.env.PORT)].filter(
-    (p) => p && !Number.isNaN(p) && p !== PORT
-  );
-  for (const extraPort of new Set(fallbackPorts)) {
-    if (process.env.CPANEL_PORT) continue;
-    const extraServer = http.createServer(app);
-    extraServer.on('error', () => {
-      // Port sudah digunakan oleh reverse proxy internal, abaikan dengan aman
-    });
-    extraServer.listen(extraPort, '0.0.0.0', () => {
-      console.log(`BARAKA ADVENTURE Server juga aktif di port ${extraPort}`);
-    });
+  // Jaga agar event loop proses dev server selalu tetap hidup selama pre-warming / container daemon
+  setInterval(() => {}, 60_000);
+
+  // Hanya aktifkan fallback port jika BUKAN di belakang AI Studio Preview Proxy (agar tidak berbenturan dengan port Nginx)
+  if (!isAiStudioPreviewProxy && !process.env.CPANEL_PORT) {
+    const fallbackPorts = [3000, Number(process.env.PORT)].filter(
+      (p) => p && !Number.isNaN(p) && p !== PORT
+    );
+    for (const extraPort of new Set(fallbackPorts)) {
+      const extraServer = http.createServer(app);
+      extraServer.on('error', () => {
+        // Port sudah digunakan oleh reverse proxy internal, abaikan dengan aman
+      });
+      extraServer.listen(extraPort, '0.0.0.0', () => {
+        console.log(`BARAKA ADVENTURE Server juga aktif di port ${extraPort}`);
+      });
+    }
   }
 }
 
