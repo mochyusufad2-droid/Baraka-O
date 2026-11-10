@@ -2139,8 +2139,8 @@ export default function ParticipantView({
   }
 
   function handleLogout() {
-    // Jika peserta sedang berada dalam sesi lomba yang aktif (ACTIVE), tampilkan peringatan DNF
-    if (activeSession && activeSession.status === SessionStatus.ACTIVE) {
+    // Jika peserta sedang berada dalam sesi lomba yang aktif atau sudah scan Start tapi belum Finish
+    if (sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer) {
       setShowDnfLogoutModal(true);
       return;
     }
@@ -2175,7 +2175,7 @@ export default function ParticipantView({
           },
           body: JSON.stringify({
             sessionId: activeSession.id,
-            reason: 'Peserta menekan Keluar saat lomba berjalan (DNF)',
+            reason: 'Peserta menekan Keluar saat lomba berjalan (DNF Resmi)',
           }),
         }).catch(() => {});
       }
@@ -2187,10 +2187,31 @@ export default function ParticipantView({
   }
 
   async function handleRestartFromBeginning() {
-    // Pastikan semua laporan sesi sebelumnya sudah disinkronkan ke server sebelum membuka layar Scan Setup QR baru
+    // JIKA SESI SEDANG BERJALAN AKTIF & BELUM FINISH:
+    // Wajib tutup sesi saat ini di server sebagai DNF resmi sebelum peserta diizinkan scan Setup QR baru!
+    if (sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && activeSession && token) {
+      try {
+        await fetch('/api/participant/abandon-session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            sessionId: activeSession.id,
+            reason: 'Peserta membatalkan sesi berjalan & meminta Mulai Ulang (DNF Resmi)',
+          }),
+        }).catch(() => {});
+      } catch {
+        // Abaikan jika offline, server tetap mencatat saat sinkronisasi
+      }
+    }
+
+    // Pastikan semua laporan lokal disinkronkan ke server
     if (activeSession && token && isEffectivelyOnline) {
       await triggerSyncQueue(true);
     }
+
     forceNewSessionRef.current = true;
     setActiveCourse(null);
     setActiveSession(null);
@@ -2204,8 +2225,10 @@ export default function ParticipantView({
       simulatedOffline,
     });
     setFeedbackBanner({
-      type: 'success',
-      text: 'Data hasil lari sebelumnya tetap tersimpan aman di server. Silakan Scan Setup QR untuk memulai lagi dari awal!',
+      type: 'warning',
+      text: sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+        ? 'Sesi sebelumnya resmi ditutup sebagai DNF (Gugur). Silakan Scan Setup QR dari panitia untuk memulai lomba baru!'
+        : 'Sesi sebelumnya tersimpan aman. Silakan Scan Setup QR untuk memulai Course baru!',
     });
   }
 
@@ -3551,7 +3574,7 @@ export default function ParticipantView({
               </div>
 
               {/* ==============================================================
-                  TOMBOL "MULAI LAGI DARI AWAL / GANTI COURSE" (DENGAN KONFIRMASI)
+                  TOMBOL "MULAI LAGI DARI AWAL / GANTI COURSE" (DENGAN KONFIRMASI TEGAS)
                  ============================================================== */}
               <div className="pt-4 flex flex-col items-center justify-center">
                 {!confirmingLeaveCourse ? (
@@ -3564,27 +3587,50 @@ export default function ParticipantView({
                     Mulai Lagi dari Awal / Scan Setup QR Baru
                   </button>
                 ) : (
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/95 p-3.5 text-center space-y-2.5 max-w-xs shadow-lg">
+                  <div className={`rounded-xl border p-4 text-center space-y-3 max-w-sm shadow-2xl ${
+                    sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+                      ? 'border-rose-500/80 bg-slate-900 shadow-rose-950/60'
+                      : 'border-slate-700 bg-slate-900/95'
+                  }`}>
+                    <div className="flex items-center justify-center gap-2 text-rose-400 font-extrabold text-xs uppercase tracking-wider">
+                      <AlertTriangle className="h-4 w-4" />
+                      <span>{sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer ? 'PERINGATAN DNF RESMI' : 'KONFIRMASI MULAI AWAL'}</span>
+                    </div>
                     <p className="text-xs text-slate-200 leading-relaxed">
-                      Kembali ke menu <strong>Scan Setup QR</strong> untuk mulai dari awal?{' '}
-                      <span className="text-emerald-400 block mt-0.5 text-[11px]">
-                        (Data sesi yang sudah tercatat tetap disimpan di server)
-                      </span>
+                      {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer ? (
+                        <>
+                          Lomba Anda sedang berjalan! Memilih mulai ulang sekarang akan{' '}
+                          <strong className="text-rose-400 underline decoration-rose-500">
+                            LANGSUNG MENCATAT SESI INI SEBAGAI DNF (GUGUR)
+                          </strong>{' '}
+                          di papan skor panitia.
+                        </>
+                      ) : (
+                        <>
+                          Kembali ke menu <strong>Scan Setup QR</strong> untuk memulai dari awal? Data sesi sebelumnya tetap tersimpan di server.
+                        </>
+                      )}
                     </p>
-                    <div className="flex items-center justify-center gap-2">
+                    <div className="flex items-center justify-center gap-2 pt-1">
                       <button
                         type="button"
                         onClick={() => setConfirmingLeaveCourse(false)}
-                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 cursor-pointer"
+                        className="rounded-lg bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
                       >
-                        Batal
+                        Batal / Lanjut Lari
                       </button>
                       <button
                         type="button"
                         onClick={handleConfirmLeaveCourse}
-                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-500 cursor-pointer"
+                        className={`rounded-lg px-3.5 py-2 text-xs font-extrabold text-white cursor-pointer transition ${
+                          sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+                            ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-950/60'
+                            : 'bg-emerald-600 hover:bg-emerald-500'
+                        }`}
                       >
-                        Ya, Mulai Lagi (Scan Setup)
+                        {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+                          ? 'Ya, Setuju DNF & Mulai Baru'
+                          : 'Ya, Mulai Baru'}
                       </button>
                     </div>
                   </div>
