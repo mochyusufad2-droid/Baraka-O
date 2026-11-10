@@ -156,9 +156,14 @@ export function ParticipantCourseMap({
   const mapInstanceRef = useRef<L.Map | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
+  const runnerGroupRef = useRef<L.LayerGroup | null>(null);
+  const runnerMarkerRef = useRef<L.Marker | null>(null);
+  const runnerCircleRef = useRef<L.Circle | null>(null);
   const hasInitialFitRef = useRef<boolean>(false);
+  const pendingFlyToRunnerRef = useRef<boolean>(false);
 
   const [tileStyle, setTileStyle] = useState<MapTileStyle>('STREET');
+  const [autoFollowRunner, setAutoFollowRunner] = useState<boolean>(false);
 
   // Inisialisasi peta Leaflet
   useEffect(() => {
@@ -176,6 +181,11 @@ export function ParticipantCourseMap({
       zoomControl: true,
     });
 
+    // Jika peserta menggeser peta secara manual dengan jari, matikan auto-follow agar tidak melawan jari peserta
+    map.on('dragstart', () => {
+      setAutoFollowRunner(false);
+    });
+
     const cfg = TILE_LAYERS[tileStyle];
     const layer = L.tileLayer(cfg.url, {
       attribution: cfg.attribution,
@@ -183,10 +193,12 @@ export function ParticipantCourseMap({
     }).addTo(map);
 
     const overlayGroup = L.layerGroup().addTo(map);
+    const runnerGroup = L.layerGroup().addTo(map);
 
     mapInstanceRef.current = map;
     tileLayerRef.current = layer;
     overlayGroupRef.current = overlayGroup;
+    runnerGroupRef.current = runnerGroup;
 
     window.setTimeout(() => {
       map.invalidateSize();
@@ -197,6 +209,9 @@ export function ParticipantCourseMap({
       mapInstanceRef.current = null;
       tileLayerRef.current = null;
       overlayGroupRef.current = null;
+      runnerGroupRef.current = null;
+      runnerMarkerRef.current = null;
+      runnerCircleRef.current = null;
       hasInitialFitRef.current = false;
     };
   }, []);
@@ -215,7 +230,7 @@ export function ParticipantCourseMap({
     }).addTo(map);
   }, [tileStyle]);
 
-  // Render marker Start, Checkpoint, Finish, Garis Urutan, dan Lokasi Peserta
+  // Render marker Start, Checkpoint, Finish, dan Garis Urutan (Hanya di-render ulang jika course/checkpoint berubah)
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = overlayGroupRef.current;
@@ -339,42 +354,86 @@ export function ParticipantCourseMap({
         .addTo(group);
     }
 
-    // 5. Posisi Peserta Saat Ini (Jika GPS tersedia)
-    if (runnerCoords) {
-      const myPos: [number, number] = [
-        runnerCoords.latitude,
-        runnerCoords.longitude,
-      ];
-      boundsPoints.push(myPos);
-      if (runnerCoords.accuracy && runnerCoords.accuracy <= 200) {
-        L.circle(myPos, {
-          radius: runnerCoords.accuracy,
+    if (!hasInitialFitRef.current && boundsPoints.length > 0) {
+      hasInitialFitRef.current = true;
+      if (runnerCoords) {
+        boundsPoints.push([runnerCoords.latitude, runnerCoords.longitude]);
+      }
+      const bounds = L.latLngBounds(boundsPoints);
+      map.fitBounds(bounds, { padding: [36, 36], maxZoom: 17 });
+    }
+  }, [course, validatedCheckpointIds]);
+
+  // 5. Update Posisi Peserta Secara Mulus (Real-time In-Place tanpa menghapus marker pos lain)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    const runnerGroup = runnerGroupRef.current;
+    if (!map || !runnerGroup) return;
+
+    if (!runnerCoords) {
+      runnerGroup.clearLayers();
+      runnerMarkerRef.current = null;
+      runnerCircleRef.current = null;
+      return;
+    }
+
+    const myPos: [number, number] = [
+      runnerCoords.latitude,
+      runnerCoords.longitude,
+    ];
+    const accuracy = Math.round(runnerCoords.accuracy || 10);
+    const popupHtml = `<div style="font-family:sans-serif;font-size:12px;">
+      <strong>📍 POSISI ANDA SAAT INI (LIVE)</strong><br/>
+      <span>Akurasi GPS: ±${accuracy}m</span>
+    </div>`;
+
+    // Update atau buat lingkaran akurasi
+    if (accuracy > 0 && accuracy <= 200) {
+      if (runnerCircleRef.current) {
+        runnerCircleRef.current.setLatLng(myPos);
+        runnerCircleRef.current.setRadius(accuracy);
+      } else {
+        runnerCircleRef.current = L.circle(myPos, {
+          radius: accuracy,
           color: '#38bdf8',
           fillColor: '#38bdf8',
           fillOpacity: 0.12,
           weight: 1,
-        }).addTo(group);
+        }).addTo(runnerGroup);
       }
-      L.marker(myPos, { icon: createRunnerSelfIcon() })
-        .bindPopup(
-          `<div style="font-family:sans-serif;font-size:12px;">
-            <strong>📍 POSISI ANDA SAAT INI</strong><br/>
-            <span>Akurasi GPS: ±${Math.round(runnerCoords.accuracy || 10)}m</span>
-          </div>`
-        )
-        .addTo(group);
+    } else if (runnerCircleRef.current) {
+      runnerGroup.removeLayer(runnerCircleRef.current);
+      runnerCircleRef.current = null;
     }
 
-    if (!hasInitialFitRef.current && boundsPoints.length > 0) {
-      hasInitialFitRef.current = true;
-      const bounds = L.latLngBounds(boundsPoints);
-      map.fitBounds(bounds, { padding: [36, 36], maxZoom: 17 });
+    // Update atau buat marker titik biru ANDA secara in-place
+    if (runnerMarkerRef.current) {
+      runnerMarkerRef.current.setLatLng(myPos);
+      runnerMarkerRef.current.getPopup()?.setContent(popupHtml);
+    } else {
+      runnerMarkerRef.current = L.marker(myPos, {
+        icon: createRunnerSelfIcon(),
+        zIndexOffset: 1000,
+      })
+        .bindPopup(popupHtml)
+        .addTo(runnerGroup);
     }
-  }, [course, validatedCheckpointIds, runnerCoords]);
+
+    // Jika peserta baru saja menekan tombol "Posisi Saya", terbangkan kamera ke titik terbaru
+    if (pendingFlyToRunnerRef.current) {
+      pendingFlyToRunnerRef.current = false;
+      map.flyTo(myPos, Math.max(map.getZoom(), 17), {
+        duration: 0.6,
+      });
+    } else if (autoFollowRunner) {
+      map.panTo(myPos, { animate: true, duration: 0.4 });
+    }
+  }, [runnerCoords, autoFollowRunner]);
 
   const handleFitCourseBounds = () => {
     const map = mapInstanceRef.current;
     if (!map) return;
+    setAutoFollowRunner(false);
     const pts: L.LatLngExpression[] = [];
     if (course.startLocation) {
       pts.push([
@@ -398,13 +457,19 @@ export function ParticipantCourseMap({
 
   const handleFocusMyLocation = () => {
     const map = mapInstanceRef.current;
+    pendingFlyToRunnerRef.current = true;
+    setAutoFollowRunner(true);
     if (runnerCoords && map) {
-      map.flyTo([runnerCoords.latitude, runnerCoords.longitude], 17, {
-        duration: 0.7,
-      });
-    } else {
-      onRefreshGps?.();
+      map.flyTo(
+        [runnerCoords.latitude, runnerCoords.longitude],
+        Math.max(map.getZoom(), 17),
+        {
+          duration: 0.6,
+        }
+      );
     }
+    // Selalu panggil pembacaan GPS segar agar titik langsung diperbarui detik itu juga
+    onRefreshGps?.();
   };
 
   return (
@@ -441,10 +506,22 @@ export function ParticipantCourseMap({
             type="button"
             onClick={handleFocusMyLocation}
             disabled={isReadingGps}
-            className="inline-flex items-center gap-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 px-2.5 py-1.5 text-[11px] font-semibold text-sky-300"
+            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+              autoFollowRunner
+                ? 'bg-sky-500/30 border-sky-400 text-white shadow-sm'
+                : 'bg-sky-500/15 hover:bg-sky-500/25 border-sky-500/30 text-sky-300'
+            }`}
           >
-            <Navigation className="h-3.5 w-3.5" />
-            {isReadingGps ? 'Mencari GPS...' : 'Posisi Saya'}
+            <Navigation
+              className={`h-3.5 w-3.5 ${
+                autoFollowRunner ? 'text-sky-300 animate-pulse' : ''
+              }`}
+            />
+            {isReadingGps
+              ? 'Mencari GPS...'
+              : autoFollowRunner
+              ? 'Mengikuti Anda'
+              : 'Posisi Saya'}
           </button>
         </div>
       </div>
@@ -455,6 +532,39 @@ export function ParticipantCourseMap({
           ref={mapContainerRef}
           className="h-[340px] sm:h-[400px] w-full z-10"
         />
+        {runnerCoords && (
+          (() => {
+            const acc = Math.round(runnerCoords.accuracy || 10);
+            const isGood = acc <= 10;
+            const isFair = acc > 10 && acc <= 25;
+            const dotColor = isGood
+              ? 'bg-emerald-400'
+              : isFair
+              ? 'bg-amber-400'
+              : 'bg-rose-400';
+            const badgeBg = isGood
+              ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200'
+              : isFair
+              ? 'bg-amber-950/90 border-amber-500/50 text-amber-200'
+              : 'bg-rose-950/90 border-rose-500/50 text-rose-200';
+            const statusLabel = isGood
+              ? 'Sinyal Mantap'
+              : isFair
+              ? 'Akurasi Cukup'
+              : 'Mencari Satelit';
+
+            return (
+              <div
+                className={`pointer-events-none absolute bottom-2.5 left-2.5 z-20 flex items-center gap-2 rounded-lg border px-2.5 py-1 text-[10px] font-mono shadow-lg backdrop-blur-sm ${badgeBg}`}
+              >
+                <span className={`h-2.5 w-2.5 rounded-full ${dotColor} animate-pulse`} />
+                <span>
+                  GPS ±{acc}m • <strong>{statusLabel}</strong>
+                </span>
+              </div>
+            );
+          })()
+        )}
       </div>
 
       {/* Legenda Ringkas */}
@@ -476,7 +586,7 @@ export function ParticipantCourseMap({
           </span>
           <span className="inline-flex items-center gap-1">
             <span className="h-2.5 w-2.5 rounded-full bg-sky-400 inline-block" />
-            Posisi Anda
+            Posisi Anda (Real-time)
           </span>
         </div>
         <span className="inline-flex items-center gap-1 text-slate-400">

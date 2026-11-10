@@ -24,6 +24,9 @@ import {
   X,
   XCircle,
   Zap,
+  Lock,
+  Unlock,
+  BatteryCharging,
 } from 'lucide-react';
 import {
   Checkpoint,
@@ -104,9 +107,11 @@ function triggerRunnerFeedback(type: 'success' | 'error') {
   try {
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       if (type === 'success') {
-        navigator.vibrate([120, 40, 120]);
+        // GETAR MANTAP ATLET (BUZZ-BUZZ TEGAS 2 KALI): 140ms getar, 60ms jeda, 200ms getar panjang
+        navigator.vibrate([140, 60, 200]);
       } else {
-        navigator.vibrate([250, 80, 250]);
+        // TIGA KETUKAN PERINGATAN (TRIPLE BUZZ): 200ms, 80ms, 200ms, 80ms, 200ms
+        navigator.vibrate([200, 80, 200, 80, 200]);
       }
     }
   } catch {
@@ -127,15 +132,21 @@ function triggerRunnerFeedback(type: 'success' | 'error') {
     gain.connect(ctx.destination);
 
     if (type === 'success') {
+      // DUAL TONE NADA TINGGI SUKSES (C6 -> E6): Jelas terdengar di alam terbuka
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(1046.5, ctx.currentTime); // Nada tinggi tegas (C6)
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      osc.frequency.setValueAtTime(1046.5, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1318.5, ctx.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.35, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.22);
       osc.start();
-      osc.stop(ctx.currentTime + 0.16);
+      osc.stop(ctx.currentTime + 0.22);
     } else {
+      // LOW SAWTOOTH DUA KALI NADA RENDAH PERINGATAN
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(260, ctx.currentTime); // Nada rendah peringatan
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      osc.frequency.setValueAtTime(320, ctx.currentTime);
+      osc.frequency.linearRampToValueAtTime(180, ctx.currentTime + 0.26);
+      gain.gain.setValueAtTime(0.35, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.28);
       osc.start();
       osc.stop(ctx.currentTime + 0.28);
     }
@@ -226,13 +237,60 @@ export default function ParticipantView({
   const [partPassLoading, setPartPassLoading] = useState(false);
   const [partPassError, setPartPassError] = useState<string | null>(null);
 
-  // Koordinat GPS peserta dari perangkat fisik
+  // Koordinat GPS peserta dari perangkat fisik (Real-time via watchPosition + fallback getCurrentPosition)
   const [gpsCoords, setGpsCoords] = useState<{
     latitude: number;
     longitude: number;
     accuracy: number;
   } | null>(null);
+  const gpsCoordsRef = useRef<{
+    latitude: number;
+    longitude: number;
+    accuracy: number;
+  } | null>(null);
+  const lastGpsFixTimestampRef = useRef<number>(0);
+  const lastGpsStateUpdateMsRef = useRef<number>(0);
   const [isReadingGps, setIsReadingGps] = useState(false);
+
+  const updateRealtimeGpsCoords = useCallback(
+    (
+      next: { latitude: number; longitude: number; accuracy: number },
+      forceStateUpdate = false
+    ) => {
+      const now = Date.now();
+      lastGpsFixTimestampRef.current = now;
+      const prev = gpsCoordsRef.current;
+      gpsCoordsRef.current = next;
+
+      if (forceStateUpdate || !prev) {
+        lastGpsStateUpdateMsRef.current = now;
+        setGpsCoords(next);
+        return;
+      }
+
+      const movedMeters = calculateClientHaversineMeters(
+        prev.latitude,
+        prev.longitude,
+        next.latitude,
+        next.longitude
+      );
+      const accuracyDiff = Math.abs((prev.accuracy || 0) - (next.accuracy || 0));
+      const elapsedSinceUiUpdate = now - lastGpsStateUpdateMsRef.current;
+
+      // Update UI state segera jika peserta bergerak >= 0.8 meter, akurasi berubah >= 3m, atau >= 1.5 detik berlalu
+      if (movedMeters >= 0.8 || accuracyDiff >= 3 || elapsedSinceUiUpdate >= 1500) {
+        lastGpsStateUpdateMsRef.current = now;
+        setGpsCoords(next);
+      }
+    },
+    []
+  );
+
+  // Mode Kunci Saku Cepat (Pocket Mode) — Layar OLED Hitam Pekat, bebas ghost touch di saku, hemat baterai 60%
+  const [isPocketLocked, setIsPocketLocked] = useState(false);
+  const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
+  const unlockTimerRef = useRef<number | null>(null);
+  const wakeLockSentinelRef = useRef<any>(null);
 
   // Panel riwayat antrean laporan lokal
   const [showHistoryLogs, setShowHistoryLogs] = useState(false);
@@ -242,7 +300,7 @@ export default function ParticipantView({
   // Konfirmasi keluar Course (ditempatkan jauh dari tombol Scan)
   const [confirmingLeaveCourse, setConfirmingLeaveCourse] = useState(false);
 
-  // Pelacakan lokasi berkala (~5 menit) berjalan di latar belakang
+  // Pelacakan lokasi berkala (~5 menit) berjalan di latar belakang ke server
   const lastPeriodicAttemptMsRef = useRef<number>(0);
 
   // Kamera QR Scanner Full-Screen (Gaya iOrienteering)
@@ -631,19 +689,24 @@ export default function ParticipantView({
     [activeCourse, sessionCanRecordCheckpoints, showRunnerToast]
   );
 
-  // Ambil koordinat GPS secara cepat di latar belakang saat scan pos
+  // Ambil koordinat GPS secara cepat & segar saat scan pos atau buka peta
   const getQuickGpsCoordinates = useCallback((): Promise<{
     latitude: number;
     longitude: number;
     accuracy: number;
   } | null> => {
     return new Promise((resolve) => {
-      if (gpsCoords) {
-        resolve(gpsCoords);
+      const now = Date.now();
+      // Gunakan koordinat dari watchPosition hanya jika sangat baru (<= 3 detik terakhir)
+      if (
+        gpsCoordsRef.current &&
+        now - lastGpsFixTimestampRef.current <= 3000
+      ) {
+        resolve(gpsCoordsRef.current);
         return;
       }
       if (typeof navigator === 'undefined' || !navigator.geolocation) {
-        resolve(null);
+        resolve(gpsCoordsRef.current || null);
         return;
       }
       navigator.geolocation.getCurrentPosition(
@@ -653,14 +716,56 @@ export default function ParticipantView({
             longitude: Number(pos.coords.longitude.toFixed(6)),
             accuracy: Math.round(pos.coords.accuracy),
           };
-          setGpsCoords(coords);
+          updateRealtimeGpsCoords(coords, true);
           resolve(coords);
         },
-        () => resolve(null),
-        { enableHighAccuracy: true, timeout: 3500, maximumAge: 15000 }
+        () => {
+          // Jika sinyal satelit sesaat terhalang pohon/gedung, gunakan fix terakhir dari watchPosition jika ada
+          resolve(gpsCoordsRef.current || null);
+        },
+        { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 }
       );
     });
-  }, [gpsCoords]);
+  }, [updateRealtimeGpsCoords]);
+
+  // Pelacakan GPS Lokal Real-Time (watchPosition) di HP Peserta (0 Kuota Data, memperbarui titik biru di Peta setiap peserta melangkah)
+  useEffect(() => {
+    if (!token || !participant || !activeCourse) return;
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return;
+
+    let watchId: number | null = null;
+    let isCancelled = false;
+
+    checkGeolocationPermission().then((perm) => {
+      if (isCancelled || perm === 'unsupported' || perm === 'denied') return;
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const coords = {
+            latitude: Number(pos.coords.latitude.toFixed(6)),
+            longitude: Number(pos.coords.longitude.toFixed(6)),
+            accuracy: Math.round(pos.coords.accuracy),
+          };
+          updateRealtimeGpsCoords(coords, false);
+        },
+        () => {
+          // Abaikan error sementara saat mencari satelit
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 10000,
+        }
+      );
+    });
+
+    return () => {
+      isCancelled = true;
+      if (watchId !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+    };
+  }, [token, participant, activeCourse?.id, updateRealtimeGpsCoords]);
 
   const triggerSilentPeriodicLocationUpdate = useCallback(async () => {
     if (!token || !participant || !activeSession || !activeCourse) return;
@@ -675,7 +780,7 @@ export default function ParticipantView({
           longitude: Number(pos.coords.longitude.toFixed(6)),
           accuracy: Math.round(pos.coords.accuracy),
         };
-        setGpsCoords(coords);
+        updateRealtimeGpsCoords(coords, true);
         const payload: PendingLocationPayload = {
           sessionId: activeSession.id,
           participantId: participant.id,
@@ -699,9 +804,16 @@ export default function ParticipantView({
       () => {
         // Hening di latar belakang
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
     );
-  }, [token, participant, activeSession, activeCourse, simulatedOffline]);
+  }, [
+    token,
+    participant,
+    activeSession,
+    activeCourse,
+    simulatedOffline,
+    updateRealtimeGpsCoords,
+  ]);
 
   useEffect(() => {
     async function flushPendingLastLocation() {
@@ -723,37 +835,65 @@ export default function ParticipantView({
     flushPendingLastLocation();
   }, [isEffectivelyOnline, token, activeSession?.id, simulatedOffline]);
 
+  // SCREEN WAKE LOCK API: Mencegah layar HP tidur otomatis saat lomba berlangsung
   useEffect(() => {
-    if (!isSessionActivelyRunning || !activeCourse || !activeSession) return;
+    let released = false;
 
-    if (lastPeriodicAttemptMsRef.current === 0) {
-      triggerSilentPeriodicLocationUpdate();
+    async function requestWakeLock() {
+      if (
+        !isSessionActivelyRunning ||
+        typeof navigator === 'undefined' ||
+        !('wakeLock' in navigator)
+      ) {
+        return;
+      }
+      try {
+        const lock = await (navigator as any).wakeLock.request('screen');
+        if (!released) {
+          wakeLockSentinelRef.current = lock;
+        } else {
+          lock.release().catch(() => {});
+        }
+      } catch {
+        // Abaikan jika browser membatasi wakeLock karena daya baterai kritis
+      }
     }
 
-    const intervalId = window.setInterval(() => {
-      triggerSilentPeriodicLocationUpdate();
-    }, GPS_INTERVAL_MS);
+    if (isSessionActivelyRunning) {
+      requestWakeLock();
+    } else if (wakeLockSentinelRef.current) {
+      wakeLockSentinelRef.current.release().catch(() => {});
+      wakeLockSentinelRef.current = null;
+    }
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        const elapsed = Date.now() - lastPeriodicAttemptMsRef.current;
-        if (elapsed >= GPS_INTERVAL_MS) {
-          triggerSilentPeriodicLocationUpdate();
-        }
+    const handleVisibilityForWakeLock = () => {
+      if (document.visibilityState === 'visible' && isSessionActivelyRunning) {
+        requestWakeLock();
       }
     };
+    document.addEventListener('visibilitychange', handleVisibilityForWakeLock);
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      released = true;
+      document.removeEventListener('visibilitychange', handleVisibilityForWakeLock);
+      if (wakeLockSentinelRef.current) {
+        wakeLockSentinelRef.current.release().catch(() => {});
+        wakeLockSentinelRef.current = null;
+      }
     };
-  }, [
-    isSessionActivelyRunning,
-    activeCourse,
-    activeSession,
-    triggerSilentPeriodicLocationUpdate,
-  ]);
+  }, [isSessionActivelyRunning]);
+
+  // PROTEKSI TAB TERKUNCI: Cegah peserta menutup tab web secara tidak sengaja di saku/tangan
+  useEffect(() => {
+    if (!isSessionActivelyRunning) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'Sesi lomba Anda sedang aktif berjalan. Yakin ingin keluar?';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isSessionActivelyRunning]);
 
   // Pantau perubahan koneksi internet
   useEffect(() => {
@@ -1125,8 +1265,11 @@ export default function ParticipantView({
           upperQr === expectedCpPrefix ||
           upperQr.startsWith(`${expectedCpPrefix}:`));
 
-      const allowedRadius =
+      const baseRadius =
         checkpoint.radiusMeters || activeCourse.defaultGpsRadiusMeters || 35;
+      // Toleransi Lapangan Olahraga Orienteering: Gabungkan radius pos dasar dengan separuh estimasi ketelitian akurasi HP (maksimal toleransi tambahan 25m)
+      const accuracyBuffer = Math.min(25, Math.round((coords?.accuracy || 10) * 0.5));
+      const allowedRadius = baseRadius + accuracyBuffer;
       const maxAcceptableAccuracy = 150;
       let distanceMeters: number | null = null;
       let accuracyOk = true;
@@ -1197,7 +1340,7 @@ export default function ParticipantView({
               ok: false,
               severity: 'error',
               title: 'DI LUAR RADIUS GPS!',
-              message: `Wajib QR + GPS: Kode QR cocok, tetapi posisi GPS Anda berjarak ${distanceMeters}m dari Pos ${checkpoint.code} (Batas radius: ${allowedRadius}m). Dekati titik pos lalu scan ulang!`,
+              message: `Wajib QR + GPS: Kode QR cocok, tetapi posisi GPS Anda berjarak ${distanceMeters}m dari Pos ${checkpoint.code} (Radius sah: ${allowedRadius}m termasuk kompensasi satelit). Dekati titik pos lalu scan ulang!`,
             };
           }
           break;
@@ -2083,11 +2226,42 @@ export default function ParticipantView({
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setIsReadingGps(false);
-        setGpsCoords({
+        const coords = {
           latitude: Number(pos.coords.latitude.toFixed(6)),
           longitude: Number(pos.coords.longitude.toFixed(6)),
           accuracy: Math.round(pos.coords.accuracy),
-        });
+        };
+        updateRealtimeGpsCoords(coords, true);
+
+        // Jika sesi sedang berjalan dan jeda kirim ke server >= 15 detik, sekalian perbarui titik di radar panitia
+        if (
+          isSessionActivelyRunning &&
+          token &&
+          participant &&
+          activeSession &&
+          Date.now() - lastPeriodicAttemptMsRef.current >= 15000
+        ) {
+          lastPeriodicAttemptMsRef.current = Date.now();
+          const payload: PendingLocationPayload = {
+            sessionId: activeSession.id,
+            participantId: participant.id,
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+            accuracyMeters: coords.accuracy,
+            measuredAt: new Date(pos.timestamp || Date.now()).toISOString(),
+          };
+          void sendLastLocationToServer({
+            token,
+            payload,
+            isOfflineSimulated: simulatedOffline,
+          }).then((res) => {
+            if (res.lastLocation) {
+              setActiveSession((prev) =>
+                prev ? { ...prev, lastLocation: res.lastLocation } : prev
+              );
+            }
+          });
+        }
       },
       (err) => {
         setIsReadingGps(false);
@@ -2407,6 +2581,94 @@ export default function ParticipantView({
             <div className="mt-1 text-xs sm:text-sm font-medium opacity-95">
               {instantScanToast.subtitle}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          OVERLAY MODE KUNCI SAKU PENUH (POCKET SCREEN — OLED BLACKOUT 0 WATT)
+          Layar dihitamkan pekat, anti-ghost-touch di saku, jam digital minimalis,
+          tahan 1,5 detik untuk membuka kunci saat tiba di pos.
+         ==================================================================== */}
+      {isPocketLocked && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-black p-6 select-none touch-none text-white">
+          {/* Header minimalis */}
+          <div className="w-full flex items-center justify-between text-slate-500 pt-2">
+            <div className="flex items-center gap-1.5 font-mono text-xs">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>GPS AKTIF DI SAKU</span>
+            </div>
+            {gpsCoords && (
+              <span className="font-mono text-xs text-sky-400">
+                ±{Math.round(gpsCoords.accuracy || 10)}m
+              </span>
+            )}
+          </div>
+
+          {/* Jam lari kontras tinggi di tengah */}
+          <div className="text-center space-y-2">
+            <div className="text-[11px] font-mono tracking-widest text-slate-500 uppercase">
+              {activeCourse?.name || 'ORIENTRA'}
+            </div>
+            <div className="text-6xl sm:text-7xl font-mono font-extrabold text-amber-400 tracking-tight">
+              {effectiveStartIso
+                ? formatStopwatchSeconds(liveStopwatchSeconds)
+                : '00:00:00'}
+            </div>
+            <div className="text-sm font-semibold text-emerald-400">
+              Pos: {completedCheckpointCount} / {activeCourse?.checkpoints.length || 0} Selesai
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono">
+              Layar OLED 0-Watt • Sentuhan Terkunci
+            </div>
+          </div>
+
+          {/* Tombol Tahan Buka Kunci (Hold-to-Unlock 1.5 detik) */}
+          <div className="w-full max-w-xs space-y-3 pb-6">
+            <button
+              type="button"
+              onPointerDown={() => {
+                let progress = 0;
+                setUnlockHoldProgress(0);
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                unlockTimerRef.current = window.setInterval(() => {
+                  progress += 10;
+                  setUnlockHoldProgress(progress);
+                  if (progress >= 100) {
+                    if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                    setIsPocketLocked(false);
+                    setUnlockHoldProgress(0);
+                    triggerRunnerFeedback('success');
+                  }
+                }, 120);
+              }}
+              onPointerUp={() => {
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                setUnlockHoldProgress(0);
+              }}
+              onPointerLeave={() => {
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                setUnlockHoldProgress(0);
+              }}
+              className="relative w-full overflow-hidden rounded-2xl border-2 border-slate-700 bg-slate-900/90 py-4 px-4 text-center font-bold text-slate-200 transition active:scale-[0.98]"
+            >
+              {/* Progress bar pengisi tombol */}
+              <div
+                className="absolute inset-y-0 left-0 bg-emerald-600/40 transition-all duration-75"
+                style={{ width: `${unlockHoldProgress}%` }}
+              />
+              <div className="relative z-10 flex items-center justify-center gap-2 text-sm">
+                <Unlock className="h-4 w-4 text-amber-400" />
+                <span>
+                  {unlockHoldProgress > 0
+                    ? `Tahan... ${unlockHoldProgress}%`
+                    : 'Tahan 1.5 Detik untuk Buka Kunci'}
+                </span>
+              </div>
+            </button>
+            <p className="text-[10px] text-center text-slate-600">
+              Buka kunci saat sudah di depan bendera pos untuk langsung scan QR.
+            </p>
           </div>
         </div>
       )}
@@ -3027,6 +3289,36 @@ export default function ParticipantView({
                   </div>
                 )}
 
+                {/* TOMBOL POCKET MODE (KUNCI SAKU ATLET) — Layar OLED Gelap, Anti-Ghost-Touch & Hemat Baterai */}
+                {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && (
+                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-950/80 border border-slate-800 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400 border border-sky-500/30">
+                        <BatteryCharging className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                          Mode Saku / Kunci Layar
+                          <span className="rounded bg-sky-950 px-1.5 py-0.2 text-[9px] font-mono text-sky-300 border border-sky-500/40">
+                            Hemat Baterai 60%
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          Layar hitam pekat saat lari, GPS tetap lacak, anti-terpencet di saku
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsPocketLocked(true)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 active:scale-[0.98] px-3 py-2 text-xs font-bold text-white shadow-sm transition cursor-pointer shrink-0"
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      <span>Kunci Layar</span>
+                    </button>
+                  </div>
+                )}
+
                 {/* ============================================================
                     TAB NAVIGASI "Course | Map" (GAYA REFERENSI iOrienteering)
                     Jika Organizer mengaktifkan "Tampilkan Peta ke Peserta",
@@ -3052,9 +3344,7 @@ export default function ParticipantView({
                         type="button"
                         onClick={() => {
                           setRunnerViewTab('MAP');
-                          if (!gpsCoords) {
-                            void getQuickGpsCoordinates();
-                          }
+                          void getQuickGpsCoordinates();
                         }}
                         className={`py-2.5 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 ${
                           runnerViewTab === 'MAP'
