@@ -327,16 +327,20 @@ export function mergeSessionMonotonically(
 
   const curTotal = typeof current.totalScore === 'number' ? current.totalScore : 0;
   const incTotal = typeof incoming.totalScore === 'number' ? incoming.totalScore : 0;
-  const totalScore = Math.max(curTotal, incTotal);
+  const mergedIsDnf = Boolean(incoming.isDnf || current.isDnf);
+  const totalScore =
+    mergedIsDnf && incoming.isDnf && !current.isDnf
+      ? incTotal
+      : Math.max(curTotal, incTotal);
 
   const overtimeMinutes = Math.max(
     current.overtimeMinutes || 0,
     incoming.overtimeMinutes || 0
   );
-  const penaltyPoints = Math.max(
-    current.penaltyPoints || 0,
-    incoming.penaltyPoints || 0
-  );
+  const penaltyPoints =
+    mergedIsDnf && incoming.isDnf && !current.isDnf
+      ? Math.max(0, incoming.penaltyPoints || 0)
+      : Math.max(current.penaltyPoints || 0, incoming.penaltyPoints || 0);
 
   // Pilih lokasi terakhir yang paling baru diukur
   const lastLocation = (() => {
@@ -355,7 +359,7 @@ export function mergeSessionMonotonically(
     ...incoming,
     attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
     status: winningStatus,
-    isDnf: Boolean(incoming.isDnf || current.isDnf),
+    isDnf: mergedIsDnf,
     dnfReason: incoming.dnfReason || current.dnfReason,
     loadedAt: current.loadedAt || incoming.loadedAt,
     startedAt,
@@ -369,6 +373,18 @@ export function mergeSessionMonotonically(
     totalScore,
     durationSeconds,
     lastLocation,
+    relayParentTeamName: incoming.relayParentTeamName || current.relayParentTeamName,
+    relayParentTeamKey: incoming.relayParentTeamKey || current.relayParentTeamKey,
+    relayLegIndex: incoming.relayLegIndex || current.relayLegIndex,
+    relayMemberNames:
+      incoming.relayMemberNames !== undefined
+        ? incoming.relayMemberNames
+        : current.relayMemberNames,
+    relayOverrideUnlocked: Boolean(
+      current.relayOverrideUnlocked || incoming.relayOverrideUnlocked
+    ),
+    relayOverrideReason: incoming.relayOverrideReason || current.relayOverrideReason,
+    relayOverrideAt: incoming.relayOverrideAt || current.relayOverrideAt,
   };
 }
 
@@ -834,6 +850,7 @@ export interface SyncQueueOutcome {
   rejectedCount: number;
   remainingQueueCount: number;
   updatedSession: ParticipantSession | null;
+  relayStatus?: any;
   allSessionReports: CheckpointReport[];
   errorMessage?: string;
 }
@@ -955,6 +972,7 @@ export async function syncPendingReportsWithServer(params: {
       processedAt: string;
       results: Array<{ report: CheckpointReport; isDuplicate: boolean }>;
       session: ParticipantSession | null;
+      relayStatus?: any;
     };
     try {
       data = JSON.parse(rawText);
@@ -991,6 +1009,7 @@ export async function syncPendingReportsWithServer(params: {
       rejectedCount,
       remainingQueueCount,
       updatedSession: data.session,
+      relayStatus: data.relayStatus ?? undefined,
       allSessionReports: finalReports,
     };
   } catch (err) {

@@ -27,15 +27,18 @@ import {
   Lock,
   Unlock,
   BatteryCharging,
+  Users,
 } from 'lucide-react';
 import {
   Checkpoint,
   CheckpointReport,
   Course,
+  CourseRaceMode,
   ORIENTEERING_AGE_GROUPS,
   ORIENTEERING_GENDER_OPTIONS,
   ParticipantPublic,
   ParticipantSession,
+  RelayDnfScoringMode,
   SessionStatus,
   SyncStatus,
   ValidationMethod,
@@ -190,6 +193,30 @@ function SyncBadge({ status }: { status: SyncStatus }) {
   }
 }
 
+interface RelayTeamLegInfo {
+  legIndex: number;
+  sessionId?: string;
+  participantTeamName?: string | null;
+  memberNames?: string | null;
+  status?: SessionStatus | null;
+  isDnf?: boolean;
+  checkpointsCompleted?: number;
+  totalScore?: number;
+  durationSeconds?: number;
+  relayOverrideUnlocked?: boolean;
+  isMe?: boolean;
+}
+
+interface RelayTeamStatus {
+  isRelayLocked: boolean;
+  lockReason?: string | null;
+  waitingOnLeg?: number | null;
+  parentTeamName?: string | null;
+  legIndex?: number | null;
+  subTeamCount: number;
+  legs: RelayTeamLegInfo[];
+}
+
 interface ParticipantViewProps {
   onAuthenticated?: () => void;
   onLogout?: () => void;
@@ -329,6 +356,20 @@ export default function ParticipantView({
     type: 'success' | 'warning' | 'error';
     text: string;
   } | null>(null);
+
+  // State khusus Mode Relay (Estafet Akumulasi Sub-Team)
+  const [relayStatus, setRelayStatus] = useState<RelayTeamStatus | null>(null);
+  const [relayParentInput, setRelayParentInput] = useState<string>(
+    initialPersisted.activeSession?.relayParentTeamName || ''
+  );
+  const [relayLegInput, setRelayLegInput] = useState<number>(
+    initialPersisted.activeSession?.relayLegIndex || 1
+  );
+  const [relayMembersInput, setRelayMembersInput] = useState<string>(
+    initialPersisted.activeSession?.relayMemberNames || ''
+  );
+  const [isSavingRelayProfile, setIsSavingRelayProfile] = useState<boolean>(false);
+  const [isEditingRelayIdentity, setIsEditingRelayIdentity] = useState<boolean>(false);
 
   const isEffectivelyOnline = browserOnline && !simulatedOffline;
 
@@ -497,6 +538,20 @@ export default function ParticipantView({
         merged.finishedAt = merged.finishedAt || prev.finishedAt;
       }
 
+      // Pertahankan identitas Relay jika belum terisi pada respon parsial
+      merged.relayParentTeamName =
+        incoming.relayParentTeamName ?? prev.relayParentTeamName;
+      merged.relayParentTeamKey =
+        incoming.relayParentTeamKey ?? prev.relayParentTeamKey;
+      merged.relayLegIndex = incoming.relayLegIndex ?? prev.relayLegIndex;
+      merged.relayMemberNames = incoming.relayMemberNames ?? prev.relayMemberNames;
+      merged.relayOverrideUnlocked = Boolean(
+        incoming.relayOverrideUnlocked || prev.relayOverrideUnlocked
+      );
+      merged.relayOverrideReason =
+        incoming.relayOverrideReason ?? prev.relayOverrideReason;
+      merged.relayOverrideAt = incoming.relayOverrideAt ?? prev.relayOverrideAt;
+
       // Gabungkan validatedCheckpointIds agar pos yang sudah valid tidak hilang
       if (
         Array.isArray(prev.validatedCheckpointIds) &&
@@ -514,7 +569,7 @@ export default function ParticipantView({
     [hasLocalStartReport, hasLocalFinishReport]
   );
 
-  // Sinkronisasi Real-Time Pengaturan Course & Sesi dari Server (ketika panitia mengedit Course / Checkpoint)
+  // Sinkronisasi Real-Time Pengaturan Course & Sesi dari Server (ketika panitia mengedit Course / Checkpoint / Relay)
   const syncLatestCourseAndSession = useCallback(async () => {
     if (!activeSession || !token || !isEffectivelyOnline || cameraActiveFor) {
       return;
@@ -534,6 +589,7 @@ export default function ParticipantView({
         if (errData.sessionDeleted) {
           setActiveCourse(null);
           setActiveSession(null);
+          setRelayStatus(null);
           setFeedbackBanner({
             type: 'warning',
             text: 'Course telah dihapus oleh panitia. Silakan scan Setup QR Course yang baru.',
@@ -547,6 +603,7 @@ export default function ParticipantView({
         session?: ParticipantSession;
         course?: Course | null;
         sessionMissingOnServer?: boolean;
+        relayStatus?: RelayTeamStatus | null;
       };
       try {
         data = JSON.parse(rawText);
@@ -559,6 +616,14 @@ export default function ParticipantView({
             return prev;
           }
           return data.course!;
+        });
+      }
+      if (data.relayStatus !== undefined) {
+        setRelayStatus((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(data.relayStatus || null)) {
+            return prev;
+          }
+          return data.relayStatus || null;
         });
       }
       if (data.sessionMissingOnServer) {
@@ -628,6 +693,34 @@ export default function ParticipantView({
       });
       setIsSyncing(false);
 
+      if (outcome.relayStatus !== undefined) {
+        setRelayStatus(outcome.relayStatus || null);
+      }
+
+      const validLocalStartAfterSync = outcome.allSessionReports.some(
+        (r) => r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+      );
+      const rejectedStartReport = [...outcome.allSessionReports]
+        .reverse()
+        .find(
+          (r) => r.reportType === 'START' && r.syncStatus === SyncStatus.REJECTED_SERVER
+        );
+
+      if (
+        !validLocalStartAfterSync &&
+        outcome.updatedSession?.status === SessionStatus.NOT_STARTED
+      ) {
+        // Server menolak START (misal karena Relay Lock): rollback status lokal agar stopwatch tidak berjalan!
+        setActiveSession(outcome.updatedSession);
+        triggerRunnerFeedback('error');
+        const rejectMsg =
+          rejectedStartReport?.rejectionReason ||
+          'Start ditolak oleh server (Giliran Estafet belum terbuka).';
+        setFeedbackBanner({ type: 'error', text: rejectMsg });
+        showRunnerToast('error', 'START DITOLAK SERVER', rejectMsg);
+        return;
+      }
+
       if (outcome.updatedSession) {
         setActiveSession((prev) =>
           mergeServerSessionSafely(prev || targetSession, outcome.updatedSession!)
@@ -658,8 +751,66 @@ export default function ParticipantView({
         });
       }
     },
-    [activeSession, token, simulatedOffline, mergeServerSessionSafely]
+    [activeSession, token, simulatedOffline, mergeServerSessionSafely, showRunnerToast]
   );
+
+  // Simpan Identitas Tim Induk & Urutan Sub-Team pada Course Mode Relay
+  const handleSaveRelayProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeSession || !activeCourse || !token) return;
+    if (!relayParentInput.trim()) {
+      setFeedbackBanner({
+        type: 'error',
+        text: 'Nama Tim Induk wajib diisi untuk lomba Mode Relay.',
+      });
+      return;
+    }
+    setIsSavingRelayProfile(true);
+    setFeedbackBanner(null);
+    try {
+      const res = await fetch('/api/participant/relay-profile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          sessionId: activeSession.id,
+          relayParentTeamName: relayParentInput.trim(),
+          relayLegIndex: relayLegInput,
+          relayMemberNames: relayMembersInput.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        triggerRunnerFeedback('error');
+        setFeedbackBanner({
+          type: 'error',
+          text: data.error || 'Gagal menyimpan identitas Sub-Team Relay.',
+        });
+        return;
+      }
+      if (data.session) {
+        setActiveSession(data.session);
+      }
+      if (data.relayStatus !== undefined) {
+        setRelayStatus(data.relayStatus || null);
+      }
+      setIsEditingRelayIdentity(false);
+      triggerRunnerFeedback('success');
+      setFeedbackBanner({
+        type: 'success',
+        text: `Identitas estafet disimpan: Tim Induk "${data.session?.relayParentTeamName}" • Sub-Team #${data.session?.relayLegIndex}.`,
+      });
+    } catch {
+      setFeedbackBanner({
+        type: 'error',
+        text: 'Menyimpan identitas Tim Induk membutuhkan koneksi ke server agar tidak bentrok dengan Sub-Team lain.',
+      });
+    } finally {
+      setIsSavingRelayProfile(false);
+    }
+  };
 
   // Pemeriksa apakah suatu kode QR adalah Setup QR (untuk menangani Kondisi A & Kondisi B)
   const checkAccidentalSetupQrScan = useCallback(
@@ -834,6 +985,47 @@ export default function ParticipantView({
     }
     flushPendingLastLocation();
   }, [isEffectivelyOnline, token, activeSession?.id, simulatedOffline]);
+
+  // PELACAKAN LOKASI BERKALA KE SERVER PANITIA (Mengirim 1 koordinat terakhir setiap GPS_INTERVAL_MS)
+  useEffect(() => {
+    if (!isSessionActivelyRunning || !activeCourse || !activeSession) return;
+
+    if (lastPeriodicAttemptMsRef.current === 0) {
+      triggerSilentPeriodicLocationUpdate();
+    }
+
+    const intervalId = window.setInterval(() => {
+      triggerSilentPeriodicLocationUpdate();
+    }, GPS_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const elapsed = Date.now() - lastPeriodicAttemptMsRef.current;
+        if (elapsed >= GPS_INTERVAL_MS) {
+          triggerSilentPeriodicLocationUpdate();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [
+    isSessionActivelyRunning,
+    activeCourse,
+    activeSession,
+    triggerSilentPeriodicLocationUpdate,
+  ]);
+
+  // Matikan Mode Saku (Pocket Lock) otomatis jika sesi sudah Finish/berhenti
+  useEffect(() => {
+    if (!isSessionActivelyRunning && isPocketLocked) {
+      setIsPocketLocked(false);
+      setUnlockHoldProgress(0);
+    }
+  }, [isSessionActivelyRunning, isPocketLocked]);
 
   // SCREEN WAKE LOCK API: Mencegah layar HP tidur otomatis saat lomba berlangsung
   useEffect(() => {
@@ -1534,6 +1726,11 @@ export default function ParticipantView({
         forceNewSessionRef.current = false;
         setActiveCourse(data.course);
         setActiveSession(data.session);
+        setRelayStatus(data.relayStatus || null);
+        setRelayParentInput(data.session?.relayParentTeamName || '');
+        setRelayLegInput(data.session?.relayLegIndex || 1);
+        setRelayMembersInput(data.session?.relayMemberNames || '');
+        setIsEditingRelayIdentity(false);
         setConfirmingLeaveCourse(false);
         const attemptNum = data.session?.attemptNumber || 1;
         const attemptLabel =
@@ -1544,11 +1741,16 @@ export default function ParticipantView({
         showRunnerToast(
           'success',
           '🗺️ COURSE DIMUAT!',
-          `${data.course.name}${attemptLabel} siap. Silakan Scan Start QR saat siap lari.`
+          data.course?.raceMode === CourseRaceMode.RELAY
+            ? `${data.course.name}${attemptLabel} (Mode Relay). Isi Tim Induk & Urutan Sub-Team terlebih dahulu!`
+            : `${data.course.name}${attemptLabel} siap. Silakan Scan Start QR saat siap lari.`
         );
         setFeedbackBanner({
           type: 'success',
-          text: `Course "${data.course.name}"${attemptLabel} berhasil dimuat! Silakan tekan tombol SCAN START QR saat siap memulai.`,
+          text:
+            data.course?.raceMode === CourseRaceMode.RELAY
+              ? `Course Relay "${data.course.name}"${attemptLabel} berhasil dimuat! Silakan isi Nama Tim Induk & Urutan Sub-Team sebelum Scan Start.`
+              : `Course "${data.course.name}"${attemptLabel} berhasil dimuat! Silakan tekan tombol SCAN START QR saat siap memulai.`,
         });
       } catch {
         triggerRunnerFeedback('error');
@@ -1633,6 +1835,27 @@ export default function ParticipantView({
             setFeedbackBanner({ type: 'error', text: msg });
             showRunnerToast('error', 'QR START TIDAK COCOK', msg);
             return;
+          }
+
+          // Khusus Mode Relay: Pastikan Identitas Sub-Team sudah diisi dan Giliran Estafet tidak terkunci
+          if (activeCourse.raceMode === CourseRaceMode.RELAY) {
+            if (!activeSession.relayParentTeamKey || !activeSession.relayLegIndex) {
+              triggerRunnerFeedback('error');
+              const msg =
+                'Mode Relay aktif! Harap simpan Nama Tim Induk & Urutan Sub-Team Anda terlebih dahulu sebelum Scan Start QR.';
+              setFeedbackBanner({ type: 'error', text: msg });
+              showRunnerToast('error', 'ISI TIM INDUK DULU', msg);
+              return;
+            }
+            if (relayStatus?.isRelayLocked) {
+              triggerRunnerFeedback('error');
+              const msg =
+                relayStatus.lockReason ||
+                'Giliran Estafet masih terkunci menunggu Sub-Team sebelumnya Finish/DNF atau Override Panitia.';
+              setFeedbackBanner({ type: 'error', text: msg });
+              showRunnerToast('error', 'GILIRAN ESTAFET TERKUNCI', msg);
+              return;
+            }
           }
 
           await recordAndQueueReport({
@@ -1776,6 +1999,7 @@ export default function ParticipantView({
       getQuickGpsCoordinates,
       gpsCoords,
       recordAndQueueReport,
+      relayStatus,
       sessionCanRecordCheckpoints,
       showRunnerToast,
       validateCheckpointBeforeRecord,
@@ -2068,11 +2292,16 @@ export default function ParticipantView({
       if (data.activeCourse && data.latestSession) {
         setActiveCourse(data.activeCourse);
         setActiveSession(data.latestSession);
+        setRelayStatus(data.relayStatus || null);
+        setRelayParentInput(data.latestSession?.relayParentTeamName || '');
+        setRelayLegInput(data.latestSession?.relayLegIndex || 1);
+        setRelayMembersInput(data.latestSession?.relayMemberNames || '');
         setFeedbackBanner({
           type: 'success',
           text: `Selamat datang kembali, Tim ${data.participant.teamName}! Sesi Course "${data.activeCourse.name}" Anda siap dilanjutkan.`,
         });
       } else {
+        setRelayStatus(null);
         setFeedbackBanner({
           type: 'success',
           text: `Login berhasil: Tim ${data.participant.teamName} (Pendaftar: ${data.participant.name}).`,
@@ -2152,6 +2381,7 @@ export default function ParticipantView({
     setParticipant(null);
     setActiveCourse(null);
     setActiveSession(null);
+    setRelayStatus(null);
     setConfirmingLeaveCourse(false);
     clearPersistedParticipantState();
     setFeedbackBanner(null);
@@ -2328,7 +2558,9 @@ export default function ParticipantView({
     ctx.font = '16px sans-serif';
     ctx.fillText(`Course: ${activeCourse.name}`, 32, 128);
     ctx.fillText(
-      `Lokasi: ${activeCourse.locationName} (${activeCourse.date})`,
+      activeSession.relayParentTeamName
+        ? `Tim Induk (Relay): ${activeSession.relayParentTeamName} • Sub-Team #${activeSession.relayLegIndex || '?'}`
+        : `Lokasi: ${activeCourse.locationName || '-'} (${activeCourse.date})`,
       32,
       155
     );
@@ -2483,7 +2715,18 @@ export default function ParticipantView({
       }
     }
 
-    const netScore = Math.max(0, grossScore - penaltyPoints);
+    let netScore = Math.max(0, grossScore - penaltyPoints);
+    if (activeSession.isDnf && activeCourse.raceMode === CourseRaceMode.RELAY) {
+      const dnfMode = activeCourse.relayDnfScoringMode || RelayDnfScoringMode.ZERO;
+      if (dnfMode === RelayDnfScoringMode.ZERO) {
+        penaltyPoints = grossScore;
+        netScore = 0;
+      } else {
+        const extraPenalty = Math.max(0, Number(activeCourse.relayDnfPenaltyPoints) || 0);
+        penaltyPoints += extraPenalty;
+        netScore = Math.max(0, grossScore - penaltyPoints);
+      }
+    }
     return {
       grossScore,
       overtimeMinutes,
@@ -3223,22 +3466,266 @@ export default function ParticipantView({
                 </div>
 
                 {/* ============================================================
+                    KARTU MODE RELAY (ESTAFET TIM INDUK & KUNCI GILIRAN SUB-TEAM)
+                   ============================================================ */}
+                {activeCourse.raceMode === CourseRaceMode.RELAY && (
+                  <div className="rounded-xl border border-purple-500/40 bg-purple-950/20 p-3.5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                          <Users className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <div className="text-[10px] font-mono uppercase tracking-wider text-purple-300 font-bold">
+                            Mode Lomba Relay (Estafet Akumulasi)
+                          </div>
+                          <div className="text-xs font-bold text-white">
+                            {activeSession.relayParentTeamName
+                              ? `${activeSession.relayParentTeamName} • Sub-Team #${activeSession.relayLegIndex}`
+                              : `Lengkapi Tim Induk & Urutan (1–${activeCourse.relaySubTeamCount || 3})`}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {activeSession.status === SessionStatus.NOT_STARTED &&
+                          activeSession.relayParentTeamKey &&
+                          !isEditingRelayIdentity && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRelayParentInput(activeSession.relayParentTeamName || '');
+                                setRelayLegInput(activeSession.relayLegIndex || 1);
+                                setRelayMembersInput(activeSession.relayMemberNames || '');
+                                setIsEditingRelayIdentity(true);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold cursor-pointer"
+                            >
+                              Ubah Sub-Team
+                            </button>
+                          )}
+                        <button
+                          type="button"
+                          onClick={() => void syncLatestCourseAndSession()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 border border-purple-500/40 text-[11px] font-bold cursor-pointer"
+                          title="Periksa status giliran Sub-Team sebelumnya"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          Cek Giliran
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Form Pilih Tim Induk & Urutan Sub-Team (Hanya sebelum Start) */}
+                    {activeSession.status === SessionStatus.NOT_STARTED &&
+                      (!activeSession.relayParentTeamKey ||
+                        !activeSession.relayLegIndex ||
+                        isEditingRelayIdentity) && (
+                        <form
+                          onSubmit={handleSaveRelayProfile}
+                          className="space-y-2.5 pt-2 border-t border-purple-500/25 text-xs"
+                        >
+                          <div>
+                            <label className="block text-purple-200 font-semibold mb-1">
+                              Nama Tim Induk (Sama untuk seluruh Sub-Team dalam tim Anda) *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="Contoh: GARUDA NUSANTARA"
+                              value={relayParentInput}
+                              onChange={(e) => setRelayParentInput(e.target.value)}
+                              className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-purple-500/40 text-white focus:border-purple-400 focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-purple-200 font-semibold mb-1">
+                              Urutan Giliran Sub-Team Anda *
+                            </label>
+                            <div className="flex flex-wrap gap-1.5">
+                              {Array.from(
+                                { length: Math.max(2, Number(activeCourse.relaySubTeamCount) || 3) },
+                                (_, i) => i + 1
+                              ).map((legNum) => (
+                                <button
+                                  key={`leg-pick-${legNum}`}
+                                  type="button"
+                                  onClick={() => setRelayLegInput(legNum)}
+                                  className={`px-3 py-1.5 rounded-lg font-mono font-bold border transition cursor-pointer ${
+                                    relayLegInput === legNum
+                                      ? 'bg-purple-500 text-white border-purple-300 shadow'
+                                      : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-purple-400'
+                                  }`}
+                                >
+                                  Sub-Team #{legNum}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-slate-300 mb-1">
+                              Nama Anggota Sub-Team (Opsional)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="Contoh: Andi, Budi"
+                              value={relayMembersInput}
+                              onChange={(e) => setRelayMembersInput(e.target.value)}
+                              className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:border-purple-400 focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="submit"
+                              disabled={isSavingRelayProfile}
+                              className="flex-1 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold transition cursor-pointer disabled:opacity-50"
+                            >
+                              {isSavingRelayProfile
+                                ? 'Menyimpan Identitas...'
+                                : 'Simpan Identitas Sub-Team'}
+                            </button>
+                            {isEditingRelayIdentity && (
+                              <button
+                                type="button"
+                                onClick={() => setIsEditingRelayIdentity(false)}
+                                className="px-3 py-2.5 rounded-lg bg-slate-800 text-slate-300 font-medium cursor-pointer"
+                              >
+                                Batal
+                              </button>
+                            )}
+                          </div>
+                        </form>
+                      )}
+
+                    {/* Papan Progres Giliran Estafet Sub-Team #1..#N */}
+                    {relayStatus && relayStatus.legs && relayStatus.legs.length > 0 && (
+                      <div className="grid grid-cols-3 gap-1.5 pt-1">
+                        {relayStatus.legs.map((leg) => (
+                          <div
+                            key={`relay-leg-pill-${leg.legIndex}`}
+                            className={`rounded-lg border p-2 text-[10px] font-mono ${
+                              leg.isMe
+                                ? 'border-purple-400 bg-purple-500/20 text-white'
+                                : leg.isDnf
+                                ? 'border-rose-500/40 bg-rose-950/30 text-rose-200'
+                                : leg.status === SessionStatus.FINISHED
+                                ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                                : leg.status === SessionStatus.ACTIVE
+                                ? 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                                : 'border-slate-800 bg-slate-950 text-slate-400'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between font-bold">
+                              <span>
+                                #{leg.legIndex}
+                                {leg.isMe ? ' (Anda)' : ''}
+                              </span>
+                              <span>
+                                {leg.isDnf
+                                  ? 'DNF'
+                                  : leg.status === SessionStatus.FINISHED
+                                  ? '✓ Finish'
+                                  : leg.status === SessionStatus.ACTIVE
+                                  ? '🏃 Lari'
+                                  : leg.relayOverrideUnlocked
+                                  ? '🔓 Open'
+                                  : '⏳ Siap'}
+                              </span>
+                            </div>
+                            <div className="truncate opacity-85 mt-0.5">
+                              {leg.participantTeamName || 'Belum daftar'}
+                            </div>
+                            {leg.status === SessionStatus.FINISHED && (
+                              <div className="text-amber-300 font-bold mt-0.5">
+                                {leg.totalScore || 0} pts
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Peringatan Kunci Giliran Estafet */}
+                    {activeSession.status === SessionStatus.NOT_STARTED &&
+                      relayStatus?.isRelayLocked &&
+                      activeSession.relayParentTeamKey && (
+                        <div className="rounded-lg bg-amber-500/15 border border-amber-500/40 p-2.5 text-[11px] text-amber-200 flex items-start gap-2">
+                          <Lock className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                          <span>{relayStatus.lockReason}</span>
+                        </div>
+                      )}
+
+                    {activeSession.relayOverrideUnlocked && (
+                      <div className="rounded-lg bg-sky-500/15 border border-sky-500/40 p-2 text-[11px] text-sky-200 flex items-center gap-2">
+                        <Unlock className="w-3.5 h-3.5 shrink-0 text-sky-300" />
+                        <span>
+                          Override Panitia Aktif — Kunci giliran Sub-Team Anda telah dibuka manual.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ============================================================
                     TOMBOL SCAN UTAMA RAKSASA (TEPAT DI ATAS, TANPA PERLU SCROLL!)
                    ============================================================ */}
                 {!sessionCanRecordCheckpoints ? (
-                  <button
-                    type="button"
-                    onClick={() => setCameraActiveFor('START')}
-                    className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-6 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer"
-                  >
-                    <Play className="h-10 w-10 fill-current" />
-                    <span className="text-xl font-extrabold tracking-wide uppercase">
-                      SCAN START QR
-                    </span>
-                    <span className="text-xs text-emerald-100 font-medium">
-                      Buka kamera layar penuh &amp; otomatis mulai waktu lomba
-                    </span>
-                  </button>
+                  activeCourse.raceMode === CourseRaceMode.RELAY &&
+                  (!activeSession.relayParentTeamKey ||
+                    !activeSession.relayLegIndex ||
+                    Boolean(relayStatus?.isRelayLocked)) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerRunnerFeedback('error');
+                        const lockMsg =
+                          !activeSession.relayParentTeamKey ||
+                          !activeSession.relayLegIndex
+                            ? 'Lengkapi Nama Tim Induk & Urutan Sub-Team terlebih dahulu di kartu Mode Relay di atas.'
+                            : relayStatus?.lockReason ||
+                              'Giliran Estafet belum terbuka. Tunggu Sub-Team sebelumnya Finish/DNF atau hubungi Panitia.';
+                        setFeedbackBanner({ type: 'warning', text: lockMsg });
+                        showRunnerToast(
+                          'warning',
+                          !activeSession.relayParentTeamKey
+                            ? 'ISI TIM INDUK DULU'
+                            : 'GILIRAN ESTAFET TERKUNCI',
+                          lockMsg
+                        );
+                        void syncLatestCourseAndSession();
+                      }}
+                      className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 border-2 border-amber-500/50 py-6 px-4 text-amber-200 shadow-lg transition cursor-not-allowed"
+                    >
+                      <Lock className="h-9 w-9 text-amber-400" />
+                      <span className="text-lg font-extrabold tracking-wide uppercase">
+                        {!activeSession.relayParentTeamKey ||
+                        !activeSession.relayLegIndex
+                          ? 'ISI IDENTITAS SUB-TEAM DULU'
+                          : `MENUNGGU SUB-TEAM #${relayStatus?.waitingOnLeg || (activeSession.relayLegIndex - 1)}`}
+                      </span>
+                      <span className="text-xs text-slate-300 font-medium text-center">
+                        {!activeSession.relayParentTeamKey
+                          ? 'Simpan Nama Tim Induk & Urutan Sub-Team sebelum Scan Start QR'
+                          : 'Ketuk untuk cek giliran ulang, atau minta Panitia tekan Override jika HP pelari sebelumnya mati'}
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setCameraActiveFor('START')}
+                      className="w-full flex flex-col items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-6 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer"
+                    >
+                      <Play className="h-10 w-10 fill-current" />
+                      <span className="text-xl font-extrabold tracking-wide uppercase">
+                        SCAN START QR
+                      </span>
+                      <span className="text-xs text-emerald-100 font-medium">
+                        Buka kamera layar penuh &amp; otomatis mulai waktu lomba
+                      </span>
+                    </button>
+                  )
                 ) : !sessionMarkedFinishedLocallyOrServer ? (
                   <button
                     type="button"
@@ -3255,14 +3742,37 @@ export default function ParticipantView({
                     </span>
                   </button>
                 ) : (
-                  <div className="rounded-xl border border-sky-500/40 bg-sky-950/30 p-4 text-center space-y-3">
-                    <div className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-sky-500/20 text-sky-300">
-                      <Flag className="h-5 w-5" />
+                  <div
+                    className={`rounded-xl border p-4 text-center space-y-3 ${
+                      activeSession.isDnf
+                        ? 'border-rose-500/40 bg-rose-950/30'
+                        : 'border-sky-500/40 bg-sky-950/30'
+                    }`}
+                  >
+                    <div
+                      className={`inline-flex h-10 w-10 items-center justify-center rounded-full ${
+                        activeSession.isDnf
+                          ? 'bg-rose-500/20 text-rose-300'
+                          : 'bg-sky-500/20 text-sky-300'
+                      }`}
+                    >
+                      {activeSession.isDnf ? (
+                        <AlertTriangle className="h-5 w-5" />
+                      ) : (
+                        <Flag className="h-5 w-5" />
+                      )}
                     </div>
                     <div>
                       <h4 className="text-base font-extrabold text-white">
-                        Selamat! Anda Telah Menyelesaikan Lomba
+                        {activeSession.isDnf
+                          ? 'Sesi Dihentikan (Status: DNF)'
+                          : 'Selamat! Anda Telah Menyelesaikan Lomba'}
                       </h4>
+                      {activeSession.isDnf && activeSession.dnfReason && (
+                        <p className="text-[11px] text-rose-200 mt-1">
+                          Alasan: {activeSession.dnfReason}
+                        </p>
+                      )}
                       <p className="text-xs text-slate-300 mt-0.5">
                         Total Waktu:{' '}
                         <strong className="font-mono text-amber-300">
@@ -3274,15 +3784,27 @@ export default function ParticipantView({
                           {activeCourse.checkpoints.length}
                         </strong>
                       </p>
-                      {scoreBreakdown.penaltyPoints > 0 && (
+                      {(scoreBreakdown.penaltyPoints > 0 || activeSession.isDnf) && (
                         <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-2 rounded-lg bg-slate-950/90 border border-rose-500/40 px-3 py-1.5 text-xs font-mono">
                           <span className="text-slate-300">
                             Poin Pos: <strong>{scoreBreakdown.grossScore}</strong>
                           </span>
-                          <span className="text-rose-400">
-                            • Penalti Telat ({scoreBreakdown.overtimeMinutes}m):{' '}
-                            <strong>-{scoreBreakdown.penaltyPoints}</strong>
-                          </span>
+                          {scoreBreakdown.penaltyPoints > 0 && (
+                            <span className="text-rose-400">
+                              • Penalti
+                              {scoreBreakdown.overtimeMinutes > 0
+                                ? ` (${scoreBreakdown.overtimeMinutes}m`
+                                : ''}
+                              {activeSession.isDnf
+                                ? scoreBreakdown.overtimeMinutes > 0
+                                  ? ' + DNF)'
+                                  : ' (DNF)'
+                                : scoreBreakdown.overtimeMinutes > 0
+                                ? ')'
+                                : ''}
+                              : <strong>-{scoreBreakdown.penaltyPoints}</strong>
+                            </span>
+                          )}
                           <span className="text-emerald-300">
                             • Skor Akhir: <strong>{scoreBreakdown.netScore}</strong>
                           </span>

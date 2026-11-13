@@ -36,10 +36,13 @@ import {
   FileText,
   Building2,
   Eye,
+  Unlock,
+  Flag,
 } from 'lucide-react';
 import {
   AllTimePlatformStats,
   Course,
+  CourseRaceMode,
   Checkpoint,
   CheckpointReport,
   GeoPointLocation,
@@ -49,6 +52,7 @@ import {
   OrganizerVaultBackup,
   ParticipantPublic,
   ParticipantSession,
+  RelayDnfScoringMode,
   SessionStatus,
   ValidationMethod,
 } from '../../types';
@@ -303,6 +307,15 @@ export default function OrganizerDashboard({
   const [newCourseDurationInput, setNewCourseDurationInput] = useState<string>('60');
   const [newCoursePenaltyEnabled, setNewCoursePenaltyEnabled] = useState<boolean>(true);
   const [newCoursePenaltyInput, setNewCoursePenaltyInput] = useState<string>('10');
+  const [newCourseRaceMode, setNewCourseRaceMode] = useState<CourseRaceMode>(
+    CourseRaceMode.REGULAR
+  );
+  const [newCourseRelaySubTeamCount, setNewCourseRelaySubTeamCount] = useState<string>('3');
+  const [newCourseRelayEnforceSeq, setNewCourseRelayEnforceSeq] = useState<boolean>(true);
+  const [newCourseRelayDnfMode, setNewCourseRelayDnfMode] = useState<RelayDnfScoringMode>(
+    RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+  );
+  const [newCourseRelayDnfPenalty, setNewCourseRelayDnfPenalty] = useState<string>('100');
 
   // ==========================================================================
   // STATE EDIT COURSE AKTIF & KONFIRMASI HAPUS COURSE
@@ -322,6 +335,15 @@ export default function OrganizerDashboard({
   const [editCourseDurationInput, setEditCourseDurationInput] = useState<string>('');
   const [editCoursePenaltyEnabled, setEditCoursePenaltyEnabled] = useState<boolean>(false);
   const [editCoursePenaltyInput, setEditCoursePenaltyInput] = useState<string>('10');
+  const [editCourseRaceMode, setEditCourseRaceMode] = useState<CourseRaceMode>(
+    CourseRaceMode.REGULAR
+  );
+  const [editCourseRelaySubTeamCount, setEditCourseRelaySubTeamCount] = useState<string>('3');
+  const [editCourseRelayEnforceSeq, setEditCourseRelayEnforceSeq] = useState<boolean>(true);
+  const [editCourseRelayDnfMode, setEditCourseRelayDnfMode] = useState<RelayDnfScoringMode>(
+    RelayDnfScoringMode.ZERO
+  );
+  const [editCourseRelayDnfPenalty, setEditCourseRelayDnfPenalty] = useState<string>('0');
 
   const [confirmDeleteCourse, setConfirmDeleteCourse] = useState<Course | null>(null);
   const [focusedMonitoringSessionId, setFocusedMonitoringSessionId] = useState<string | null>(null);
@@ -352,12 +374,29 @@ export default function OrganizerDashboard({
   >(null);
   const [isDeletingParticipants, setIsDeletingParticipants] = useState<boolean>(false);
 
-  // Result View Options: With Split (Detail) vs Without Split (Ringkas) + Filters
+  // Result View Options: With Split (Detail) vs Without Split (Ringkas) + Filters + Relay View
   const [showResultSplits, setShowResultSplits] = useState<boolean>(true);
   const [resultGenderFilter, setResultGenderFilter] = useState<string>('ALL');
   const [resultAgeGroupFilter, setResultAgeGroupFilter] = useState<string>('ALL');
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
   const [isSpectatorFullscreen, setIsSpectatorFullscreen] = useState<boolean>(false);
+  const [relayResultViewMode, setRelayResultViewMode] = useState<'ACCUMULATED' | 'SUBTEAMS'>(
+    'ACCUMULATED'
+  );
+  const [relayOverrideTarget, setRelayOverrideTarget] = useState<{
+    sessionId: string;
+    teamLabel: string;
+    parentTeamName?: string;
+    legIndex?: number;
+    status: SessionStatus;
+    isDnf?: boolean;
+    relayOverrideUnlocked?: boolean;
+  } | null>(null);
+  const [relayOverrideAction, setRelayOverrideAction] = useState<
+    'UNLOCK_LEG' | 'FORCE_FINISH' | 'FORCE_DNF'
+  >('UNLOCK_LEG');
+  const [relayOverrideReason, setRelayOverrideReason] = useState<string>('');
+  const [isExecutingRelayOverride, setIsExecutingRelayOverride] = useState<boolean>(false);
 
   // Full Database Backup & Restore States (Migrasi Mandiri)
   const [isExportingDb, setIsExportingDb] = useState<boolean>(false);
@@ -951,6 +990,8 @@ export default function OrganizerDashboard({
     const liveRadius = Math.max(5, Number(editCourseRadiusInput) || 35);
     const liveDuration = Math.max(0, Number(editCourseDurationInput) || 0);
     const livePenaltyRate = Math.max(0, Number(editCoursePenaltyInput) || 0);
+    const liveSubTeamCount = Math.min(20, Math.max(2, Number(editCourseRelaySubTeamCount) || 3));
+    const liveDnfPenalty = Math.max(0, Number(editCourseRelayDnfPenalty) || 0);
 
     return {
       ...selectedCourse,
@@ -965,6 +1006,11 @@ export default function OrganizerDashboard({
       durationMinutes: liveDuration,
       overtimePenaltyEnabled: editCoursePenaltyEnabled,
       overtimePenaltyPointsPerMinute: livePenaltyRate,
+      raceMode: editCourseRaceMode,
+      relaySubTeamCount: liveSubTeamCount,
+      relayEnforceSequential: editCourseRelayEnforceSeq,
+      relayDnfScoringMode: editCourseRelayDnfMode,
+      relayDnfPenaltyPoints: liveDnfPenalty,
     };
   }, [
     selectedCourse,
@@ -980,6 +1026,11 @@ export default function OrganizerDashboard({
     editCourseDurationInput,
     editCoursePenaltyEnabled,
     editCoursePenaltyInput,
+    editCourseRaceMode,
+    editCourseRelaySubTeamCount,
+    editCourseRelayEnforceSeq,
+    editCourseRelayDnfMode,
+    editCourseRelayDnfPenalty,
   ]);
 
   // Helper untuk langsung memperbarui course di state lokal dashboard secara real-time tanpa jeda
@@ -1038,6 +1089,11 @@ export default function OrganizerDashboard({
         ? String(course.overtimePenaltyPointsPerMinute)
         : '10'
     );
+    setEditCourseRaceMode(course.raceMode || CourseRaceMode.REGULAR);
+    setEditCourseRelaySubTeamCount(String(course.relaySubTeamCount || 3));
+    setEditCourseRelayEnforceSeq(course.relayEnforceSequential !== false);
+    setEditCourseRelayDnfMode(course.relayDnfScoringMode || RelayDnfScoringMode.ZERO);
+    setEditCourseRelayDnfPenalty(String(course.relayDnfPenaltyPoints ?? 0));
     setIsEditingCourse(true);
   };
 
@@ -1049,6 +1105,11 @@ export default function OrganizerDashboard({
       const parsedRadius = Math.max(5, Number(editCourseRadiusInput) || 35);
       const parsedDuration = Math.max(0, Number(editCourseDurationInput) || 0);
       const parsedPenalty = Math.max(0, Number(editCoursePenaltyInput) || 0);
+      const parsedSubTeams = Math.min(
+        20,
+        Math.max(2, Number(editCourseRelaySubTeamCount) || 3)
+      );
+      const parsedRelayDnfPenalty = Math.max(0, Number(editCourseRelayDnfPenalty) || 0);
 
       const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
         method: 'PUT',
@@ -1069,6 +1130,11 @@ export default function OrganizerDashboard({
           durationMinutes: parsedDuration,
           overtimePenaltyEnabled: editCoursePenaltyEnabled,
           overtimePenaltyPointsPerMinute: parsedPenalty,
+          raceMode: editCourseRaceMode,
+          relaySubTeamCount: parsedSubTeams,
+          relayEnforceSequential: editCourseRelayEnforceSeq,
+          relayDnfScoringMode: editCourseRelayDnfMode,
+          relayDnfPenaltyPoints: parsedRelayDnfPenalty,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1459,7 +1525,18 @@ export default function OrganizerDashboard({
         }
       }
 
-      const netScore = Math.max(0, grossScore - penaltyPoints);
+      let netScore = Math.max(0, grossScore - penaltyPoints);
+      if (sess.isDnf && course?.raceMode === CourseRaceMode.RELAY) {
+        const dnfMode = course.relayDnfScoringMode || RelayDnfScoringMode.ZERO;
+        if (dnfMode === RelayDnfScoringMode.ZERO) {
+          penaltyPoints = grossScore;
+          netScore = 0;
+        } else {
+          const extraDnfPenalty = Math.max(0, Number(course.relayDnfPenaltyPoints) || 0);
+          penaltyPoints += extraDnfPenalty;
+          netScore = Math.max(0, grossScore - penaltyPoints);
+        }
+      }
 
       // Hitung Finish Cumulative & Finish Leg Split (dari pos terakhir ke garis Finish)
       const finishCumulativeSeconds =
@@ -1520,6 +1597,12 @@ export default function OrganizerDashboard({
         lastLocationAt: sess.lastLocation?.measuredAt,
         isDnf: sess.isDnf,
         dnfReason: sess.dnfReason,
+        relayParentTeamName: sess.relayParentTeamName,
+        relayParentTeamKey: sess.relayParentTeamKey,
+        relayLegIndex: sess.relayLegIndex,
+        relayMemberNames: sess.relayMemberNames,
+        relayOverrideUnlocked: Boolean(sess.relayOverrideUnlocked),
+        relayOverrideReason: sess.relayOverrideReason,
       };
     });
 
@@ -1558,6 +1641,138 @@ export default function OrganizerDashboard({
     resultAgeGroupFilter,
   ]);
 
+  // Klasemen Tim Induk (Akumulasi Estafet Mode Relay)
+  const relayParentLeaderboardRows = useMemo(() => {
+    const activeCourse = effectiveSelectedCourse || selectedCourse;
+    if (!activeCourse || activeCourse.raceMode !== CourseRaceMode.RELAY) {
+      return [];
+    }
+    const subTeamCount = Math.max(2, Number(activeCourse.relaySubTeamCount) || 3);
+    const grouped = new Map<
+      string,
+      { parentTeamName: string; rows: typeof leaderboardRows }
+    >();
+
+    for (const row of leaderboardRows) {
+      const pKey = (
+        row.relayParentTeamKey ||
+        String(row.relayParentTeamName || '').trim().replace(/\s+/g, ' ').toUpperCase()
+      ).trim();
+      if (!pKey) continue;
+      if (!grouped.has(pKey)) {
+        grouped.set(pKey, {
+          parentTeamName: row.relayParentTeamName || pKey,
+          rows: [],
+        });
+      }
+      grouped.get(pKey)!.rows.push(row);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([parentTeamKey, group]) => {
+        const legs = Array.from({ length: subTeamCount }, (_, idx) => {
+          const legNum = idx + 1;
+          const matching = group.rows.filter((r) => r.relayLegIndex === legNum);
+          const picked =
+            matching.find((r) => r.status === SessionStatus.FINISHED && !r.isDnf) ||
+            matching.find((r) => r.status === SessionStatus.ACTIVE) ||
+            matching[matching.length - 1];
+          return {
+            legIndex: legNum,
+            row: picked || null,
+          };
+        });
+
+        const totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
+        const grossScore = legs.reduce((s, l) => s + (l.row?.grossScore || 0), 0);
+        const penaltyPoints = legs.reduce((s, l) => s + (l.row?.penaltyPoints || 0), 0);
+        const totalDurationSeconds = legs.reduce(
+          (s, l) =>
+            s + (typeof l.row?.durationSeconds === 'number' ? l.row.durationSeconds : 0),
+          0
+        );
+        const totalCheckpointsCompleted = legs.reduce(
+          (s, l) => s + (l.row?.checkpointsCompleted || 0),
+          0
+        );
+        const finishedLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.FINISHED
+        ).length;
+        const cleanFinishedLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.FINISHED && !l.row?.isDnf
+        ).length;
+        const dnfLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.FINISHED && l.row?.isDnf
+        ).length;
+        const activeLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.ACTIVE
+        ).length;
+
+        return {
+          parentTeamKey,
+          parentTeamName: group.parentTeamName,
+          subTeamCount,
+          legs,
+          totalScore,
+          grossScore,
+          penaltyPoints,
+          totalDurationSeconds,
+          totalCheckpointsCompleted,
+          finishedLegsCount,
+          cleanFinishedLegsCount,
+          dnfLegsCount,
+          activeLegsCount,
+        };
+      })
+      .sort((a, b) => {
+        if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+        if (b.cleanFinishedLegsCount !== a.cleanFinishedLegsCount) {
+          return b.cleanFinishedLegsCount - a.cleanFinishedLegsCount;
+        }
+        if (b.finishedLegsCount !== a.finishedLegsCount) {
+          return b.finishedLegsCount - a.finishedLegsCount;
+        }
+        return a.totalDurationSeconds - b.totalDurationSeconds;
+      })
+      .map((item, idx) => ({
+        ...item,
+        rank: idx + 1,
+      }));
+  }, [effectiveSelectedCourse, selectedCourse, leaderboardRows]);
+
+  // Eksekusi Override Manual Panitia untuk Sesi Relay
+  const handleExecuteRelayOverride = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!relayOverrideTarget || !token) return;
+    setIsExecutingRelayOverride(true);
+    try {
+      const res = await fetch('/api/organizer/relay/override-session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          sessionId: relayOverrideTarget.sessionId,
+          action: relayOverrideAction,
+          reason: relayOverrideReason.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal menjalankan Override Estafet.');
+      setRelayOverrideTarget(null);
+      setRelayOverrideReason('');
+      await fetchDashboard();
+      showTemporarySuccess(data.message || 'Override Estafet berhasil diterapkan!');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal menjalankan Override Estafet.'
+      );
+    } finally {
+      setIsExecutingRelayOverride(false);
+    }
+  };
+
   // Jumlah kolom pos (#1..#N) untuk mode Dengan Split (Detail)
   const splitColumnCount = useMemo(() => {
     const courseCpCount = selectedCourse?.checkpoints.length || 0;
@@ -1576,6 +1791,11 @@ export default function OrganizerDashboard({
       const parsedRadius = Math.max(5, Number(newCourseRadiusInput) || 35);
       const parsedDuration = Math.max(0, Number(newCourseDurationInput) || 0);
       const parsedPenalty = Math.max(0, Number(newCoursePenaltyInput) || 0);
+      const parsedSubTeams = Math.min(
+        20,
+        Math.max(2, Number(newCourseRelaySubTeamCount) || 3)
+      );
+      const parsedRelayDnfPenalty = Math.max(0, Number(newCourseRelayDnfPenalty) || 0);
 
       const res = await fetch('/api/organizer/courses', {
         method: 'POST',
@@ -1596,6 +1816,11 @@ export default function OrganizerDashboard({
           durationMinutes: parsedDuration,
           overtimePenaltyEnabled: newCoursePenaltyEnabled,
           overtimePenaltyPointsPerMinute: parsedPenalty,
+          raceMode: newCourseRaceMode,
+          relaySubTeamCount: parsedSubTeams,
+          relayEnforceSequential: newCourseRelayEnforceSeq,
+          relayDnfScoringMode: newCourseRelayDnfMode,
+          relayDnfPenaltyPoints: parsedRelayDnfPenalty,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -2200,8 +2425,80 @@ export default function OrganizerDashboard({
     }
   };
 
-  // Export CSV Leaderboard (mendukung mode Hide Split maupun Show Split #1..#N)
+  // Export CSV Leaderboard (mendukung Klasemen Tim Induk Relay maupun Rincian Sub-Team / Reguler)
   const handleExportCsv = () => {
+    const isRelayAccumulated =
+      selectedCourse?.raceMode === CourseRaceMode.RELAY &&
+      relayResultViewMode === 'ACCUMULATED';
+
+    if (isRelayAccumulated) {
+      const subTeamCount = Math.max(2, Number(selectedCourse?.relaySubTeamCount) || 3);
+      const legHeaders: string[] = [];
+      for (let i = 1; i <= subTeamCount; i++) {
+        legHeaders.push(`Sub-Team #${i} (Akun / Anggota)`, `Sub-Team #${i} Skor`, `Sub-Team #${i} Waktu`, `Sub-Team #${i} Status`);
+      }
+      const headers = [
+        'Rank',
+        'Nama Tim Induk',
+        'Sub-Team Selesai',
+        'Total Sub-Team',
+        'Sub-Team DNF',
+        'Total Pos Valid',
+        'Total Poin Pos',
+        'Total Penalti',
+        'Total Skor Akumulasi',
+        'Total Waktu Gabungan',
+        ...legHeaders,
+      ];
+      const csvLines = [
+        headers.join(','),
+        ...relayParentLeaderboardRows.map((team) => {
+          const legCells: string[] = [];
+          for (const leg of team.legs) {
+            if (leg.row) {
+              const label = leg.row.relayMemberNames
+                ? `${leg.row.teamName} (${leg.row.relayMemberNames})`
+                : leg.row.teamName;
+              const stLabel = leg.row.isDnf ? 'DNF' : leg.row.status;
+              legCells.push(
+                `"${label}"`,
+                String(leg.row.totalScore),
+                `"${formatElapsedSeconds(leg.row.durationSeconds)}"`,
+                `"${stLabel}"`
+              );
+            } else {
+              legCells.push('"-"', '0', '"-"', '"BELUM TERDAFTAR"');
+            }
+          }
+          return [
+            team.rank,
+            `"${team.parentTeamName}"`,
+            team.finishedLegsCount,
+            team.subTeamCount,
+            team.dnfLegsCount,
+            team.totalCheckpointsCompleted,
+            team.grossScore,
+            `-${team.penaltyPoints}`,
+            team.totalScore,
+            `"${formatElapsedSeconds(team.totalDurationSeconds)}"`,
+            ...legCells,
+          ].join(',');
+        }),
+      ];
+      const blob = new Blob([csvLines.join('\n')], {
+        type: 'text/csv;charset=utf-8;',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `orientra-relay-tim-induk-${
+        selectedCourse?.name.toLowerCase().replace(/\s+/g, '-') || 'all'
+      }.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
     const splitHeaders: string[] = [];
     if (showResultSplits) {
       for (let i = 1; i <= splitColumnCount; i++) {
@@ -2213,6 +2510,9 @@ export default function OrganizerDashboard({
     const headers = [
       'Rank',
       'Nama Tim',
+      'Tim Induk (Relay)',
+      'Urutan Sub-Team',
+      'Anggota Sub-Team',
       'Gender',
       'Kelompok Umur',
       'Course',
@@ -2254,11 +2554,14 @@ export default function OrganizerDashboard({
         return [
           r.rank,
           `"${r.teamName}"`,
+          `"${r.relayParentTeamName || '-'}"`,
+          r.relayLegIndex ? `#${r.relayLegIndex}` : '"-"',
+          `"${r.relayMemberNames || '-'}"`,
           `"${r.gender}"`,
           `"${r.ageGroup}"`,
           `"${r.courseName}"`,
           r.attemptNumber,
-          r.status,
+          r.isDnf ? 'DNF' : r.status,
           r.checkpointsCompleted,
           r.totalCheckpoints,
           r.grossScore,
@@ -3590,6 +3893,122 @@ export default function OrganizerDashboard({
                       )}
                     </div>
 
+                    {/* Pilihan Konsep / Mode Lomba: Lomba Biasa vs Estafet Relay Sub-Team */}
+                    <div className="p-3 rounded-lg bg-slate-900/90 border border-amber-500/30 space-y-2.5">
+                      <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wide flex items-center justify-between">
+                        <span>Konsep / Mode Lomba</span>
+                        <span className="text-[10px] font-mono text-slate-400">
+                          Reguler vs Relay Estafet
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setNewCourseRaceMode(CourseRaceMode.REGULAR)}
+                          className={`p-2 rounded-lg border text-left transition cursor-pointer ${
+                            newCourseRaceMode === CourseRaceMode.REGULAR
+                              ? 'bg-amber-500/15 border-amber-400 text-amber-200'
+                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px]">Lomba Biasa</div>
+                          <div className="text-[10px] opacity-80">Individu / Tim Tunggal</div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNewCourseRaceMode(CourseRaceMode.RELAY)}
+                          className={`p-2 rounded-lg border text-left transition cursor-pointer ${
+                            newCourseRaceMode === CourseRaceMode.RELAY
+                              ? 'bg-purple-500/20 border-purple-400 text-purple-200'
+                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px]">Mode Relay (Estafet)</div>
+                          <div className="text-[10px] opacity-80">Akumulasi Sub-Team</div>
+                        </button>
+                      </div>
+
+                      {newCourseRaceMode === CourseRaceMode.RELAY && (
+                        <div className="pt-2 border-t border-slate-800 space-y-2.5 text-[11px]">
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-purple-200 mb-1">
+                                Jumlah Sub-Team / Tim Induk
+                              </label>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="3"
+                                value={newCourseRelaySubTeamCount}
+                                onChange={(e) =>
+                                  setNewCourseRelaySubTeamCount(
+                                    sanitizeDigitsOnly(e.target.value)
+                                  )
+                                }
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white font-mono"
+                              />
+                            </div>
+                            <div className="flex flex-col justify-end">
+                              <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
+                                <input
+                                  type="checkbox"
+                                  checked={newCourseRelayEnforceSeq}
+                                  onChange={(e) =>
+                                    setNewCourseRelayEnforceSeq(e.target.checked)
+                                  }
+                                  className="rounded border-slate-700"
+                                />
+                                <span>Kunci Giliran (Relay Lock)</span>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-purple-200 mb-1">
+                              Aturan Skor Sub-Team yang DNF
+                            </label>
+                            <select
+                              value={newCourseRelayDnfMode}
+                              onChange={(e) =>
+                                setNewCourseRelayDnfMode(
+                                  e.target.value as RelayDnfScoringMode
+                                )
+                              }
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white"
+                            >
+                              <option value={RelayDnfScoringMode.PARTIAL_WITH_PENALTY}>
+                                Poin CP Tervalidasi Tetap Dihitung + Penalti DNF
+                              </option>
+                              <option value={RelayDnfScoringMode.ZERO}>
+                                0 Poin (Hangus jika DNF)
+                              </option>
+                            </select>
+                          </div>
+
+                          {newCourseRelayDnfMode ===
+                            RelayDnfScoringMode.PARTIAL_WITH_PENALTY && (
+                            <div>
+                              <label className="block text-rose-300 mb-1">
+                                Penalti Tambahan Sub-Team DNF (Poin)
+                              </label>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="100"
+                                value={newCourseRelayDnfPenalty}
+                                onChange={(e) =>
+                                  setNewCourseRelayDnfPenalty(
+                                    sanitizeDigitsOnly(e.target.value)
+                                  )
+                                }
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-rose-500/40 text-rose-200 font-mono"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="grid grid-cols-2 gap-2">
                       <label className="flex items-center gap-2 text-slate-300 cursor-pointer p-2 rounded-lg bg-slate-900/60 border border-slate-800">
                         <input
@@ -3705,6 +4124,11 @@ export default function OrganizerDashboard({
                             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
                               {c.checkpoints.length} CP
                             </span>
+                            {c.raceMode === CourseRaceMode.RELAY && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
+                                🏃 RELAY {c.relaySubTeamCount || 3} Sub-Team
+                              </span>
+                            )}
                             {c.durationMinutes && c.durationMinutes > 0 ? (
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20">
                                 ⏱ {c.durationMinutes}m
@@ -3790,6 +4214,22 @@ export default function OrganizerDashboard({
                           }`
                         : 'Tanpa Batas Durasi'}
                     </span>
+                    {effectiveSelectedCourse.raceMode === CourseRaceMode.RELAY ? (
+                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
+                        🏃 Mode Relay • {effectiveSelectedCourse.relaySubTeamCount || 3} Sub-Team
+                        {effectiveSelectedCourse.relayEnforceSequential !== false
+                          ? ' (Giliran Terkunci)'
+                          : ' (Giliran Bebas)'}
+                        {effectiveSelectedCourse.relayDnfScoringMode ===
+                        RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+                          ? ` • DNF: Skor CP - ${effectiveSelectedCourse.relayDnfPenaltyPoints || 0}`
+                          : ' • DNF: 0 Poin'}
+                      </span>
+                    ) : (
+                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                        Mode Lomba Biasa
+                      </span>
+                    )}
                   </div>
                   <h2 className="text-lg font-bold text-white mt-1">
                     {effectiveSelectedCourse.name}
@@ -4014,6 +4454,114 @@ export default function OrganizerDashboard({
                         className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono disabled:opacity-40"
                       />
                     </div>
+                  </div>
+
+                  {/* Konfigurasi Mode Lomba (Biasa vs Estafet Relay) */}
+                  <div className="p-3 rounded-xl bg-slate-950/70 border border-purple-500/30 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-purple-300 uppercase tracking-wide text-[11px]">
+                        Konsep / Mode Lomba (Biasa vs Relay Estafet)
+                      </span>
+                      <div className="inline-flex rounded-lg bg-slate-900 p-0.5 border border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => setEditCourseRaceMode(CourseRaceMode.REGULAR)}
+                          className={`px-3 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                            editCourseRaceMode === CourseRaceMode.REGULAR
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Lomba Biasa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditCourseRaceMode(CourseRaceMode.RELAY)}
+                          className={`px-3 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                            editCourseRaceMode === CourseRaceMode.RELAY
+                              ? 'bg-purple-500 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Mode Relay (Estafet)
+                        </button>
+                      </div>
+                    </div>
+
+                    {editCourseRaceMode === CourseRaceMode.RELAY && (
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
+                        <div>
+                          <label className="block text-purple-200 mb-1">
+                            Jumlah Sub-Team
+                          </label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={editCourseRelaySubTeamCount}
+                            onChange={(e) =>
+                              setEditCourseRelaySubTeamCount(
+                                sanitizeDigitsOnly(e.target.value)
+                              )
+                            }
+                            className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-purple-500/40 text-white font-mono"
+                          />
+                        </div>
+                        <div className="flex flex-col justify-end">
+                          <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-900 border border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={editCourseRelayEnforceSeq}
+                              onChange={(e) =>
+                                setEditCourseRelayEnforceSeq(e.target.checked)
+                              }
+                              className="rounded border-slate-700"
+                            />
+                            <span>Kunci Giliran (Relay Lock)</span>
+                          </label>
+                        </div>
+                        <div>
+                          <label className="block text-purple-200 mb-1">
+                            Skor Sub-Team DNF
+                          </label>
+                          <select
+                            value={editCourseRelayDnfMode}
+                            onChange={(e) =>
+                              setEditCourseRelayDnfMode(
+                                e.target.value as RelayDnfScoringMode
+                              )
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-purple-500/40 text-white"
+                          >
+                            <option value={RelayDnfScoringMode.ZERO}>
+                              0 Poin (Hangus)
+                            </option>
+                            <option value={RelayDnfScoringMode.PARTIAL_WITH_PENALTY}>
+                              Poin CP + Penalti DNF
+                            </option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-rose-300 mb-1">
+                            Penalti Tambahan DNF
+                          </label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            disabled={
+                              editCourseRelayDnfMode !==
+                              RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+                            }
+                            value={editCourseRelayDnfPenalty}
+                            onChange={(e) =>
+                              setEditCourseRelayDnfPenalty(
+                                sanitizeDigitsOnly(e.target.value)
+                              )
+                            }
+                            className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-rose-500/40 text-rose-200 font-mono disabled:opacity-40"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-sky-500/20">
@@ -4449,10 +4997,17 @@ export default function OrganizerDashboard({
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="font-bold text-emerald-300 text-sm">
                                 {participant?.teamName || participant?.name || 'Tim'}
                               </span>
+                              {course?.raceMode === CourseRaceMode.RELAY && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
+                                  {sess.relayParentTeamName
+                                    ? `🏃 ${sess.relayParentTeamName} • Sub-Team #${sess.relayLegIndex || '?'}`
+                                    : '🏃 RELAY: Belum Set Tim Induk'}
+                                </span>
+                              )}
                               <span className="text-xs text-slate-400">
                                 (Pendaftar: {participant?.name || '-'})
                               </span>
@@ -4462,10 +5017,20 @@ export default function OrganizerDashboard({
                               <span className="text-slate-200 font-medium">
                                 {course?.name || sess.courseId}
                               </span>
+                              {sess.relayMemberNames && (
+                                <span className="ml-2 text-purple-300/90">
+                                  • Anggota: {sess.relayMemberNames}
+                                </span>
+                              )}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5 justify-end">
+                            {sess.relayOverrideUnlocked && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 font-bold">
+                                OVERRIDE
+                              </span>
+                            )}
                             {sess.attemptNumber && sess.attemptNumber > 1 && (
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold">
                                 Attempt #{sess.attemptNumber}
@@ -4478,14 +5043,16 @@ export default function OrganizerDashboard({
                             )}
                             <span
                               className={`text-[11px] font-mono px-2.5 py-1 rounded font-semibold ${
-                                sess.status === SessionStatus.ACTIVE
+                                sess.isDnf
+                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                  : sess.status === SessionStatus.ACTIVE
                                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                                   : sess.status === SessionStatus.FINISHED
                                   ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                                   : 'bg-slate-800 text-slate-300 border border-slate-700'
                               }`}
                             >
-                              {sess.status}
+                              {sess.isDnf ? 'DNF' : sess.status}
                             </span>
                           </div>
                         </div>
@@ -4560,7 +5127,7 @@ export default function OrganizerDashboard({
                             )}
                           </div>
 
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             {isLocationStale && (
                               <span
                                 className="flex items-center gap-1 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded"
@@ -4570,6 +5137,37 @@ export default function OrganizerDashboard({
                                 &gt;5m
                               </span>
                             )}
+                            {course?.raceMode === CourseRaceMode.RELAY &&
+                              !isSuperAdminReadOnly && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRelayOverrideTarget({
+                                      sessionId: sess.id,
+                                      teamLabel:
+                                        participant?.teamName ||
+                                        participant?.name ||
+                                        'Sub-Team',
+                                      parentTeamName: sess.relayParentTeamName,
+                                      legIndex: sess.relayLegIndex,
+                                      status: sess.status,
+                                      isDnf: sess.isDnf,
+                                      relayOverrideUnlocked: sess.relayOverrideUnlocked,
+                                    });
+                                    setRelayOverrideAction(
+                                      sess.status === SessionStatus.ACTIVE
+                                        ? 'FORCE_FINISH'
+                                        : 'UNLOCK_LEG'
+                                    );
+                                    setRelayOverrideReason('');
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 px-2.5 py-1.5 text-[11px] font-bold text-purple-200 transition cursor-pointer"
+                                  title="Override Manual Estafet (Buka Kunci / Paksa Finish / Paksa DNF)"
+                                >
+                                  <Unlock className="w-3 h-3" />
+                                  Override
+                                </button>
+                              )}
                             {resolvedPos && (
                               <button
                                 type="button"
@@ -4602,43 +5200,81 @@ export default function OrganizerDashboard({
                 <span className="text-[11px] font-mono uppercase text-amber-400">
                   Official Race Leaderboard
                 </span>
-                <h2 className="text-lg font-bold text-white mt-0.5">
-                  Hasil Lomba &amp; Peringkat (
-                  {selectedCourse?.name || 'Semua Course'})
+                <h2 className="text-lg font-bold text-white mt-0.5 flex flex-wrap items-center gap-2">
+                  <span>
+                    Hasil Lomba &amp; Peringkat (
+                    {selectedCourse?.name || 'Semua Course'})
+                  </span>
+                  {selectedCourse?.raceMode === CourseRaceMode.RELAY && (
+                    <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-200 border border-purple-500/40">
+                      🏃 MODE RELAY ({selectedCourse.relaySubTeamCount || 3} Sub-Team)
+                    </span>
+                  )}
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Urutan peringkat: Status (FINISHED prioritas utama) → Skor
-                  Akhir Bersih (setelah dikurangi penalti keterlambatan) → Waktu
-                  tempuh tercepat.
+                  {selectedCourse?.raceMode === CourseRaceMode.RELAY
+                    ? 'Akumulasi skor dan waktu seluruh Sub-Team membentuk Klasemen Resmi Tim Induk.'
+                    : 'Urutan peringkat: Status (FINISHED prioritas utama) → Skor Akhir Bersih (setelah dikurangi penalti keterlambatan) → Waktu tempuh tercepat.'}
                 </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {selectedCourse?.raceMode === CourseRaceMode.RELAY && (
+                  <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-purple-500/40">
+                    <button
+                      type="button"
+                      onClick={() => setRelayResultViewMode('ACCUMULATED')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                        relayResultViewMode === 'ACCUMULATED'
+                          ? 'bg-purple-500 text-white shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Klasemen Tim Induk (Akumulasi)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRelayResultViewMode('SUBTEAMS')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                        relayResultViewMode === 'SUBTEAMS'
+                          ? 'bg-purple-500 text-white shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Rincian Semua Sub-Team
+                    </button>
+                  </div>
+                )}
+
                 {/* Opsi Show Split / Hide Split */}
-                <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setShowResultSplits(false)}
-                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
-                      !showResultSplits
-                        ? 'bg-amber-500 text-slate-950 shadow'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    Hide Split
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowResultSplits(true)}
-                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
-                      showResultSplits
-                        ? 'bg-amber-500 text-slate-950 shadow'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    Show Split (#1..#{splitColumnCount || 1})
-                  </button>
-                </div>
+                {(!selectedCourse ||
+                  selectedCourse.raceMode !== CourseRaceMode.RELAY ||
+                  relayResultViewMode === 'SUBTEAMS') && (
+                  <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setShowResultSplits(false)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                        !showResultSplits
+                          ? 'bg-amber-500 text-slate-950 shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Hide Split
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowResultSplits(true)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+                        showResultSplits
+                          ? 'bg-amber-500 text-slate-950 shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Show Split (#1..#{splitColumnCount || 1})
+                    </button>
+                  </div>
+                )}
 
                 {selectedCourse && (
                   <button
@@ -4729,19 +5365,172 @@ export default function OrganizerDashboard({
               </div>
 
               <div className="text-[11px] text-slate-400">
-                Menampilkan{' '}
-                <strong className="text-white">{leaderboardRows.length}</strong>{' '}
-                hasil sesi
-                {showResultSplits && (
-                  <span className="ml-2 text-slate-400">
-                    • Format Split: <strong className="text-amber-300">Pos (Poin)</strong> |{' '}
-                    <strong className="text-white">Waktu Kumulatif</strong> |{' '}
-                    <span className="text-slate-400">Waktu Split Antar-Pos</span>
-                  </span>
+                {selectedCourse?.raceMode === CourseRaceMode.RELAY &&
+                relayResultViewMode === 'ACCUMULATED' ? (
+                  <>
+                    Menampilkan{' '}
+                    <strong className="text-purple-300">
+                      {relayParentLeaderboardRows.length} Tim Induk
+                    </strong>{' '}
+                    ({leaderboardRows.length} sesi Sub-Team)
+                  </>
+                ) : (
+                  <>
+                    Menampilkan{' '}
+                    <strong className="text-white">{leaderboardRows.length}</strong>{' '}
+                    hasil sesi
+                    {showResultSplits && (
+                      <span className="ml-2 text-slate-400">
+                        • Format Split: <strong className="text-amber-300">Pos (Poin)</strong> |{' '}
+                        <strong className="text-white">Waktu Kumulatif</strong> |{' '}
+                        <span className="text-slate-400">Waktu Split Antar-Pos</span>
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
             </div>
 
+            {selectedCourse?.raceMode === CourseRaceMode.RELAY &&
+            relayResultViewMode === 'ACCUMULATED' ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
+                      <th className="py-3 px-3 whitespace-nowrap">Rank</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Nama Tim Induk</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Progres</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Rincian Tiap Sub-Team</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Total Pos</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Penalti</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Total Skor Tim Induk</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Total Waktu Gabungan</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {relayParentLeaderboardRows.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={8}
+                          className="py-8 text-center text-slate-400 text-xs"
+                        >
+                          Belum ada Tim Induk yang mendaftarkan Sub-Team di Course Relay ini.
+                        </td>
+                      </tr>
+                    ) : (
+                      relayParentLeaderboardRows.map((team) => (
+                        <tr key={team.parentTeamKey} className="hover:bg-slate-900/40 align-top">
+                          <td className="py-3 px-3 font-mono font-bold text-amber-400 whitespace-nowrap text-sm">
+                            #{team.rank}
+                          </td>
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <div className="font-bold text-purple-200 text-sm">
+                              {team.parentTeamName}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                              {team.cleanFinishedLegsCount}/{team.subTeamCount} Finish Bersih
+                              {team.dnfLegsCount > 0 ? ` • ${team.dnfLegsCount} DNF` : ''}
+                              {team.activeLegsCount > 0 ? ` • ${team.activeLegsCount} Aktif` : ''}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 font-mono whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-200 border border-purple-500/30 font-bold">
+                              {team.finishedLegsCount} / {team.subTeamCount}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="flex flex-wrap gap-1.5">
+                              {team.legs.map((leg) => {
+                                const r = leg.row;
+                                if (!r) {
+                                  return (
+                                    <div
+                                      key={`${team.parentTeamKey}-leg-${leg.legIndex}`}
+                                      className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-500 font-mono"
+                                    >
+                                      #{leg.legIndex}: Kosong
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div
+                                    key={`${team.parentTeamKey}-leg-${leg.legIndex}`}
+                                    className={`px-2 py-1 rounded border text-[10px] font-mono flex items-center gap-1.5 ${
+                                      r.isDnf
+                                        ? 'bg-rose-500/10 border-rose-500/40 text-rose-200'
+                                        : r.status === SessionStatus.FINISHED
+                                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                                        : r.status === SessionStatus.ACTIVE
+                                        ? 'bg-sky-500/10 border-sky-500/30 text-sky-200'
+                                        : 'bg-slate-900 border-slate-700 text-slate-300'
+                                    }`}
+                                  >
+                                    <span className="font-bold">#{leg.legIndex}</span>
+                                    <span className="truncate max-w-[110px]">
+                                      {r.teamName}
+                                    </span>
+                                    <span className="text-amber-300 font-bold">
+                                      {r.totalScore}pts
+                                    </span>
+                                    <span className="text-slate-400">
+                                      {formatElapsedSeconds(r.durationSeconds)}
+                                    </span>
+                                    {!isSuperAdminReadOnly && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setRelayOverrideTarget({
+                                            sessionId: r.sessionId,
+                                            teamLabel: r.teamName,
+                                            parentTeamName: r.relayParentTeamName,
+                                            legIndex: r.relayLegIndex,
+                                            status: r.status,
+                                            isDnf: r.isDnf,
+                                            relayOverrideUnlocked: r.relayOverrideUnlocked,
+                                          });
+                                          setRelayOverrideAction(
+                                            r.status === SessionStatus.ACTIVE
+                                              ? 'FORCE_FINISH'
+                                              : 'UNLOCK_LEG'
+                                          );
+                                          setRelayOverrideReason('');
+                                        }}
+                                        className="ml-0.5 px-1 py-0.5 rounded bg-purple-500/25 hover:bg-purple-500/40 text-purple-100 cursor-pointer"
+                                        title={`Override Sub-Team #${leg.legIndex}`}
+                                      >
+                                        <Unlock className="w-2.5 h-2.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">
+                            {team.totalCheckpointsCompleted} CP
+                          </td>
+                          <td className="py-3 px-3 font-mono whitespace-nowrap">
+                            {team.penaltyPoints > 0 ? (
+                              <span className="text-rose-400 font-semibold">
+                                -{team.penaltyPoints} pts
+                              </span>
+                            ) : (
+                              <span className="text-slate-500">0</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm whitespace-nowrap">
+                            {team.totalScore} pts
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-white whitespace-nowrap">
+                            {formatElapsedSeconds(team.totalDurationSeconds)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
@@ -4811,6 +5600,12 @@ export default function OrganizerDashboard({
                             <div className="text-emerald-300 group-hover:text-amber-300 font-bold underline decoration-emerald-500/40 underline-offset-2">
                               {row.teamName}
                             </div>
+                            {row.relayParentTeamName && (
+                              <div className="text-[10px] font-mono text-purple-300 font-bold mt-0.5">
+                                🏃 {row.relayParentTeamName} • Sub-Team #{row.relayLegIndex || '?'}
+                                {row.relayMemberNames ? ` (${row.relayMemberNames})` : ''}
+                              </div>
+                            )}
                             <div className="text-[10px] text-slate-400">
                               Pendaftar: {row.participantName}
                               {partObj?.phone ? ` • WA: ${partObj.phone}` : ''}
@@ -4836,26 +5631,36 @@ export default function OrganizerDashboard({
                           )}
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
-                          {row.isDnf ? (
-                            <span
-                              className="text-[11px] font-mono px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                              title={row.dnfReason || 'Tidak Menyelesaikan Course (Keluar saat lomba)'}
-                            >
-                              DNF (Gugur)
-                            </span>
-                          ) : (
-                            <span
-                              className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
-                                row.status === SessionStatus.FINISHED
-                                  ? 'bg-amber-500/20 text-amber-300'
-                                  : row.status === SessionStatus.ACTIVE
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}
-                            >
-                              {row.status}
-                            </span>
-                          )}
+                          <div className="flex flex-wrap items-center gap-1">
+                            {row.isDnf ? (
+                              <span
+                                className="text-[11px] font-mono px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                                title={row.dnfReason || 'Tidak Menyelesaikan Course (Keluar saat lomba)'}
+                              >
+                                DNF (Gugur)
+                              </span>
+                            ) : (
+                              <span
+                                className={`text-[11px] font-mono px-2 py-0.5 rounded font-semibold ${
+                                  row.status === SessionStatus.FINISHED
+                                    ? 'bg-amber-500/20 text-amber-300'
+                                    : row.status === SessionStatus.ACTIVE
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : 'bg-slate-800 text-slate-400'
+                                }`}
+                              >
+                                {row.status}
+                              </span>
+                            )}
+                            {row.relayOverrideUnlocked && (
+                              <span
+                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 font-bold"
+                                title={row.relayOverrideReason || 'Dibuka manual lewat Override Panitia'}
+                              >
+                                OVERRIDE
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">
                           {row.checkpointsCompleted} / {row.totalCheckpoints} CP
@@ -4864,9 +5669,10 @@ export default function OrganizerDashboard({
                           {row.grossScore} pts
                         </td>
                         <td className="py-3 px-3 font-mono whitespace-nowrap">
-                          {row.overtimeMinutes > 0 ? (
+                          {row.penaltyPoints > 0 ? (
                             <span className="text-rose-400 font-semibold">
-                              -{row.penaltyPoints} pts ({row.overtimeMinutes}m)
+                              -{row.penaltyPoints} pts
+                              {row.overtimeMinutes > 0 ? ` (${row.overtimeMinutes}m)` : ''}
                             </span>
                           ) : (
                             <span className="text-slate-500">0</span>
@@ -4940,9 +5746,37 @@ export default function OrganizerDashboard({
                           </td>
                         )}
 
-                        {/* Tombol Detail & Hapus Hasil Sesi */}
+                        {/* Tombol Detail, Override Estafet, & Hapus Hasil Sesi */}
                         <td className="py-2.5 px-3 whitespace-nowrap text-right">
                           <div className="inline-flex items-center justify-end gap-1.5">
+                            {selectedCourse?.raceMode === CourseRaceMode.RELAY &&
+                              !isSuperAdminReadOnly && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRelayOverrideTarget({
+                                      sessionId: row.sessionId,
+                                      teamLabel: row.teamName,
+                                      parentTeamName: row.relayParentTeamName,
+                                      legIndex: row.relayLegIndex,
+                                      status: row.status,
+                                      isDnf: row.isDnf,
+                                      relayOverrideUnlocked: row.relayOverrideUnlocked,
+                                    });
+                                    setRelayOverrideAction(
+                                      row.status === SessionStatus.ACTIVE
+                                        ? 'FORCE_FINISH'
+                                        : 'UNLOCK_LEG'
+                                    );
+                                    setRelayOverrideReason('');
+                                  }}
+                                  className="px-2 py-1 rounded bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 border border-purple-500/40 text-[10px] font-bold inline-flex items-center gap-1 transition cursor-pointer"
+                                  title="Override Manual Estafet (Buka Kunci / Paksa Finish / Paksa DNF)"
+                                >
+                                  <Unlock className="w-3 h-3" />
+                                  <span>Override</span>
+                                </button>
+                              )}
                             {partObj && (
                               <button
                                 type="button"
@@ -5001,6 +5835,7 @@ export default function OrganizerDashboard({
                 </tbody>
               </table>
             </div>
+            )}
           </div>
         </div>
       )}
@@ -6180,6 +7015,158 @@ export default function OrganizerDashboard({
             setConfirmDeleteParticipant(p);
           }}
         />
+      )}
+      {/* Modal Override Manual Estafet Panitia (Darurat Offline / Baterai Habis) */}
+      {relayOverrideTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-purple-500/50 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                  <Unlock className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-purple-300 font-bold">
+                    Override Estafet Manual Panitia
+                  </span>
+                  <h3 className="text-base font-bold text-white">
+                    {relayOverrideTarget.teamLabel}
+                  </h3>
+                  <div className="text-[11px] text-slate-400">
+                    {relayOverrideTarget.parentTeamName
+                      ? `Tim Induk: ${relayOverrideTarget.parentTeamName} • Sub-Team #${relayOverrideTarget.legIndex || '?'}`
+                      : 'Belum mengatur Tim Induk'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRelayOverrideTarget(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleExecuteRelayOverride} className="space-y-3 text-xs">
+              <div className="space-y-2">
+                <label className="block text-slate-300 font-semibold">
+                  Pilih Tindakan Darurat:
+                </label>
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition ${
+                    relayOverrideAction === 'UNLOCK_LEG'
+                      ? 'bg-sky-500/15 border-sky-400 text-sky-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="relayOverrideAction"
+                    checked={relayOverrideAction === 'UNLOCK_LEG'}
+                    onChange={() => setRelayOverrideAction('UNLOCK_LEG')}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <div className="font-bold">
+                      Buka Kunci Giliran Start (Unlock Sub-Team)
+                    </div>
+                    <div className="text-[11px] opacity-80">
+                      Izinkan Sub-Team ini langsung Scan Start QR tanpa menunggu sinyal/Finish dari Sub-Team sebelumnya.
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition ${
+                    relayOverrideAction === 'FORCE_FINISH'
+                      ? 'bg-emerald-500/15 border-emerald-400 text-emerald-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="relayOverrideAction"
+                    checked={relayOverrideAction === 'FORCE_FINISH'}
+                    onChange={() => setRelayOverrideAction('FORCE_FINISH')}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <div className="font-bold flex items-center gap-1">
+                      <Flag className="w-3.5 h-3.5" />
+                      Paksa Selesaikan (Force Finish)
+                    </div>
+                    <div className="text-[11px] opacity-80">
+                      Hentikan waktu sebagai Finish bersih (misal HP mati di garis Finish) dan otomatis buka giliran Sub-Team berikutnya.
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition ${
+                    relayOverrideAction === 'FORCE_DNF'
+                      ? 'bg-rose-500/15 border-rose-400 text-rose-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="relayOverrideAction"
+                    checked={relayOverrideAction === 'FORCE_DNF'}
+                    onChange={() => setRelayOverrideAction('FORCE_DNF')}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <div className="font-bold">
+                      Tandai Gugur / DNF (Force DNF)
+                    </div>
+                    <div className="text-[11px] opacity-80">
+                      Tutup sesi sebagai DNF (hitung skor sesuai aturan DNF Relay) dan otomatis buka giliran Sub-Team berikutnya.
+                    </div>
+                  </div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1">
+                  Catatan Alasan Override (Opsional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Contoh: HP Sub-Team 1 habis baterai saat tiba di Finish"
+                  value={relayOverrideReason}
+                  onChange={(e) => setRelayOverrideReason(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setRelayOverrideTarget(null)}
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isExecutingRelayOverride}
+                  className="px-4 py-2 rounded-lg bg-purple-500 hover:bg-purple-400 text-white font-bold cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isExecutingRelayOverride ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Memproses...
+                    </>
+                  ) : (
+                    'Terapkan Override'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

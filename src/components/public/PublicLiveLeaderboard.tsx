@@ -17,7 +17,7 @@ import {
   ArrowLeft,
   Radio,
 } from 'lucide-react';
-import { SessionStatus } from '../../types';
+import { CourseRaceMode, SessionStatus } from '../../types';
 
 interface PublicCourseSummary {
   id: string;
@@ -30,6 +30,8 @@ interface PublicCourseSummary {
   validationMethod: string;
   checkpointsCount: number;
   createdByOrganizerName: string;
+  raceMode?: CourseRaceMode;
+  relaySubTeamCount?: number;
 }
 
 interface PublicLeaderboardItem {
@@ -49,6 +51,35 @@ interface PublicLeaderboardItem {
   durationSeconds?: number;
   isDnf?: boolean;
   dnfReason?: string;
+  relayParentTeamName?: string;
+  relayLegIndex?: number;
+  relayMemberNames?: string;
+}
+
+interface PublicRelayParentItem {
+  rank: number;
+  parentTeamKey: string;
+  parentTeamName: string;
+  subTeamCount: number;
+  finishedLegsCount: number;
+  cleanFinishedLegsCount: number;
+  dnfLegsCount: number;
+  activeLegsCount: number;
+  totalCheckpointsCompleted: number;
+  grossScore: number;
+  penaltyPoints: number;
+  totalScore: number;
+  totalDurationSeconds: number;
+  legs: Array<{
+    legIndex: number;
+    sessionId?: string | null;
+    teamName?: string | null;
+    memberNames?: string | null;
+    status?: string | null;
+    isDnf?: boolean;
+    totalScore: number;
+    durationSeconds?: number | null;
+  }>;
 }
 
 interface PublicLeaderboardData {
@@ -60,10 +91,13 @@ interface PublicLeaderboardData {
     durationMinutes: number;
     checkpointsCount: number;
     createdByOrganizerName: string;
+    raceMode?: CourseRaceMode;
+    relaySubTeamCount?: number;
   };
   totalParticipants: number;
   updatedAt: string;
   leaderboard: PublicLeaderboardItem[];
+  relayTeamLeaderboard?: PublicRelayParentItem[];
 }
 
 function formatElapsedSeconds(totalSeconds?: number): string {
@@ -100,6 +134,7 @@ export default function PublicLiveLeaderboard({
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [relayViewMode, setRelayViewMode] = useState<'ACCUMULATED' | 'SUBTEAMS'>('ACCUMULATED');
   const [copiedLink, setCopiedLink] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -197,12 +232,27 @@ export default function PublicLiveLeaderboard({
   };
 
   // Filter pencarian nama tim
+  const isRelayCourse = data?.course?.raceMode === CourseRaceMode.RELAY;
+
+  const filteredRelayTeams: PublicRelayParentItem[] = useMemo(() => {
+    const teams = data?.relayTeamLeaderboard || [];
+    if (!searchQuery.trim()) return teams;
+    const q = searchQuery.toLowerCase();
+    return teams.filter(
+      (t) =>
+        t.parentTeamName.toLowerCase().includes(q) ||
+        t.legs.some((l) => (l.teamName || '').toLowerCase().includes(q))
+    );
+  }, [data?.relayTeamLeaderboard, searchQuery]);
+
   const filteredLeaderboard: PublicLeaderboardItem[] = useMemo(() => {
     if (!data?.leaderboard) return [];
     if (!searchQuery.trim()) return data.leaderboard;
     const q = searchQuery.toLowerCase();
-    return data.leaderboard.filter((row: PublicLeaderboardItem) =>
-      row.teamName.toLowerCase().includes(q)
+    return data.leaderboard.filter(
+      (row: PublicLeaderboardItem) =>
+        row.teamName.toLowerCase().includes(q) ||
+        (row.relayParentTeamName || '').toLowerCase().includes(q)
     );
   }, [data?.leaderboard, searchQuery]);
 
@@ -385,7 +435,33 @@ export default function PublicLiveLeaderboard({
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 w-full sm:w-auto">
+              <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+                {isRelayCourse && (
+                  <div className="inline-flex rounded-xl bg-slate-950 p-1 border border-purple-500/40">
+                    <button
+                      type="button"
+                      onClick={() => setRelayViewMode('ACCUMULATED')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        relayViewMode === 'ACCUMULATED'
+                          ? 'bg-purple-500 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Tim Induk (Akumulasi)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRelayViewMode('SUBTEAMS')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        relayViewMode === 'SUBTEAMS'
+                          ? 'bg-purple-500 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Semua Sub-Team
+                    </button>
+                  </div>
+                )}
                 <div className="relative flex-1 sm:w-64">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                   <input
@@ -403,7 +479,7 @@ export default function PublicLiveLeaderboard({
             </div>
 
             {/* PODIUM TOP 3 */}
-            {top3.length > 0 && !searchQuery && (
+            {(!isRelayCourse || relayViewMode === 'SUBTEAMS') && top3.length > 0 && !searchQuery && (
               <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* #2 Perak */}
                 <div className="order-2 md:order-1 rounded-2xl bg-slate-900/80 border border-slate-500/30 p-4 relative overflow-hidden shadow-xl flex items-center justify-between">
@@ -504,6 +580,77 @@ export default function PublicLiveLeaderboard({
 
             {/* TABEL PERINGKAT LENGKAP */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl overflow-hidden">
+              {isRelayCourse && relayViewMode === 'ACCUMULATED' ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-mono text-[11px] uppercase">
+                        <th className="py-3.5 px-4 text-center">Rank</th>
+                        <th className="py-3.5 px-4">Nama Tim Induk</th>
+                        <th className="py-3.5 px-3">Progres</th>
+                        <th className="py-3.5 px-4">Rincian Sub-Team</th>
+                        <th className="py-3.5 px-4 text-right text-emerald-300 font-bold">Total Skor</th>
+                        <th className="py-3.5 px-4 text-right font-bold text-white">Waktu Gabungan</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-sans">
+                      {filteredRelayTeams.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-16 text-center text-slate-500 font-mono text-xs">
+                            Belum ada Tim Induk untuk Course Relay ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredRelayTeams.map((team) => (
+                          <tr key={team.parentTeamKey} className="hover:bg-slate-800/40">
+                            <td className="py-3.5 px-4 text-center font-mono font-black text-amber-400 text-base">
+                              #{team.rank}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              <div className="font-extrabold text-purple-200 text-sm sm:text-base">
+                                {team.parentTeamName}
+                              </div>
+                              <div className="text-[11px] font-mono text-slate-400">
+                                {team.totalCheckpointsCompleted} Pos total
+                                {team.dnfLegsCount > 0 ? ` • ${team.dnfLegsCount} DNF` : ''}
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-3 font-mono font-bold text-purple-300">
+                              {team.finishedLegsCount} / {team.subTeamCount}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              <div className="flex flex-wrap gap-1.5">
+                                {team.legs.map((leg) => (
+                                  <span
+                                    key={`${team.parentTeamKey}-pub-${leg.legIndex}`}
+                                    className={`px-2 py-1 rounded text-[11px] font-mono border ${
+                                      leg.isDnf
+                                        ? 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                                        : leg.status === SessionStatus.FINISHED
+                                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                                        : leg.status === SessionStatus.ACTIVE
+                                        ? 'bg-sky-500/15 border-sky-500/40 text-sky-200'
+                                        : 'bg-slate-950 border-slate-800 text-slate-500'
+                                    }`}
+                                  >
+                                    #{leg.legIndex}: {leg.teamName ? `${leg.teamName} (${leg.totalScore}pt)` : 'Kosong'}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 text-right font-mono font-black text-emerald-300 text-lg">
+                              {team.totalScore}
+                            </td>
+                            <td className="py-3.5 px-4 text-right font-mono font-bold text-white text-sm sm:text-base">
+                              {formatElapsedSeconds(team.totalDurationSeconds)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs sm:text-sm">
                   <thead>
@@ -575,7 +722,12 @@ export default function PublicLiveLeaderboard({
 
                             {/* Nama Tim */}
                             <td className="py-3.5 px-4 text-emerald-300 font-extrabold whitespace-nowrap text-sm sm:text-base">
-                              {row.teamName}
+                              <div>{row.teamName}</div>
+                              {row.relayParentTeamName && (
+                                <div className="text-[10px] font-mono text-purple-300 font-bold">
+                                  🏃 {row.relayParentTeamName} • Sub-Team #{row.relayLegIndex || '?'}
+                                </div>
+                              )}
                             </td>
 
                             {/* Kategori */}
@@ -642,6 +794,7 @@ export default function PublicLiveLeaderboard({
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
           </>
         )}

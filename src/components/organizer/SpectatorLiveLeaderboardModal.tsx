@@ -20,10 +20,12 @@ import {
 } from 'lucide-react';
 import {
   Course,
+  CourseRaceMode,
   ORIENTEERING_AGE_GROUPS,
   ORIENTEERING_GENDER_OPTIONS,
   ParticipantPublic,
   ParticipantSession,
+  RelayDnfScoringMode,
   SessionStatus,
 } from '../../types';
 
@@ -68,6 +70,11 @@ interface LeaderboardItem {
   finishSplitSeconds?: number;
   isDnf?: boolean;
   dnfReason?: string;
+  relayParentTeamName?: string;
+  relayParentTeamKey?: string;
+  relayLegIndex?: number;
+  relayMemberNames?: string;
+  relayOverrideUnlocked?: boolean;
 }
 
 function formatElapsedSeconds(totalSeconds?: number): string {
@@ -110,6 +117,7 @@ export function SpectatorLiveLeaderboardModal({
   const [genderFilter, setGenderFilter] = useState<string>('ALL');
   const [ageGroupFilter, setAgeGroupFilter] = useState<string>('ALL');
   const [showSplits, setShowSplits] = useState<boolean>(false);
+  const [relayViewMode, setRelayViewMode] = useState<'ACCUMULATED' | 'SUBTEAMS'>('ACCUMULATED');
   const [autoScroll, setAutoScroll] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [nowTick, setNowTick] = useState<number>(Date.now());
@@ -271,7 +279,18 @@ export function SpectatorLiveLeaderboardModal({
         }
       }
 
-      const netScore = Math.max(0, grossScore - penaltyPoints);
+      let netScore = Math.max(0, grossScore - penaltyPoints);
+      if (sess.isDnf && c?.raceMode === CourseRaceMode.RELAY) {
+        const dnfMode = c.relayDnfScoringMode || RelayDnfScoringMode.ZERO;
+        if (dnfMode === RelayDnfScoringMode.ZERO) {
+          penaltyPoints = grossScore;
+          netScore = 0;
+        } else {
+          const extraPenalty = Math.max(0, Number(c.relayDnfPenaltyPoints) || 0);
+          penaltyPoints += extraPenalty;
+          netScore = Math.max(0, grossScore - penaltyPoints);
+        }
+      }
 
       // Simple splits based on validatedCheckpointIds
       const splits: SplitStep[] = (sess.validatedCheckpointIds || []).map(
@@ -309,6 +328,11 @@ export function SpectatorLiveLeaderboardModal({
         finishCumulativeSeconds: liveDurationSec,
         isDnf: sess.isDnf,
         dnfReason: sess.dnfReason,
+        relayParentTeamName: sess.relayParentTeamName,
+        relayParentTeamKey: sess.relayParentTeamKey,
+        relayLegIndex: sess.relayLegIndex,
+        relayMemberNames: sess.relayMemberNames,
+        relayOverrideUnlocked: Boolean(sess.relayOverrideUnlocked),
       };
     });
 
@@ -347,6 +371,73 @@ export function SpectatorLiveLeaderboardModal({
     ageGroupFilter,
     nowTick,
   ]);
+
+  const isRelayCourse = selectedCourse?.raceMode === CourseRaceMode.RELAY;
+
+  const relayParentRows = useMemo(() => {
+    if (!isRelayCourse || !selectedCourse) return [];
+    const subTeamCount = Math.max(2, Number(selectedCourse.relaySubTeamCount) || 3);
+    const grouped = new Map<string, { parentTeamName: string; rows: LeaderboardItem[] }>();
+    for (const row of leaderboardRows) {
+      const pKey = (
+        row.relayParentTeamKey ||
+        String(row.relayParentTeamName || '').trim().replace(/\s+/g, ' ').toUpperCase()
+      ).trim();
+      if (!pKey) continue;
+      if (!grouped.has(pKey)) {
+        grouped.set(pKey, { parentTeamName: row.relayParentTeamName || pKey, rows: [] });
+      }
+      grouped.get(pKey)!.rows.push(row);
+    }
+    return Array.from(grouped.entries())
+      .map(([parentTeamKey, group]) => {
+        const legs = Array.from({ length: subTeamCount }, (_, idx) => {
+          const legNum = idx + 1;
+          const matching = group.rows.filter((r) => r.relayLegIndex === legNum);
+          const picked =
+            matching.find((r) => r.status === SessionStatus.FINISHED && !r.isDnf) ||
+            matching.find((r) => r.status === SessionStatus.ACTIVE) ||
+            matching[matching.length - 1];
+          return { legIndex: legNum, row: picked || null };
+        });
+        const totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
+        const totalDurationSeconds = legs.reduce(
+          (s, l) => s + (typeof l.row?.durationSeconds === 'number' ? l.row.durationSeconds : 0),
+          0
+        );
+        const totalCheckpointsCompleted = legs.reduce(
+          (s, l) => s + (l.row?.checkpointsCompleted || 0),
+          0
+        );
+        const finishedLegsCount = legs.filter((l) => l.row?.status === SessionStatus.FINISHED).length;
+        const cleanFinishedLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.FINISHED && !l.row?.isDnf
+        ).length;
+        const dnfLegsCount = legs.filter(
+          (l) => l.row?.status === SessionStatus.FINISHED && l.row?.isDnf
+        ).length;
+        return {
+          parentTeamKey,
+          parentTeamName: group.parentTeamName,
+          subTeamCount,
+          legs,
+          totalScore,
+          totalDurationSeconds,
+          totalCheckpointsCompleted,
+          finishedLegsCount,
+          cleanFinishedLegsCount,
+          dnfLegsCount,
+        };
+      })
+      .sort((a, b) => {
+        if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+        if (b.cleanFinishedLegsCount !== a.cleanFinishedLegsCount) {
+          return b.cleanFinishedLegsCount - a.cleanFinishedLegsCount;
+        }
+        return a.totalDurationSeconds - b.totalDurationSeconds;
+      })
+      .map((item, idx) => ({ ...item, rank: idx + 1 }));
+  }, [isRelayCourse, selectedCourse, leaderboardRows]);
 
   const splitColumnCount = useMemo(() => {
     const courseCpCount = selectedCourse?.checkpoints.length || 0;
@@ -538,24 +629,53 @@ export function SpectatorLiveLeaderboardModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {isRelayCourse && (
+              <div className="inline-flex rounded-lg bg-slate-950 p-0.5 border border-purple-500/40">
+                <button
+                  type="button"
+                  onClick={() => setRelayViewMode('ACCUMULATED')}
+                  className={`px-3 py-1 rounded-md text-xs font-bold transition cursor-pointer ${
+                    relayViewMode === 'ACCUMULATED'
+                      ? 'bg-purple-500 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Klasemen Tim Induk
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRelayViewMode('SUBTEAMS')}
+                  className={`px-3 py-1 rounded-md text-xs font-bold transition cursor-pointer ${
+                    relayViewMode === 'SUBTEAMS'
+                      ? 'bg-purple-500 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Semua Sub-Team
+                </button>
+              </div>
+            )}
+
             {/* Toggle Split Columns */}
-            <button
-              type="button"
-              onClick={() => setShowSplits(!showSplits)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer border ${
-                showSplits
-                  ? 'bg-amber-500 text-slate-950 border-amber-400'
-                  : 'bg-slate-950 text-slate-300 border-slate-800 hover:text-white'
-              }`}
-            >
-              {showSplits ? 'Tutup Split Pos' : 'Tampilkan Split Pos (#1..#N)'}
-            </button>
+            {(!isRelayCourse || relayViewMode === 'SUBTEAMS') && (
+              <button
+                type="button"
+                onClick={() => setShowSplits(!showSplits)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer border ${
+                  showSplits
+                    ? 'bg-amber-500 text-slate-950 border-amber-400'
+                    : 'bg-slate-950 text-slate-300 border-slate-800 hover:text-white'
+                }`}
+              >
+                {showSplits ? 'Tutup Split Pos' : 'Tampilkan Split Pos (#1..#N)'}
+              </button>
+            )}
           </div>
         </div>
       </header>
 
       {/* 3. PODIUM HIGHLIGHTS (TOP 3 SPOTLIGHT) */}
-      {top3.length > 0 && (
+      {(!isRelayCourse || relayViewMode === 'SUBTEAMS') && top3.length > 0 && (
         <section className="bg-gradient-to-b from-slate-900/60 to-transparent px-4 py-3 border-b border-slate-800/60 flex-shrink-0">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* #2 Perak */}
@@ -670,6 +790,77 @@ export function SpectatorLiveLeaderboardModal({
         className="flex-1 overflow-y-auto px-4 py-3 space-y-4"
       >
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 shadow-2xl overflow-hidden">
+          {isRelayCourse && relayViewMode === 'ACCUMULATED' ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs md:text-sm">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-mono text-[11px] md:text-xs uppercase">
+                    <th className="py-3 px-3 text-center">Rank</th>
+                    <th className="py-3 px-4">Nama Tim Induk</th>
+                    <th className="py-3 px-3">Progres</th>
+                    <th className="py-3 px-4">Rincian Tiap Sub-Team</th>
+                    <th className="py-3 px-4 text-right text-emerald-300 font-bold">Total Skor</th>
+                    <th className="py-3 px-4 text-right font-bold text-white">Waktu Gabungan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 font-sans">
+                  {relayParentRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-16 text-center text-slate-500 font-mono text-sm">
+                        Belum ada Tim Induk pada Course Relay ini.
+                      </td>
+                    </tr>
+                  ) : (
+                    relayParentRows.map((team) => (
+                      <tr key={team.parentTeamKey} className="hover:bg-slate-800/40">
+                        <td className="py-3.5 px-3 text-center font-mono font-black text-amber-400 text-base">
+                          #{team.rank}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-black text-purple-200 text-base">
+                            {team.parentTeamName}
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-400">
+                            {team.totalCheckpointsCompleted} CP total
+                            {team.dnfLegsCount > 0 ? ` • ${team.dnfLegsCount} Sub-Team DNF` : ''}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-3 font-mono font-bold text-purple-300">
+                          {team.finishedLegsCount}/{team.subTeamCount}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="flex flex-wrap gap-1.5">
+                            {team.legs.map((leg) => (
+                              <span
+                                key={`${team.parentTeamKey}-${leg.legIndex}`}
+                                className={`px-2 py-1 rounded text-[11px] font-mono border ${
+                                  leg.row?.isDnf
+                                    ? 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                                    : leg.row?.status === SessionStatus.FINISHED
+                                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                                    : leg.row?.status === SessionStatus.ACTIVE
+                                    ? 'bg-sky-500/15 border-sky-500/40 text-sky-200'
+                                    : 'bg-slate-950 border-slate-800 text-slate-500'
+                                }`}
+                              >
+                                #{leg.legIndex}: {leg.row ? `${leg.row.teamName} (${leg.row.totalScore}pt)` : 'Menunggu'}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-mono font-black text-emerald-400 text-lg">
+                          {team.totalScore}
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-mono font-bold text-white text-base">
+                          {formatElapsedSeconds(team.totalDurationSeconds)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs md:text-sm">
               <thead>
@@ -750,7 +941,12 @@ export function SpectatorLiveLeaderboardModal({
 
                         {/* Nama Tim */}
                         <td className="py-3.5 px-4 text-emerald-300 font-bold whitespace-nowrap text-sm md:text-base">
-                          {row.teamName}
+                          <div>{row.teamName}</div>
+                          {row.relayParentTeamName && (
+                            <div className="text-[10px] font-mono text-purple-300">
+                              🏃 {row.relayParentTeamName} • Sub-Team #{row.relayLegIndex || '?'}
+                            </div>
+                          )}
                         </td>
 
                         {/* Gender & Age Group */}
@@ -878,6 +1074,7 @@ export function SpectatorLiveLeaderboardModal({
               </tbody>
             </table>
           </div>
+          )}
         </div>
       </main>
 

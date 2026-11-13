@@ -74,6 +74,16 @@ export interface OrganizerPublic {
   expiresAt?: string | null;  // Masa aktif akun (ISO string atau null = Lifetime)
 }
 
+export enum CourseRaceMode {
+  REGULAR = 'REGULAR',
+  RELAY = 'RELAY',
+}
+
+export enum RelayDnfScoringMode {
+  ZERO = 'ZERO',
+  PARTIAL_WITH_PENALTY = 'PARTIAL_WITH_PENALTY',
+}
+
 /**
  * Entitas tunggal Course (Hasil penyatuan Event & Course sesuai kesepakatan diskusi).
  */
@@ -96,6 +106,11 @@ export interface Course {
   durationMinutes?: number;               // Durasi batas waktu course dalam menit (0 / undefined = tanpa batas)
   overtimePenaltyEnabled?: boolean;       // Opsi apakah penalti keterlambatan aktif
   overtimePenaltyPointsPerMinute?: number;// Pengurangan poin tiap menit keterlambatan
+  raceMode?: CourseRaceMode;              // Mode lomba: REGULAR (biasa) atau RELAY (estafet sub-team)
+  relaySubTeamCount?: number;             // Jumlah sub-team per tim induk saat mode RELAY (default 3)
+  relayEnforceSequential?: boolean;       // Kunci urutan estafet: Sub-Team k menunggu k-1 Finish/DNF (default true)
+  relayDnfScoringMode?: RelayDnfScoringMode; // Aturan skor sub-team yang DNF di mode RELAY
+  relayDnfPenaltyPoints?: number;         // Penalti poin tambahan per sub-team DNF (untuk mode PARTIAL_WITH_PENALTY)
   startLocation?: GeoPointLocation;       // Titik koordinat Start di peta (Segitiga 🔺)
   finishLocation?: GeoPointLocation;      // Titik koordinat Finish di peta (Lingkaran Ganda ◎)
   setupQrCode: string;                    // Payload Setup QR untuk Load Course
@@ -191,12 +206,19 @@ export interface ParticipantSession {
   validatedCheckpointIds: string[];
   grossScore?: number;         // Total poin pos sebelum dikurangi penalti keterlambatan
   overtimeMinutes?: number;    // Jumlah menit keterlambatan (pembulatan ke atas)
-  penaltyPoints?: number;      // Total potongan poin akibat keterlambatan
+  penaltyPoints?: number;      // Total potongan poin akibat keterlambatan / DNF Relay
   totalScore: number;          // Skor akhir bersih (Net Score = max(0, grossScore - penaltyPoints))
   durationSeconds?: number;
   lastLocation?: LastKnownLocation; // Hanya menyimpan 1 posisi terakhir (bukan riwayat rute lengkap)
   isDnf?: boolean;                  // True jika sesi dihentikan / dinyatakan Tidak Menyelesaikan Course
   dnfReason?: string;               // Alasan DNF (misal: Peserta menekan Keluar saat lomba berjalan)
+  relayParentTeamName?: string;     // Nama Tim Induk pada Course mode RELAY
+  relayParentTeamKey?: string;      // Kunci normalisasi Nama Tim Induk (uppercase + spasi tunggal)
+  relayLegIndex?: number;           // Urutan Sub-Team pada mode RELAY (1, 2, 3...)
+  relayMemberNames?: string;        // Catatan nama anggota pelari di Sub-Team ini (opsional)
+  relayOverrideUnlocked?: boolean;  // True jika dibuka manual lewat tombol Override Panitia
+  relayOverrideReason?: string;     // Alasan Override oleh Panitia
+  relayOverrideAt?: string;         // Timestamp Override oleh Panitia
 }
 
 export interface OrganizerBackupRecord extends OrganizerPublic {

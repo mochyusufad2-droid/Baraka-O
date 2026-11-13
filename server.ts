@@ -20,6 +20,7 @@ import type {
   Checkpoint,
   CheckpointReport,
   Course,
+  CourseRaceMode as CourseRaceModeType,
   GeoPointLocation,
   LastKnownLocation,
   OrganizerBackupRecord,
@@ -28,10 +29,21 @@ import type {
   ParticipantBackupRecord,
   ParticipantPublic,
   ParticipantSession,
+  RelayDnfScoringMode as RelayDnfScoringModeType,
   SessionStatus as SessionStatusType,
   SyncStatus as SyncStatusType,
   ValidationMethod as ValidationMethodType,
 } from './src/types.ts';
+
+const CourseRaceMode = {
+  REGULAR: 'REGULAR' as CourseRaceModeType,
+  RELAY: 'RELAY' as CourseRaceModeType,
+};
+
+const RelayDnfScoringMode = {
+  ZERO: 'ZERO' as RelayDnfScoringModeType,
+  PARTIAL_WITH_PENALTY: 'PARTIAL_WITH_PENALTY' as RelayDnfScoringModeType,
+};
 
 const ValidationMethod = {
   QR_ONLY: 'QR_ONLY' as ValidationMethodType,
@@ -440,6 +452,26 @@ function normalizeRestoredCourse(raw: Course): Course {
   const courseId = raw.id;
   return {
     ...raw,
+    raceMode:
+      raw.raceMode === CourseRaceMode.RELAY
+        ? CourseRaceMode.RELAY
+        : CourseRaceMode.REGULAR,
+    relaySubTeamCount:
+      raw.relaySubTeamCount !== undefined
+        ? Math.max(2, Math.min(20, Math.round(Number(raw.relaySubTeamCount) || 3)))
+        : 3,
+    relayEnforceSequential:
+      raw.relayEnforceSequential !== undefined
+        ? Boolean(raw.relayEnforceSequential)
+        : true,
+    relayDnfScoringMode:
+      raw.relayDnfScoringMode === RelayDnfScoringMode.ZERO
+        ? RelayDnfScoringMode.ZERO
+        : RelayDnfScoringMode.PARTIAL_WITH_PENALTY,
+    relayDnfPenaltyPoints:
+      raw.relayDnfPenaltyPoints !== undefined
+        ? Math.max(0, Number(raw.relayDnfPenaltyPoints) || 0)
+        : 0,
     setupQrCode:
       raw.setupQrCode && !raw.setupQrCode.includes('HIDDEN')
         ? raw.setupQrCode
@@ -798,16 +830,20 @@ function mergeSessionMonotonicallyServer(
 
   const curTotal = typeof current.totalScore === 'number' ? current.totalScore : 0;
   const incTotal = typeof incoming.totalScore === 'number' ? incoming.totalScore : 0;
-  const totalScore = Math.max(curTotal, incTotal);
+  const mergedIsDnf = Boolean(incoming.isDnf || current.isDnf);
+  const totalScore =
+    mergedIsDnf && incoming.isDnf && !current.isDnf
+      ? incTotal
+      : Math.max(curTotal, incTotal);
 
   const overtimeMinutes = Math.max(
     current.overtimeMinutes || 0,
     incoming.overtimeMinutes || 0
   );
-  const penaltyPoints = Math.max(
-    current.penaltyPoints || 0,
-    incoming.penaltyPoints || 0
-  );
+  const penaltyPoints =
+    mergedIsDnf && incoming.isDnf && !current.isDnf
+      ? Math.max(0, incoming.penaltyPoints || 0)
+      : Math.max(current.penaltyPoints || 0, incoming.penaltyPoints || 0);
 
   const lastLocation = (() => {
     if (current.lastLocation && incoming.lastLocation) {
@@ -825,7 +861,7 @@ function mergeSessionMonotonicallyServer(
     ...incoming,
     attemptNumber: incoming.attemptNumber || current.attemptNumber || 1,
     status: winningStatus,
-    isDnf: Boolean(incoming.isDnf || current.isDnf),
+    isDnf: mergedIsDnf,
     dnfReason: incoming.dnfReason || current.dnfReason,
     loadedAt: current.loadedAt || incoming.loadedAt,
     startedAt,
@@ -839,6 +875,18 @@ function mergeSessionMonotonicallyServer(
     totalScore,
     durationSeconds,
     lastLocation,
+    relayParentTeamName: incoming.relayParentTeamName || current.relayParentTeamName,
+    relayParentTeamKey: incoming.relayParentTeamKey || current.relayParentTeamKey,
+    relayLegIndex: incoming.relayLegIndex || current.relayLegIndex,
+    relayMemberNames:
+      incoming.relayMemberNames !== undefined
+        ? incoming.relayMemberNames
+        : current.relayMemberNames,
+    relayOverrideUnlocked: Boolean(
+      current.relayOverrideUnlocked || incoming.relayOverrideUnlocked
+    ),
+    relayOverrideReason: incoming.relayOverrideReason || current.relayOverrideReason,
+    relayOverrideAt: incoming.relayOverrideAt || current.relayOverrideAt,
   };
 }
 
@@ -1531,11 +1579,114 @@ function isSetupQrPayload(qr?: string, course?: Course): boolean {
   );
 }
 
+function normalizeRelayParentKey(name?: string): string {
+  return String(name || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+}
+
+function checkRelayStartLock(
+  session: ParticipantSession,
+  course: Course
+): { locked: boolean; reason?: string; waitingOnLeg?: number } {
+  if (course.raceMode !== CourseRaceMode.RELAY) {
+    return { locked: false };
+  }
+  if (!session.relayParentTeamKey || !session.relayLegIndex) {
+    return {
+      locked: true,
+      reason:
+        'Course ini menggunakan Mode Relay (Estafet). Harap isi Nama Tim Induk dan Urutan Sub-Team Anda terlebih dahulu sebelum Scan Start QR.',
+    };
+  }
+  if (course.relayEnforceSequential === false) {
+    return { locked: false };
+  }
+  if (session.relayLegIndex <= 1) {
+    return { locked: false };
+  }
+  if (session.relayOverrideUnlocked) {
+    return { locked: false };
+  }
+
+  const prevLegIndex = session.relayLegIndex - 1;
+  const prevLegSessions = db.sessions.filter(
+    (s) =>
+      s.courseId === course.id &&
+      s.relayParentTeamKey === session.relayParentTeamKey &&
+      s.relayLegIndex === prevLegIndex
+  );
+
+  const prevCompleted = prevLegSessions.some(
+    (s) => s.status === SessionStatus.FINISHED || Boolean(s.relayOverrideUnlocked)
+  );
+
+  if (prevCompleted) {
+    return { locked: false };
+  }
+
+  return {
+    locked: true,
+    waitingOnLeg: prevLegIndex,
+    reason: `Giliran Estafet Terkunci! Sub-Team #${session.relayLegIndex} (Tim "${session.relayParentTeamName}") menunggu Sub-Team #${prevLegIndex} menyelesaikan lomba (Finish/DNF), atau hubungi Panitia untuk Override Buka Kunci.`,
+  };
+}
+
+function buildRelayTeamStatus(session: ParticipantSession, course: Course) {
+  if (course.raceMode !== CourseRaceMode.RELAY) return null;
+  const lockCheck = checkRelayStartLock(session, course);
+  const subTeamCount = Math.max(2, Number(course.relaySubTeamCount) || 3);
+  const parentKey = session.relayParentTeamKey || '';
+  const partMap = new Map(db.participants.map((p) => [p.id, p]));
+
+  const legs = Array.from({ length: subTeamCount }, (_, idx) => {
+    const legNum = idx + 1;
+    const matching = parentKey
+      ? db.sessions.filter(
+          (s) =>
+            s.courseId === course.id &&
+            s.relayParentTeamKey === parentKey &&
+            s.relayLegIndex === legNum
+        )
+      : [];
+    // Pilih sesi terbaru untuk leg ini
+    const picked =
+      matching.find((s) => s.status === SessionStatus.FINISHED && !s.isDnf) ||
+      matching.find((s) => s.status === SessionStatus.ACTIVE) ||
+      matching[matching.length - 1];
+    const part = picked ? partMap.get(picked.participantId) : undefined;
+    return {
+      legIndex: legNum,
+      sessionId: picked?.id,
+      participantTeamName: part?.teamName || part?.name || null,
+      memberNames: picked?.relayMemberNames || null,
+      status: picked?.status || null,
+      isDnf: Boolean(picked?.isDnf),
+      checkpointsCompleted: picked?.validatedCheckpointIds?.length || 0,
+      totalScore: picked?.totalScore || 0,
+      durationSeconds: picked?.durationSeconds,
+      relayOverrideUnlocked: Boolean(picked?.relayOverrideUnlocked),
+      isMe: picked?.id === session.id,
+    };
+  });
+
+  return {
+    isRelayLocked: lockCheck.locked,
+    lockReason: lockCheck.reason || null,
+    waitingOnLeg: lockCheck.waitingOnLeg || null,
+    parentTeamName: session.relayParentTeamName || null,
+    legIndex: session.relayLegIndex || null,
+    subTeamCount,
+    legs,
+  };
+}
+
 /**
  * Menghitung ulang skor kotor (grossScore), menit keterlambatan (overtimeMinutes),
  * potongan penalti (penaltyPoints), dan skor bersih akhir (totalScore) pada sesi peserta.
  * Dilengkapi pelindung anti-nol (fallback ke laporan checkpoint resmi & skor sesi sebelumnya)
- * agar skor tidak pernah berkedip ke 0 pts ketika ada sinkronisasi lintas instance.
+ * serta aturan DNF khusus Mode Relay (ZERO vs PARTIAL_WITH_PENALTY).
  */
 function recalculateSessionScore(session: ParticipantSession, course: Course): void {
   const acceptedSessionCpReports = db.reports.filter(
@@ -1619,10 +1770,27 @@ function recalculateSessionScore(session: ParticipantSession, course: Course): v
     }
   }
 
-  session.grossScore = grossScore;
-  session.overtimeMinutes = overtimeMinutes;
-  session.penaltyPoints = penaltyPoints;
-  session.totalScore = Math.max(0, grossScore - penaltyPoints);
+  // Aturan khusus DNF pada Mode Relay
+  if (course.raceMode === CourseRaceMode.RELAY && session.isDnf) {
+    if (course.relayDnfScoringMode === RelayDnfScoringMode.ZERO) {
+      session.grossScore = grossScore;
+      session.overtimeMinutes = overtimeMinutes;
+      session.penaltyPoints = grossScore;
+      session.totalScore = 0;
+    } else {
+      const dnfExtraPenalty = Math.max(0, Number(course.relayDnfPenaltyPoints) || 0);
+      const totalPenalty = penaltyPoints + dnfExtraPenalty;
+      session.grossScore = grossScore;
+      session.overtimeMinutes = overtimeMinutes;
+      session.penaltyPoints = totalPenalty;
+      session.totalScore = Math.max(0, grossScore - totalPenalty);
+    }
+  } else {
+    session.grossScore = grossScore;
+    session.overtimeMinutes = overtimeMinutes;
+    session.penaltyPoints = penaltyPoints;
+    session.totalScore = Math.max(0, grossScore - penaltyPoints);
+  }
 
   // Perbarui pointsAwarded pada laporan checkpoint yang sudah diterima di sesi ini
   db.reports.forEach((r) => {
@@ -1770,6 +1938,24 @@ function processSingleReport(
       db.reports.push(rejected);
       saveDb(db);
       return { report: rejected, session, isDuplicate: false };
+    }
+
+    const relayLock = checkRelayStartLock(session, course);
+    if (relayLock.locked) {
+      const rejectedRelay: CheckpointReport = {
+        ...payload,
+        measuredAt: safeMeasuredAt,
+        receivedAt: serverNow,
+        syncStatus: SyncStatus.REJECTED_SERVER,
+        serverVerified: false,
+        rejectionReason:
+          relayLock.reason ||
+          'Giliran Estafet belum terbuka. Tunggu Sub-Team sebelumnya selesai atau hubungi Panitia.',
+        pointsAwarded: 0,
+      };
+      db.reports.push(rejectedRelay);
+      saveDb(db);
+      return { report: rejectedRelay, session, isDuplicate: false };
     }
 
     session.status = SessionStatus.ACTIVE;
@@ -2724,6 +2910,11 @@ app.get('/api/public/courses', (_req, res) => {
       validationMethod: c.validationMethod,
       checkpointsCount: (c.checkpoints || []).length,
       createdByOrganizerName: c.createdByOrganizerName || 'Panitia Baraka',
+      raceMode: c.raceMode || CourseRaceMode.REGULAR,
+      relaySubTeamCount: c.relaySubTeamCount || 3,
+      relayEnforceSequential: c.relayEnforceSequential !== false,
+      relayDnfScoringMode: c.relayDnfScoringMode || RelayDnfScoringMode.ZERO,
+      relayDnfPenaltyPoints: c.relayDnfPenaltyPoints || 0,
     }));
   res.json({ courses: publicCourseList });
 });
@@ -2762,6 +2953,11 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
       dnfReason: s.dnfReason,
       startedAt: s.startedAt,
       finishedAt: s.finishedAt,
+      relayParentTeamName: s.relayParentTeamName,
+      relayParentTeamKey: s.relayParentTeamKey,
+      relayLegIndex: s.relayLegIndex,
+      relayMemberNames: s.relayMemberNames,
+      relayOverrideUnlocked: Boolean(s.relayOverrideUnlocked),
     };
   });
 
@@ -2787,6 +2983,97 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
     rank: idx + 1,
   }));
 
+  // Susun Klasemen Tim Induk (Akumulasi Estafet) bila course menggunakan Mode Relay
+  const isRelay = course.raceMode === CourseRaceMode.RELAY;
+  const subTeamCount = Math.max(2, Number(course.relaySubTeamCount) || 3);
+  let relayTeamLeaderboard: Array<Record<string, unknown>> = [];
+
+  if (isRelay) {
+    const groupedByParent = new Map<string, { parentTeamName: string; rows: typeof rankedLeaderboard }>();
+    for (const row of rankedLeaderboard) {
+      const pKey = row.relayParentTeamKey || normalizeRelayParentKey(row.relayParentTeamName);
+      if (!pKey) continue;
+      if (!groupedByParent.has(pKey)) {
+        groupedByParent.set(pKey, {
+          parentTeamName: row.relayParentTeamName || pKey,
+          rows: [],
+        });
+      }
+      groupedByParent.get(pKey)!.rows.push(row);
+    }
+
+    relayTeamLeaderboard = Array.from(groupedByParent.entries())
+      .map(([parentTeamKey, group]) => {
+        const legs = Array.from({ length: subTeamCount }, (_, idx) => {
+          const legNum = idx + 1;
+          const matching = group.rows.filter((r) => r.relayLegIndex === legNum);
+          const picked =
+            matching.find((r) => r.status === 'FINISHED' && !r.isDnf) ||
+            matching.find((r) => r.status === 'ACTIVE') ||
+            matching[matching.length - 1];
+          return {
+            legIndex: legNum,
+            sessionId: picked?.sessionId || null,
+            teamName: picked?.teamName || null,
+            memberNames: picked?.relayMemberNames || null,
+            status: picked?.status || null,
+            isDnf: Boolean(picked?.isDnf),
+            checkpointsCompleted: picked?.checkpointsCompleted || 0,
+            totalScore: picked?.totalScore || 0,
+            grossScore: picked?.grossScore || 0,
+            penaltyPoints: picked?.penaltyPoints || 0,
+            durationSeconds: picked?.durationSeconds ?? null,
+            relayOverrideUnlocked: Boolean(picked?.relayOverrideUnlocked),
+          };
+        });
+
+        const totalScore = legs.reduce((sum, l) => sum + (l.totalScore || 0), 0);
+        const grossScore = legs.reduce((sum, l) => sum + (l.grossScore || 0), 0);
+        const penaltyPoints = legs.reduce((sum, l) => sum + (l.penaltyPoints || 0), 0);
+        const totalDurationSeconds = legs.reduce(
+          (sum, l) => sum + (typeof l.durationSeconds === 'number' ? l.durationSeconds : 0),
+          0
+        );
+        const finishedLegsCount = legs.filter((l) => l.status === 'FINISHED').length;
+        const cleanFinishedLegsCount = legs.filter((l) => l.status === 'FINISHED' && !l.isDnf).length;
+        const dnfLegsCount = legs.filter((l) => l.status === 'FINISHED' && l.isDnf).length;
+        const activeLegsCount = legs.filter((l) => l.status === 'ACTIVE').length;
+        const totalCheckpointsCompleted = legs.reduce((sum, l) => sum + (l.checkpointsCompleted || 0), 0);
+
+        return {
+          parentTeamKey,
+          parentTeamName: group.parentTeamName,
+          subTeamCount,
+          finishedLegsCount,
+          cleanFinishedLegsCount,
+          dnfLegsCount,
+          activeLegsCount,
+          totalCheckpointsCompleted,
+          grossScore,
+          penaltyPoints,
+          totalScore,
+          totalDurationSeconds,
+          legs,
+        };
+      })
+      .sort((a, b) => {
+        if ((b.totalScore as number) !== (a.totalScore as number)) {
+          return (b.totalScore as number) - (a.totalScore as number);
+        }
+        if ((b.cleanFinishedLegsCount as number) !== (a.cleanFinishedLegsCount as number)) {
+          return (b.cleanFinishedLegsCount as number) - (a.cleanFinishedLegsCount as number);
+        }
+        if ((b.finishedLegsCount as number) !== (a.finishedLegsCount as number)) {
+          return (b.finishedLegsCount as number) - (a.finishedLegsCount as number);
+        }
+        return (a.totalDurationSeconds as number) - (b.totalDurationSeconds as number);
+      })
+      .map((teamRow, idx) => ({
+        ...teamRow,
+        rank: idx + 1,
+      }));
+  }
+
   res.json({
     course: {
       id: course.id,
@@ -2796,10 +3083,16 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
       durationMinutes: course.durationMinutes || 0,
       checkpointsCount: (course.checkpoints || []).length,
       createdByOrganizerName: course.createdByOrganizerName || 'Panitia Baraka',
+      raceMode: course.raceMode || CourseRaceMode.REGULAR,
+      relaySubTeamCount: subTeamCount,
+      relayEnforceSequential: course.relayEnforceSequential !== false,
+      relayDnfScoringMode: course.relayDnfScoringMode || RelayDnfScoringMode.ZERO,
+      relayDnfPenaltyPoints: course.relayDnfPenaltyPoints || 0,
     },
     totalParticipants: rankedLeaderboard.length,
     updatedAt: new Date().toISOString(),
     leaderboard: rankedLeaderboard,
+    relayTeamLeaderboard,
   });
 });
 
@@ -2937,6 +3230,10 @@ app.post('/api/participant/login', (req, res) => {
     sessions: activeSessions,
     latestSession,
     activeCourse: sanitizedCourse,
+    relayStatus:
+      matchedCourse && latestSession
+        ? buildRelayTeamStatus(latestSession, matchedCourse)
+        : null,
   });
 });
 
@@ -3087,6 +3384,102 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
     res.json({
       course: sanitizedCourse,
       session,
+      relayStatus: buildRelayTeamStatus(session, matchedCourse),
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // ALUR PESERTA: SIMPAN IDENTITAS ESTAFET / RELAY (TIM INDUK & URUTAN SUB-TEAM)
+  // --------------------------------------------------------------------------
+  app.post('/api/participant/relay-profile', requireParticipant, (req, res) => {
+    const participantId = (req as Request & { participantId: string }).participantId;
+    const {
+      sessionId,
+      relayParentTeamName,
+      relayLegIndex,
+      relayMemberNames,
+    } = req.body as {
+      sessionId?: string;
+      relayParentTeamName?: string;
+      relayLegIndex?: number;
+      relayMemberNames?: string;
+    };
+
+    if (!sessionId) {
+      res.status(400).json({ error: 'ID Sesi tidak valid.' });
+      return;
+    }
+
+    const session = db.sessions.find(
+      (s) => s.id === sessionId && s.participantId === participantId
+    );
+    if (!session) {
+      res.status(404).json({ error: 'Sesi peserta tidak ditemukan.' });
+      return;
+    }
+
+    const matchedCourse = db.courses.find((c) => c.id === session.courseId);
+    if (!matchedCourse) {
+      res.status(404).json({ error: 'Course tidak ditemukan.' });
+      return;
+    }
+    if (matchedCourse.raceMode !== CourseRaceMode.RELAY) {
+      res.status(400).json({ error: 'Course ini tidak menggunakan Mode Relay (Estafet).' });
+      return;
+    }
+
+    if (session.status !== SessionStatus.NOT_STARTED) {
+      res.status(400).json({
+        error:
+          'Identitas Tim Induk & Urutan Sub-Team tidak dapat diubah setelah Anda melakukan Scan Start.',
+      });
+      return;
+    }
+
+    const trimmedParent = String(relayParentTeamName || '').trim().replace(/\s+/g, ' ');
+    const parentKey = normalizeRelayParentKey(trimmedParent);
+    if (!trimmedParent || !parentKey) {
+      res.status(400).json({ error: 'Nama Tim Induk wajib diisi untuk Mode Relay.' });
+      return;
+    }
+
+    const maxLegs = Math.max(2, Number(matchedCourse.relaySubTeamCount) || 3);
+    const parsedLeg = Math.round(Number(relayLegIndex));
+    if (Number.isNaN(parsedLeg) || parsedLeg < 1 || parsedLeg > maxLegs) {
+      res.status(400).json({
+        error: `Urutan Sub-Team harus antara 1 sampai ${maxLegs}.`,
+      });
+      return;
+    }
+
+    // Pastikan slot (Course, Tim Induk, Urutan Sub-Team) tidak bentrok dengan akun peserta lain
+    const conflicting = db.sessions.find(
+      (s) =>
+        s.id !== session.id &&
+        s.courseId === matchedCourse.id &&
+        s.participantId !== participantId &&
+        s.relayParentTeamKey === parentKey &&
+        s.relayLegIndex === parsedLeg
+    );
+    if (conflicting) {
+      const partHolder = db.participants.find((p) => p.id === conflicting.participantId);
+      res.status(409).json({
+        error: `Sub-Team #${parsedLeg} untuk Tim Induk "${trimmedParent}" sudah digunakan oleh akun ${partHolder?.teamName || partHolder?.name || 'peserta lain'}. Pilih urutan Sub-Team lain atau hubungi Panitia.`,
+      });
+      return;
+    }
+
+    session.relayParentTeamName = trimmedParent;
+    session.relayParentTeamKey = parentKey;
+    session.relayLegIndex = parsedLeg;
+    session.relayMemberNames = String(relayMemberNames || '').trim();
+
+    saveDb(db);
+    void pushDbToCloudNow(db);
+
+    res.json({
+      session,
+      relayStatus: buildRelayTeamStatus(session, matchedCourse),
     });
   });
 
@@ -3183,12 +3576,20 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
           overtimeMinutes: sessionSnapshot?.overtimeMinutes,
           penaltyPoints: sessionSnapshot?.penaltyPoints,
           lastLocation: sessionSnapshot?.lastLocation,
+          relayParentTeamName: sessionSnapshot?.relayParentTeamName,
+          relayParentTeamKey: sessionSnapshot?.relayParentTeamKey,
+          relayLegIndex: sessionSnapshot?.relayLegIndex,
+          relayMemberNames: sessionSnapshot?.relayMemberNames,
+          relayOverrideUnlocked: sessionSnapshot?.relayOverrideUnlocked,
+          relayOverrideReason: sessionSnapshot?.relayOverrideReason,
+          relayOverrideAt: sessionSnapshot?.relayOverrideAt,
         };
         db.sessions.push(existingSession);
       }
 
       // Jika peserta sudah memiliki bukti START (dari sessionSnapshot atau dari laporan START di antrean),
       // pastikan status sesi di server adalah ACTIVE sebelum memvalidasi CHECKPOINT!
+      // Khusus Mode Relay: JANGAN bypass jika giliran estafet masih terkunci!
       const incomingStartReport = sortedIncoming.find(
         (r) => r.reportType === 'START'
       );
@@ -3198,9 +3599,15 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
         Boolean(sessionSnapshot?.startedAt) ||
         Boolean(incomingStartReport);
 
+      const syncCourse = db.courses.find((c) => c.id === targetCourseId);
+      const relayLockCheck = syncCourse
+        ? checkRelayStartLock(existingSession, syncCourse)
+        : { locked: false };
+
       if (
         existingSession.status === SessionStatus.NOT_STARTED &&
-        hasStartEvidence
+        hasStartEvidence &&
+        !relayLockCheck.locked
       ) {
         const startIso =
           sessionSnapshot?.startedAt ||
@@ -3225,6 +3632,9 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       results[results.length - 1]?.session ||
       db.sessions.find((s) => s.participantId === participantId) ||
       null;
+    const latestCourse = latestSession
+      ? db.courses.find((c) => c.id === latestSession.courseId) || null
+      : null;
 
     res.json({
       processedAt: new Date().toISOString(),
@@ -3233,6 +3643,10 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
         isDuplicate: r.isDuplicate,
       })),
       session: latestSession,
+      relayStatus:
+        latestSession && latestCourse
+          ? buildRelayTeamStatus(latestSession, latestCourse)
+          : null,
     });
   });
 
@@ -3335,12 +3749,20 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       session.durationSeconds = 0;
     }
 
+    const abandonCourse = db.courses.find((c) => c.id === session!.courseId);
+    if (abandonCourse) {
+      recalculateSessionScore(session, abandonCourse);
+    }
+
     saveDb(db);
     void pushDbToCloudNow(db);
 
     res.json({
       message: 'Sesi telah ditandai DNF (Tidak Menyelesaikan Course).',
       session,
+      relayStatus: abandonCourse
+        ? buildRelayTeamStatus(session, abandonCourse)
+        : null,
     });
   });
 
@@ -3413,6 +3835,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       session,
       course: sanitizedCourse,
       reports: sessionReports,
+      relayStatus: matchedCourse ? buildRelayTeamStatus(session, matchedCourse) : null,
     });
   });
 
@@ -3636,6 +4059,11 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       durationMinutes,
       overtimePenaltyEnabled,
       overtimePenaltyPointsPerMinute,
+      raceMode,
+      relaySubTeamCount,
+      relayEnforceSequential,
+      relayDnfScoringMode,
+      relayDnfPenaltyPoints,
       startLocation,
       finishLocation,
     } = req.body as Partial<Course>;
@@ -3690,6 +4118,20 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       !Number.isNaN(Number(overtimePenaltyPointsPerMinute))
         ? Math.max(0, Number(overtimePenaltyPointsPerMinute))
         : 0;
+    const parsedRaceMode =
+      raceMode === CourseRaceMode.RELAY ? CourseRaceMode.RELAY : CourseRaceMode.REGULAR;
+    const parsedRelaySubTeams = Math.min(
+      20,
+      Math.max(2, Math.round(Number(relaySubTeamCount) || 3))
+    );
+    const parsedRelayDnfMode =
+      relayDnfScoringMode === RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+        ? RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+        : RelayDnfScoringMode.ZERO;
+    const parsedRelayDnfPenalty =
+      relayDnfPenaltyPoints !== undefined && !Number.isNaN(Number(relayDnfPenaltyPoints))
+        ? Math.max(0, Math.round(Number(relayDnfPenaltyPoints)))
+        : 0;
 
     const nowIso = new Date().toISOString();
     const newCourse: Course = {
@@ -3714,6 +4156,12 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       durationMinutes: parsedDuration,
       overtimePenaltyEnabled: Boolean(overtimePenaltyEnabled),
       overtimePenaltyPointsPerMinute: parsedPenaltyRate,
+      raceMode: parsedRaceMode,
+      relaySubTeamCount: parsedRelaySubTeams,
+      relayEnforceSequential:
+        relayEnforceSequential !== undefined ? Boolean(relayEnforceSequential) : true,
+      relayDnfScoringMode: parsedRelayDnfMode,
+      relayDnfPenaltyPoints: parsedRelayDnfPenalty,
       startLocation:
         startLocation &&
         typeof startLocation.latitude === 'number' &&
@@ -3767,6 +4215,11 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       durationMinutes,
       overtimePenaltyEnabled,
       overtimePenaltyPointsPerMinute,
+      raceMode,
+      relaySubTeamCount,
+      relayEnforceSequential,
+      relayDnfScoringMode,
+      relayDnfPenaltyPoints,
       startLocation,
       finishLocation,
     } = req.body as Partial<Course> & {
@@ -3799,6 +4252,31 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
         Number(overtimePenaltyPointsPerMinute) || 0
       );
     }
+    if (raceMode !== undefined) {
+      course.raceMode =
+        raceMode === CourseRaceMode.RELAY ? CourseRaceMode.RELAY : CourseRaceMode.REGULAR;
+    }
+    if (relaySubTeamCount !== undefined) {
+      course.relaySubTeamCount = Math.min(
+        20,
+        Math.max(2, Math.round(Number(relaySubTeamCount) || 3))
+      );
+    }
+    if (relayEnforceSequential !== undefined) {
+      course.relayEnforceSequential = Boolean(relayEnforceSequential);
+    }
+    if (relayDnfScoringMode !== undefined) {
+      course.relayDnfScoringMode =
+        relayDnfScoringMode === RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+          ? RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+          : RelayDnfScoringMode.ZERO;
+    }
+    if (relayDnfPenaltyPoints !== undefined) {
+      course.relayDnfPenaltyPoints = Math.max(
+        0,
+        Math.round(Number(relayDnfPenaltyPoints) || 0)
+      );
+    }
     if (startLocation !== undefined) {
       course.startLocation =
         startLocation &&
@@ -3818,7 +4296,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
 
     course.updatedAt = new Date().toISOString();
 
-    // Hitung ulang skor sesi pada course ini bila aturan durasi/penalti/poin berubah
+    // Hitung ulang skor sesi pada course ini bila aturan durasi/penalti/poin/relay berubah
     db.sessions
       .filter((s) => s.courseId === course.id)
       .forEach((s) => recalculateSessionScore(s, course));
@@ -3826,6 +4304,93 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
     saveDb(db);
     void pushDbToCloudNow(db);
     res.json({ course });
+  });
+
+  // --------------------------------------------------------------------------
+  // OVERRIDE MANUAL ESTAFET OLEH PANITIA (BUKA KUNCI / PAKSA FINISH / PAKSA DNF)
+  // --------------------------------------------------------------------------
+  app.post('/api/organizer/relay/override-session', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
+    const { sessionId, action, reason } = req.body as {
+      sessionId?: string;
+      action?: 'UNLOCK_LEG' | 'FORCE_FINISH' | 'FORCE_DNF';
+      reason?: string;
+    };
+
+    if (!sessionId || !action) {
+      res.status(400).json({ error: 'ID Sesi dan jenis aksi Override wajib diisi.' });
+      return;
+    }
+
+    const session = db.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      res.status(404).json({ error: 'Sesi peserta tidak ditemukan.' });
+      return;
+    }
+
+    const course = db.courses.find((c) => c.id === session.courseId);
+    if (!course) {
+      res.status(404).json({ error: 'Course sesi ini tidak ditemukan.' });
+      return;
+    }
+
+    if (!canAccessCourse(course, auth)) {
+      res.status(403).json({
+        error: 'Anda tidak memiliki akses untuk melakukan Override pada Course ini.',
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const cleanReason =
+      String(reason || '').trim() ||
+      `Override Manual oleh Panitia (${auth.name})`;
+
+    session.relayOverrideUnlocked = true;
+    session.relayOverrideReason = cleanReason;
+    session.relayOverrideAt = nowIso;
+
+    if (action === 'FORCE_FINISH') {
+      session.status = SessionStatus.FINISHED;
+      session.isDnf = false;
+      session.dnfReason = undefined;
+      session.finishedAt = session.finishedAt || nowIso;
+      session.finishedReceivedAt = nowIso;
+      if (session.startedAt) {
+        const elapsedMs = Math.max(0, Date.parse(session.finishedAt) - Date.parse(session.startedAt));
+        session.durationSeconds = Math.round(elapsedMs / 1000);
+      } else {
+        session.startedAt = session.startedAt || nowIso;
+        session.durationSeconds = 0;
+      }
+      recalculateSessionScore(session, course);
+    } else if (action === 'FORCE_DNF') {
+      session.status = SessionStatus.FINISHED;
+      session.isDnf = true;
+      session.dnfReason = cleanReason;
+      session.finishedAt = session.finishedAt || nowIso;
+      session.finishedReceivedAt = nowIso;
+      if (session.startedAt) {
+        const elapsedMs = Math.max(0, Date.parse(session.finishedAt) - Date.parse(session.startedAt));
+        session.durationSeconds = Math.round(elapsedMs / 1000);
+      } else {
+        session.durationSeconds = 0;
+      }
+      recalculateSessionScore(session, course);
+    }
+
+    saveDb(db);
+    void pushDbToCloudNow(db);
+
+    res.json({
+      message:
+        action === 'UNLOCK_LEG'
+          ? 'Kunci giliran Sub-Team berhasil dibuka manual (Override Panitia).'
+          : action === 'FORCE_FINISH'
+          ? 'Sesi Sub-Team berhasil diselesaikan (Force Finish) dan giliran berikutnya terbuka.'
+          : 'Sesi Sub-Team ditandai DNF (Force DNF) dan giliran berikutnya terbuka.',
+      session,
+    });
   });
 
   // Sinkronisasi / Pulihkan Cadangan Vault (Organizers, Courses, Participants, Sessions, Reports)
