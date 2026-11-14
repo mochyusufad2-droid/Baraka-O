@@ -90,7 +90,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "3a9cc8ab1bd0f8cf146c17ce75d862d4"
   }, {
     "url": "index.html",
-    "revision": "a7dab92e07ad6876cda8b9d880bd6c78"
+    "revision": "2fffcc67f80662bfc5639ec18c19cd1c"
   }, {
     "url": "icon.svg",
     "revision": "ebb1b56e78a40d9610f8974a53f189f7"
@@ -98,10 +98,10 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "apple-touch-icon.png",
     "revision": "aec4d193bf8dfaac8b6cce066d10378c"
   }, {
-    "url": "assets/index-DeLRTB6k.css",
+    "url": "assets/index-tDJNsxSu.css",
     "revision": null
   }, {
-    "url": "assets/index-DLIYhJvh.js",
+    "url": "assets/index-CK9roah7.js",
     "revision": null
   }, {
     "url": "assets/aistudio/yfTZrz5kgBJzML9teQMFlHSQ3K0CQnSIz97TcRbL58EoMG_aWCABjcqvIKhOHg8kDRaRTQpCKNFEW4g-lA63hsGpJGmMNxYvjZHKcuihrLISDk4k7YxHCOObBqRnZlTbqs3bExO0dJCSZVz8Ym2mH89VIRFK7sjbPzSvZK-vzbIj1HO7m2hTNTZZl5gEnDJb-3_f65a9ec9.jpeg",
@@ -111,6 +111,12 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": null
   }, {
     "url": "assets/aistudio/course___map_io_871f5074.jpg",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/WhatsApp_Image_2026-11-14_at_13.35.38_549360cf.jpeg",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/WhatsApp_Image_2026-11-14_at_13.35.38-2_fe829809.jpeg",
     "revision": null
   }, {
     "url": "assets/aistudio/WhatsApp_Image_2026-10-30_at_19.26.44-2_f085c1a4.jpeg",
