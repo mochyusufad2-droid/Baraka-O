@@ -329,8 +329,10 @@ export default function ParticipantView({
   // Mode Kunci Saku Cepat (Pocket Mode) — Layar OLED Hitam Pekat, bebas ghost touch di saku, hemat baterai 60%
   const [isPocketLocked, setIsPocketLocked] = useState(false);
   const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
+  const [unlockScanHoldProgress, setUnlockScanHoldProgress] = useState(0);
   const unlockTimerRef = useRef<number | null>(null);
   const wakeLockSentinelRef = useRef<any>(null);
+  const [showRelayDetailWhileRunning, setShowRelayDetailWhileRunning] = useState(false);
 
   // Panel riwayat antrean laporan lokal
   const [showHistoryLogs, setShowHistoryLogs] = useState(false);
@@ -2760,6 +2762,69 @@ export default function ParticipantView({
     };
   }, [activeCourse, activeSession, liveStopwatchSeconds]);
 
+  // Hitung Sisa Waktu Mundur (Countdown) jika Course memiliki batas durasi (durationMinutes > 0)
+  const remainingTimeInfo = useMemo(() => {
+    const limitMin = Number(activeCourse?.durationMinutes) || 0;
+    if (!activeCourse || limitMin <= 0 || liveStopwatchSeconds === undefined) {
+      return null;
+    }
+    const limitSec = limitMin * 60;
+    const diffSec = limitSec - liveStopwatchSeconds;
+    const isOver = diffSec < 0;
+    const absSec = Math.abs(diffSec);
+    const m = Math.floor(absSec / 60);
+    const s = absSec % 60;
+    const formatted = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return {
+      isOver,
+      isWarning: !isOver && diffSec <= 300, // <= 5 menit terakhir
+      diffSec,
+      formatted,
+    };
+  }, [activeCourse, liveStopwatchSeconds]);
+
+  // Susun Ringkasan Kapsul "Target Pos Berikutnya / Sisa Pos Belum Diambil" (Next Target Pill)
+  const nextTargetSummary = useMemo(() => {
+    if (!activeCourse || !activeSession) return null;
+    const sortedCps = [...(activeCourse.checkpoints || [])].sort(
+      (a, b) => a.orderIndex - b.orderIndex
+    );
+    const doneSet = new Set(effectiveValidatedCheckpointIds);
+    const remainingCps = sortedCps.filter((cp) => !doneSet.has(cp.id));
+    const remainingPoints = remainingCps.reduce(
+      (sum, cp) => sum + (Number(cp.points) || 0),
+      0
+    );
+
+    if (sortedCps.length === 0) {
+      return {
+        allCompleted: true,
+        enforceOrder: Boolean(activeCourse.enforceOrder),
+        nextOrderedCp: null,
+        remainingCps: [],
+        remainingPoints: 0,
+      };
+    }
+
+    if (remainingCps.length === 0) {
+      return {
+        allCompleted: true,
+        enforceOrder: Boolean(activeCourse.enforceOrder),
+        nextOrderedCp: null,
+        remainingCps: [],
+        remainingPoints: 0,
+      };
+    }
+
+    return {
+      allCompleted: false,
+      enforceOrder: Boolean(activeCourse.enforceOrder),
+      nextOrderedCp: remainingCps[0] || null,
+      remainingCps,
+      remainingPoints,
+    };
+  }, [activeCourse, activeSession, effectiveValidatedCheckpointIds]);
+
   return (
     <div className="mx-auto max-w-xl space-y-4 pb-12">
       {/* ====================================================================
@@ -2896,7 +2961,7 @@ export default function ParticipantView({
           </div>
 
           {/* Jam lari kontras tinggi di tengah */}
-          <div className="text-center space-y-2">
+          <div className="text-center space-y-2.5 w-full max-w-sm">
             <div className="text-[11px] font-mono tracking-widest text-slate-500 uppercase">
               {activeCourse?.name || 'ORIENTRA'}
             </div>
@@ -2905,16 +2970,95 @@ export default function ParticipantView({
                 ? formatStopwatchSeconds(liveStopwatchSeconds)
                 : '00:00:00'}
             </div>
+            {remainingTimeInfo && (
+              <div
+                className={`inline-block rounded-lg px-3 py-1 text-xs font-mono font-extrabold border ${
+                  remainingTimeInfo.isOver
+                    ? 'bg-rose-950/60 border-rose-500/60 text-rose-300 animate-pulse'
+                    : remainingTimeInfo.isWarning
+                    ? 'bg-amber-950/60 border-amber-500/60 text-amber-300'
+                    : 'bg-slate-900 border-slate-800 text-slate-300'
+                }`}
+              >
+                {remainingTimeInfo.isOver
+                  ? `⚠️ LEWAT BATAS WAKTU +${remainingTimeInfo.formatted}`
+                  : `⏳ Sisa Waktu: ${remainingTimeInfo.formatted}`}
+              </div>
+            )}
             <div className="text-sm font-semibold text-emerald-400">
-              Pos: {completedCheckpointCount} / {activeCourse?.checkpoints.length || 0} Selesai
+              Pos: {completedCheckpointCount} / {activeCourse?.checkpoints.length || 0} Selesai • Skor: {scoreBreakdown.netScore}
             </div>
+            {nextTargetSummary && (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/90 px-3 py-2 text-xs font-mono text-slate-200">
+                {nextTargetSummary.allCompleted ? (
+                  <span className="text-sky-300 font-bold">
+                    🏁 Semua Pos Lengkap! Menuju Garis Finish
+                  </span>
+                ) : nextTargetSummary.enforceOrder && nextTargetSummary.nextOrderedCp ? (
+                  <span className="text-amber-300 font-bold">
+                    🎯 Target Berikutnya: #{nextTargetSummary.nextOrderedCp.orderIndex} •{' '}
+                    {nextTargetSummary.nextOrderedCp.code} (
+                    {nextTargetSummary.nextOrderedCp.points}p)
+                  </span>
+                ) : (
+                  <span className="text-emerald-300 font-bold">
+                    ⚡ Sisa {nextTargetSummary.remainingCps.length} Pos Belum Diambil (+
+                    {nextTargetSummary.remainingPoints}p)
+                  </span>
+                )}
+              </div>
+            )}
             <div className="text-[11px] text-slate-500 font-mono">
-              Layar OLED 0-Watt • Sentuhan Terkunci
+              Layar OLED 0-Watt • Sentuhan Terkunci di Saku
             </div>
           </div>
 
-          {/* Tombol Tahan Buka Kunci (Hold-to-Unlock 1.5 detik) */}
-          <div className="w-full max-w-xs space-y-3 pb-6">
+          {/* Tombol Tahan Buka Kunci & Langsung Scan (1-Step) atau Buka Kunci Biasa */}
+          <div className="w-full max-w-xs space-y-2.5 pb-6">
+            {/* Tombol 1: Tahan 1 Detik -> Langsung Buka Kamera Scanner */}
+            <button
+              type="button"
+              onPointerDown={() => {
+                let progress = 0;
+                setUnlockScanHoldProgress(0);
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                unlockTimerRef.current = window.setInterval(() => {
+                  progress += 12.5;
+                  setUnlockScanHoldProgress(progress);
+                  if (progress >= 100) {
+                    if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                    setIsPocketLocked(false);
+                    setUnlockScanHoldProgress(0);
+                    triggerRunnerFeedback('success');
+                    setCameraActiveFor('AUTO_RACE');
+                  }
+                }, 100);
+              }}
+              onPointerUp={() => {
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                setUnlockScanHoldProgress(0);
+              }}
+              onPointerLeave={() => {
+                if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
+                setUnlockScanHoldProgress(0);
+              }}
+              className="relative w-full overflow-hidden rounded-2xl border-2 border-emerald-500/80 bg-emerald-950/70 py-4 px-4 text-center font-extrabold text-white transition active:scale-[0.98]"
+            >
+              <div
+                className="absolute inset-y-0 left-0 bg-emerald-500/50 transition-all duration-75"
+                style={{ width: `${unlockScanHoldProgress}%` }}
+              />
+              <div className="relative z-10 flex items-center justify-center gap-2 text-sm">
+                <Camera className="h-4 w-4 text-lime-300" />
+                <span>
+                  {unlockScanHoldProgress > 0
+                    ? `Membuka Kamera... ${Math.round(unlockScanHoldProgress)}%`
+                    : 'Tahan 1 Detik: Buka & Langsung Scan QR'}
+                </span>
+              </div>
+            </button>
+
+            {/* Tombol 2: Tahan 1.5 Detik -> Buka Kunci ke Layar Dashboard */}
             <button
               type="button"
               onPointerDown={() => {
@@ -2940,25 +3084,22 @@ export default function ParticipantView({
                 if (unlockTimerRef.current) clearInterval(unlockTimerRef.current);
                 setUnlockHoldProgress(0);
               }}
-              className="relative w-full overflow-hidden rounded-2xl border-2 border-slate-700 bg-slate-900/90 py-4 px-4 text-center font-bold text-slate-200 transition active:scale-[0.98]"
+              className="relative w-full overflow-hidden rounded-2xl border border-slate-700 bg-slate-900/90 py-3 px-4 text-center font-bold text-slate-300 transition active:scale-[0.98]"
             >
               {/* Progress bar pengisi tombol */}
               <div
-                className="absolute inset-y-0 left-0 bg-emerald-600/40 transition-all duration-75"
+                className="absolute inset-y-0 left-0 bg-sky-600/40 transition-all duration-75"
                 style={{ width: `${unlockHoldProgress}%` }}
               />
-              <div className="relative z-10 flex items-center justify-center gap-2 text-sm">
-                <Unlock className="h-4 w-4 text-amber-400" />
+              <div className="relative z-10 flex items-center justify-center gap-2 text-xs">
+                <Unlock className="h-3.5 w-3.5 text-amber-400" />
                 <span>
                   {unlockHoldProgress > 0
                     ? `Tahan... ${unlockHoldProgress}%`
-                    : 'Tahan 1.5 Detik untuk Buka Kunci'}
+                    : 'Tahan 1.5 Detik: Buka ke Layar Course / Peta'}
                 </span>
               </div>
             </button>
-            <p className="text-[10px] text-center text-slate-600">
-              Buka kunci saat sudah di depan bendera pos untuk langsung scan QR.
-            </p>
           </div>
         </div>
       )}
@@ -3478,6 +3619,21 @@ export default function ParticipantView({
                         ? formatStopwatchSeconds(liveStopwatchSeconds)
                         : '00:00:00'}
                     </div>
+                    {remainingTimeInfo && (
+                      <div
+                        className={`text-[10px] font-mono font-bold mt-0.5 ${
+                          remainingTimeInfo.isOver
+                            ? 'text-rose-300 animate-pulse'
+                            : remainingTimeInfo.isWarning
+                            ? 'text-amber-300'
+                            : 'text-sky-300'
+                        }`}
+                      >
+                        {remainingTimeInfo.isOver
+                          ? `Lewat +${remainingTimeInfo.formatted}`
+                          : `Sisa ${remainingTimeInfo.formatted}`}
+                      </div>
+                    )}
                   </div>
                   <div className="col-span-2 sm:col-span-1 rounded-xl border border-slate-800 bg-slate-950 py-3 px-2">
                     <div className="text-[11px] uppercase tracking-wider text-slate-400">
@@ -3504,9 +3660,119 @@ export default function ParticipantView({
                 </div>
 
                 {/* ============================================================
+                    KAPSUL PANDUAN TARGET POS BERIKUTNYA ("NEXT TARGET PILL")
+                    Muncul kontras tinggi tepat di atas tombol Scan saat sedang berlari!
+                   ============================================================ */}
+                {sessionCanRecordCheckpoints &&
+                  !sessionMarkedFinishedLocallyOrServer &&
+                  nextTargetSummary && (
+                    <div
+                      className={`rounded-xl border px-3.5 py-2.5 space-y-1.5 shadow-sm ${
+                        nextTargetSummary.allCompleted
+                          ? 'border-sky-400/60 bg-sky-950/40 text-sky-100'
+                          : nextTargetSummary.enforceOrder
+                          ? 'border-amber-400/60 bg-amber-950/35 text-amber-100'
+                          : 'border-emerald-400/50 bg-emerald-950/30 text-emerald-100'
+                      }`}
+                    >
+                      {nextTargetSummary.allCompleted ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs sm:text-sm font-extrabold tracking-wide text-sky-300 flex items-center gap-1.5">
+                            <span>🏁</span>
+                            <span>
+                              SEMUA {activeCourse.checkpoints.length} POS LENGKAP! MENUJU GARIS FINISH
+                            </span>
+                          </div>
+                          <span className="rounded bg-sky-500/20 px-2 py-0.5 text-[10px] font-mono font-bold text-sky-200 border border-sky-400/40 shrink-0">
+                            Siap Scan Finish
+                          </span>
+                        </div>
+                      ) : nextTargetSummary.enforceOrder &&
+                        nextTargetSummary.nextOrderedCp ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs sm:text-sm font-extrabold tracking-wide text-amber-300">
+                            🎯 TARGET BERIKUTNYA:{' '}
+                            <span className="text-white">
+                              #{nextTargetSummary.nextOrderedCp.orderIndex} •{' '}
+                              {nextTargetSummary.nextOrderedCp.code}
+                            </span>
+                            {nextTargetSummary.nextOrderedCp.name
+                              ? ` — ${nextTargetSummary.nextOrderedCp.name}`
+                              : ''}{' '}
+                            <span className="text-emerald-300 font-mono">
+                              ({nextTargetSummary.nextOrderedCp.points} Poin)
+                            </span>
+                          </div>
+                          <span className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-mono font-bold text-amber-200 border border-amber-400/40">
+                            Wajib Urut
+                          </span>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-xs sm:text-sm font-extrabold tracking-wide text-emerald-300">
+                              ⚡ SISA POS BELUM DIAMBIL:{' '}
+                              <span className="text-white">
+                                {nextTargetSummary.remainingCps.length} POS
+                              </span>{' '}
+                              <span className="text-amber-300 font-mono">
+                                ({nextTargetSummary.remainingPoints} Poin)
+                              </span>
+                            </div>
+                            <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-200 border border-emerald-400/40">
+                              Boleh Finish Kapan Saja
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                            <span className="text-[10px] font-mono text-slate-400 mr-0.5">
+                              Belum:
+                            </span>
+                            {nextTargetSummary.remainingCps.slice(0, 10).map((cp) => (
+                              <span
+                                key={`rem-cp-chip-${cp.id}`}
+                                className="rounded bg-slate-950/90 border border-slate-700 px-1.5 py-0.5 text-[10px] font-mono font-bold text-slate-200"
+                              >
+                                {cp.code}{' '}
+                                <span className="text-amber-300">({cp.points}p)</span>
+                              </span>
+                            ))}
+                            {nextTargetSummary.remainingCps.length > 10 && (
+                              <span className="text-[10px] font-mono text-slate-400">
+                                +{nextTargetSummary.remainingCps.length - 10} pos lagi
+                              </span>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                {/* ============================================================
                     KARTU MODE RELAY (ESTAFET TIM INDUK & KUNCI GILIRAN SUB-TEAM)
+                    Saat sedang berlari (ACTIVE), otomatis diringkas menjadi 1 baris
+                    agar tombol SCAN QR POS / FINISH tetap berada paling atas!
                    ============================================================ */}
                 {activeCourse.raceMode === CourseRaceMode.RELAY && (
+                  sessionCanRecordCheckpoints &&
+                  !sessionMarkedFinishedLocallyOrServer &&
+                  !showRelayDetailWhileRunning ? (
+                    <div className="flex items-center justify-between gap-2 rounded-xl border border-purple-500/35 bg-purple-950/20 px-3 py-2 text-xs">
+                      <div className="flex items-center gap-2 truncate">
+                        <Users className="h-3.5 w-3.5 text-purple-300 shrink-0" />
+                        <span className="font-bold text-purple-200 truncate">
+                          Estafet: {activeSession.relayParentTeamName || '-'} • Sub-Team #
+                          {activeSession.relayLegIndex || '?'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowRelayDetailWhileRunning(true)}
+                        className="rounded-lg bg-purple-500/20 border border-purple-500/40 px-2 py-0.5 text-[10px] font-bold text-purple-200 hover:bg-purple-500/30 shrink-0 cursor-pointer"
+                      >
+                        Lihat Progres Tim
+                      </button>
+                    </div>
+                  ) : (
                   <div className="rounded-xl border border-purple-500/40 bg-purple-950/20 p-3.5 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -3525,6 +3791,16 @@ export default function ParticipantView({
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5">
+                        {sessionCanRecordCheckpoints &&
+                          !sessionMarkedFinishedLocallyOrServer && (
+                            <button
+                              type="button"
+                              onClick={() => setShowRelayDetailWhileRunning(false)}
+                              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] font-semibold cursor-pointer"
+                            >
+                              Ringkas
+                            </button>
+                          )}
                         {activeSession.status === SessionStatus.NOT_STARTED &&
                           activeSession.relayParentTeamKey &&
                           !isEditingRelayIdentity && (
@@ -3792,6 +4068,7 @@ export default function ParticipantView({
                       </div>
                     )}
                   </div>
+                  )
                 )}
 
                 {/* ============================================================
