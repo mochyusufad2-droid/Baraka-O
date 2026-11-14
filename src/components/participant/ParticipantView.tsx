@@ -26,7 +26,6 @@ import {
   Zap,
   Lock,
   Unlock,
-  BatteryCharging,
   Users,
 } from 'lucide-react';
 import {
@@ -233,11 +232,13 @@ interface RelayTeamStatus {
 interface ParticipantViewProps {
   onAuthenticated?: () => void;
   onLogout?: () => void;
+  onActiveCourseModeChange?: (inActiveCourse: boolean) => void;
 }
 
 export default function ParticipantView({
   onAuthenticated,
   onLogout,
+  onActiveCourseModeChange,
 }: ParticipantViewProps = {}) {
   const initialPersisted = useMemo(() => loadPersistedParticipantState(), []);
 
@@ -251,6 +252,13 @@ export default function ParticipantView({
   const [activeSession, setActiveSession] = useState<ParticipantSession | null>(
     initialPersisted.activeSession
   );
+
+  useEffect(() => {
+    onActiveCourseModeChange?.(Boolean(participant && activeCourse && activeSession));
+    return () => {
+      onActiveCourseModeChange?.(false);
+    };
+  }, [participant, activeCourse, activeSession, onActiveCourseModeChange]);
   const [simulatedOffline, setSimulatedOffline] = useState<boolean>(
     initialPersisted.simulatedOffline
   );
@@ -2783,48 +2791,6 @@ export default function ParticipantView({
     };
   }, [activeCourse, liveStopwatchSeconds]);
 
-  // Susun Ringkasan Kapsul "Target Pos Berikutnya / Sisa Pos Belum Diambil" (Next Target Pill)
-  const nextTargetSummary = useMemo(() => {
-    if (!activeCourse || !activeSession) return null;
-    const sortedCps = [...(activeCourse.checkpoints || [])].sort(
-      (a, b) => a.orderIndex - b.orderIndex
-    );
-    const doneSet = new Set(effectiveValidatedCheckpointIds);
-    const remainingCps = sortedCps.filter((cp) => !doneSet.has(cp.id));
-    const remainingPoints = remainingCps.reduce(
-      (sum, cp) => sum + (Number(cp.points) || 0),
-      0
-    );
-
-    if (sortedCps.length === 0) {
-      return {
-        allCompleted: true,
-        enforceOrder: Boolean(activeCourse.enforceOrder),
-        nextOrderedCp: null,
-        remainingCps: [],
-        remainingPoints: 0,
-      };
-    }
-
-    if (remainingCps.length === 0) {
-      return {
-        allCompleted: true,
-        enforceOrder: Boolean(activeCourse.enforceOrder),
-        nextOrderedCp: null,
-        remainingCps: [],
-        remainingPoints: 0,
-      };
-    }
-
-    return {
-      allCompleted: false,
-      enforceOrder: Boolean(activeCourse.enforceOrder),
-      nextOrderedCp: remainingCps[0] || null,
-      remainingCps,
-      remainingPoints,
-    };
-  }, [activeCourse, activeSession, effectiveValidatedCheckpointIds]);
-
   return (
     <div className="mx-auto max-w-xl space-y-4 pb-12">
       {/* ====================================================================
@@ -2988,26 +2954,6 @@ export default function ParticipantView({
             <div className="text-sm font-semibold text-emerald-400">
               Pos: {completedCheckpointCount} / {activeCourse?.checkpoints.length || 0} Selesai • Skor: {scoreBreakdown.netScore}
             </div>
-            {nextTargetSummary && (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/90 px-3 py-2 text-xs font-mono text-slate-200">
-                {nextTargetSummary.allCompleted ? (
-                  <span className="text-sky-300 font-bold">
-                    🏁 Semua Pos Lengkap! Menuju Garis Finish
-                  </span>
-                ) : nextTargetSummary.enforceOrder && nextTargetSummary.nextOrderedCp ? (
-                  <span className="text-amber-300 font-bold">
-                    🎯 Target Berikutnya: #{nextTargetSummary.nextOrderedCp.orderIndex} •{' '}
-                    {nextTargetSummary.nextOrderedCp.code} (
-                    {nextTargetSummary.nextOrderedCp.points}p)
-                  </span>
-                ) : (
-                  <span className="text-emerald-300 font-bold">
-                    ⚡ Sisa {nextTargetSummary.remainingCps.length} Pos Belum Diambil (+
-                    {nextTargetSummary.remainingPoints}p)
-                  </span>
-                )}
-              </div>
-            )}
             <div className="text-[11px] text-slate-500 font-mono">
               Layar OLED 0-Watt • Sentuhan Terkunci di Saku
             </div>
@@ -3468,85 +3414,34 @@ export default function ParticipantView({
                   Saat peserta scroll ke bawah, Stopwatch & Tombol Scan QR tetap
                   menempel di bagian atas layar!
                  ============================================================== */}
-              <div className="sticky top-[53px] sm:top-[62px] z-20 rounded-2xl border border-slate-700/90 bg-slate-900/95 backdrop-blur-md p-3 sm:p-4 space-y-2.5 shadow-2xl shadow-black/80">
-                {/* BARIS 1: NAMA COURSE, IDENTITAS TIM RINGKAS & STATUS */}
-                <div className="flex items-center justify-between gap-2 border-b border-slate-800/90 pb-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[10px] sm:text-[11px] font-semibold text-emerald-400 truncate">
-                      Tim: <span className="text-white">{participant.teamName}</span>
-                      {activeCourse.raceMode === CourseRaceMode.RELAY &&
-                      activeSession.relayParentTeamName
-                        ? ` • Estafet: ${activeSession.relayParentTeamName} #${activeSession.relayLegIndex || '?'}`
-                        : ''}
-                      {' • '}
-                      {activeCourse.enforceOrder ? 'Wajib Urut' : 'Acak / Score'}
-                    </div>
-                    <h3 className="text-xs sm:text-sm font-extrabold text-white truncate">
-                      {activeCourse.name}
-                    </h3>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {activeSession.attemptNumber &&
-                      activeSession.attemptNumber > 1 && (
-                        <span className="rounded px-1.5 py-0.5 text-[9px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
-                          #{activeSession.attemptNumber}
-                        </span>
-                      )}
-                    {scoreBreakdown.isOvertime && (
-                      <span className="rounded px-1.5 py-0.5 text-[9px] font-mono font-extrabold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
-                        +{scoreBreakdown.overtimeMinutes}M
-                      </span>
-                    )}
-                    <span
-                      className={`rounded-md px-2 py-0.5 text-[10px] sm:text-xs font-extrabold ${
-                        sessionMarkedFinishedLocallyOrServer
-                          ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                          : sessionCanRecordCheckpoints
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      }`}
-                    >
-                      {sessionMarkedFinishedLocallyOrServer
-                        ? 'FINISHED'
-                        : sessionCanRecordCheckpoints
-                        ? 'SEDANG LARI'
-                        : 'SIAP START'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void syncLatestCourseAndSession();
-                        setFeedbackBanner({
-                          type: 'success',
-                          text: 'Menyegarkan pengaturan Course & status sesi terbaru dari server...',
-                        });
-                      }}
-                      className="rounded-md p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer"
-                      title="Segarkan Pengaturan Course dari Panitia"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* BARIS 2: PANEL ANGKA 3 KOLOM SEJAJAR (HEMAT RUANG VERTIKAL DI HP) */}
-                <div className="grid grid-cols-3 gap-1.5 sm:gap-2 text-center">
+              <div className="sticky top-0 z-30 rounded-2xl border border-slate-700/90 bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 space-y-2 shadow-2xl shadow-black/80">
+                {/* BARIS 1: LOGO ORIENTRA + TULISAN DIPERKECIL (KIRI) | STOPWATCH & COUNTDOWN (TENGAH) | KUNCI LAYAR KOTAK SEUKURAN LOGO (KANAN) */}
+                <div className="flex items-center justify-between gap-2">
+                  {/* Kiri: Kotak Putih Logo ORIENTRA + Tulisan ORIENTRA (Diperkecil & Rapi) */}
                   <div
-                    className={`rounded-xl border py-2 px-1.5 ${
+                    className="w-[46px] h-[46px] sm:w-[50px] sm:h-[50px] rounded-lg bg-white p-0.5 shadow-md border border-slate-200/80 flex flex-col items-center justify-center shrink-0 select-none"
+                    title="ORIENTRA — Digital Orienteering & Race Platform"
+                  >
+                    <img
+                      src="/orientra-logo.jpeg"
+                      alt="ORIENTRA"
+                      className="h-6 w-6 sm:h-7 sm:w-7 object-contain"
+                    />
+                    <span className="text-[6.5px] sm:text-[7.5px] font-black tracking-tighter leading-none mt-0.5 text-slate-900">
+                      ORIENT<span className="text-orange-600">RA</span>
+                    </span>
+                  </div>
+
+                  {/* Tengah: Timer Besar + Sisa Waktu */}
+                  <div
+                    className={`flex-1 rounded-xl border py-1 px-2 text-center flex flex-col items-center justify-center min-w-0 ${
                       scoreBreakdown.isOvertime
                         ? 'border-rose-500/50 bg-rose-950/30'
-                        : 'border-slate-800 bg-slate-950'
+                        : 'border-slate-800/90 bg-slate-950/90'
                     }`}
                   >
-                    <div className="text-[9px] sm:text-[10px] uppercase tracking-wider text-slate-400 truncate">
-                      Waktu
-                      {activeCourse.durationMinutes &&
-                      activeCourse.durationMinutes > 0
-                        ? ` (${activeCourse.durationMinutes}m)`
-                        : ''}
-                    </div>
                     <div
-                      className={`text-sm sm:text-lg font-mono font-extrabold leading-tight mt-0.5 ${
+                      className={`text-2xl sm:text-4xl font-mono font-extrabold tracking-wider leading-none ${
                         scoreBreakdown.isOvertime
                           ? 'text-rose-400'
                           : 'text-amber-400'
@@ -3556,129 +3451,99 @@ export default function ParticipantView({
                         ? formatStopwatchSeconds(liveStopwatchSeconds)
                         : '00:00:00'}
                     </div>
-                    {remainingTimeInfo && (
+                    {remainingTimeInfo ? (
                       <div
-                        className={`text-[9px] sm:text-[10px] font-mono font-bold leading-tight mt-0.5 ${
+                        className={`text-[11px] sm:text-xs font-mono font-bold leading-tight mt-0.5 ${
                           remainingTimeInfo.isOver
                             ? 'text-rose-300 animate-pulse'
                             : remainingTimeInfo.isWarning
                             ? 'text-amber-300'
-                            : 'text-sky-300'
+                            : 'text-amber-300/90'
                         }`}
                       >
                         {remainingTimeInfo.isOver
                           ? `Lewat +${remainingTimeInfo.formatted}`
                           : `Sisa ${remainingTimeInfo.formatted}`}
                       </div>
-                    )}
-                  </div>
-
-                  <div className="rounded-xl border border-slate-800 bg-slate-950 py-2 px-1.5 flex flex-col justify-center">
-                    <div className="text-[9px] sm:text-[10px] uppercase tracking-wider text-slate-400">
-                      Pos Tercapai
-                    </div>
-                    <div className="text-base sm:text-lg font-extrabold text-emerald-400 leading-tight mt-0.5">
-                      {completedCheckpointCount} /{' '}
-                      {activeCourse.checkpoints.length}
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-800 bg-slate-950 py-2 px-1.5 flex flex-col justify-center">
-                    <div className="text-[9px] sm:text-[10px] uppercase tracking-wider text-slate-400">
-                      Skor Akhir
-                    </div>
-                    <div className="text-base sm:text-lg font-extrabold text-white leading-tight mt-0.5">
-                      {scoreBreakdown.netScore}
-                    </div>
-                    {scoreBreakdown.penaltyPoints > 0 && (
-                      <div className="text-[9px] font-mono text-rose-400 leading-tight">
-                        (-{scoreBreakdown.penaltyPoints} penalti)
+                    ) : (
+                      <div className="text-[10px] font-mono text-slate-400 leading-tight mt-0.5">
+                        {sessionMarkedFinishedLocallyOrServer
+                          ? 'Lomba Selesai'
+                          : sessionCanRecordCheckpoints
+                          ? 'Sedang Lari'
+                          : 'Siap Start'}
                       </div>
                     )}
                   </div>
+
+                  {/* Kanan: Tombol Kotak Kunci Layar (Diperkecil Seukuran Kotak Logo ORIENTRA) */}
+                  <button
+                    type="button"
+                    onClick={() => setIsPocketLocked(true)}
+                    className="w-[46px] h-[46px] sm:w-[50px] sm:h-[50px] rounded-lg border border-sky-400/50 bg-sky-500/25 hover:bg-sky-500/35 active:scale-[0.97] p-0.5 flex flex-col items-center justify-center transition cursor-pointer shadow-md shrink-0"
+                    title="Mode Saku / Kunci Layar Hitam (Hemat Baterai)"
+                  >
+                    <Lock className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-sky-300 shrink-0" />
+                    <span className="text-[7.5px] sm:text-[8.5px] font-extrabold text-white leading-none mt-0.5 text-center">
+                      Kunci
+                      <br />
+                      Layar
+                    </span>
+                  </button>
                 </div>
 
-                {/* BARIS 3: KAPSUL PANDUAN TARGET POS BERIKUTNYA ("NEXT TARGET PILL") */}
-                {sessionCanRecordCheckpoints &&
-                  !sessionMarkedFinishedLocallyOrServer &&
-                  nextTargetSummary && (
-                    <div
-                      className={`rounded-xl border px-3 py-2 space-y-1 shadow-sm ${
-                        nextTargetSummary.allCompleted
-                          ? 'border-sky-400/60 bg-sky-950/40 text-sky-100'
-                          : nextTargetSummary.enforceOrder
-                          ? 'border-amber-400/60 bg-amber-950/35 text-amber-100'
-                          : 'border-emerald-400/50 bg-emerald-950/30 text-emerald-100'
-                      }`}
-                    >
-                      {nextTargetSummary.allCompleted ? (
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-[11px] sm:text-xs font-extrabold tracking-wide text-sky-300 flex items-center gap-1.5">
-                            <span>🏁</span>
-                            <span>
-                              SEMUA {activeCourse.checkpoints.length} POS LENGKAP! MENUJU FINISH
-                            </span>
-                          </div>
-                          <span className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[9px] font-mono font-bold text-sky-200 border border-sky-400/40 shrink-0">
-                            Scan Finish
-                          </span>
-                        </div>
-                      ) : nextTargetSummary.enforceOrder &&
-                        nextTargetSummary.nextOrderedCp ? (
-                        <div className="flex flex-wrap items-center justify-between gap-1.5">
-                          <div className="text-[11px] sm:text-xs font-extrabold tracking-wide text-amber-300">
-                            🎯 TARGET BERIKUTNYA:{' '}
-                            <span className="text-white">
-                              #{nextTargetSummary.nextOrderedCp.orderIndex} •{' '}
-                              {nextTargetSummary.nextOrderedCp.code}
-                            </span>
-                            {nextTargetSummary.nextOrderedCp.name
-                              ? ` — ${nextTargetSummary.nextOrderedCp.name}`
-                              : ''}{' '}
-                            <span className="text-emerald-300 font-mono">
-                              ({nextTargetSummary.nextOrderedCp.points}p)
-                            </span>
-                          </div>
-                          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-mono font-bold text-amber-200 border border-amber-400/40">
-                            Wajib Urut
-                          </span>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="flex flex-wrap items-center justify-between gap-1.5">
-                            <div className="text-[11px] sm:text-xs font-extrabold tracking-wide text-emerald-300">
-                              ⚡ SISA POS BELUM DIAMBIL:{' '}
-                              <span className="text-white">
-                                {nextTargetSummary.remainingCps.length} POS
-                              </span>{' '}
-                              <span className="text-amber-300 font-mono">
-                                ({nextTargetSummary.remainingPoints} Poin)
-                              </span>
-                            </div>
-                            <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-mono font-bold text-emerald-200 border border-emerald-400/40">
-                              Bebas Finish
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap pb-0.5">
-                            <span className="text-[9px] font-mono text-slate-400 shrink-0">
-                              Belum:
-                            </span>
-                            {nextTargetSummary.remainingCps.map((cp) => (
-                              <span
-                                key={`rem-cp-chip-${cp.id}`}
-                                className="rounded bg-slate-950/90 border border-slate-700 px-1.5 py-0.5 text-[9px] font-mono font-bold text-slate-200 shrink-0"
-                              >
-                                {cp.code}{' '}
-                                <span className="text-amber-300">({cp.points}p)</span>
-                              </span>
-                            ))}
-                          </div>
-                        </>
+                {/* BARIS 2: STRIP STATUS TIPIS 1 BARIS (Tim • Course | Pos | Skor | Refresh) */}
+                <div className="flex items-center justify-between gap-1.5 rounded-lg bg-slate-950/80 border border-slate-800/90 px-2.5 py-1 text-[11px] sm:text-xs">
+                  <div className="min-w-0 flex-1 truncate text-slate-300 font-medium">
+                    <span className="text-slate-400">Tim:</span>{' '}
+                    <span className="font-bold text-white">{participant.teamName}</span>
+                    {activeCourse.raceMode === CourseRaceMode.RELAY &&
+                    activeSession.relayParentTeamName
+                      ? ` (${activeSession.relayParentTeamName} #${activeSession.relayLegIndex || '?'})`
+                      : ''}
+                    {' • '}
+                    <span className="font-semibold text-slate-200">{activeCourse.name}</span>
+                    {' | '}
+                    <span className="text-slate-400">Pos:</span>{' '}
+                    <span className="font-extrabold text-emerald-400">
+                      {completedCheckpointCount}/{activeCourse.checkpoints.length}
+                    </span>
+                    {' | '}
+                    <span className="text-slate-400">Skor:</span>{' '}
+                    <span className="font-extrabold text-white">
+                      {scoreBreakdown.netScore}
+                    </span>
+                    {scoreBreakdown.penaltyPoints > 0 && (
+                      <span className="text-[10px] font-mono text-rose-400 ml-1">
+                        (-{scoreBreakdown.penaltyPoints})
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {activeSession.attemptNumber &&
+                      activeSession.attemptNumber > 1 && (
+                        <span className="rounded px-1 py-0.5 text-[9px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                          #{activeSession.attemptNumber}
+                        </span>
                       )}
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void syncLatestCourseAndSession();
+                        setFeedbackBanner({
+                          type: 'success',
+                          text: 'Menyegarkan pengaturan Course & status sesi terbaru dari server...',
+                        });
+                      }}
+                      className="rounded p-1 bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer"
+                      title="Segarkan Pengaturan Course dari Panitia"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
 
-                {/* BARIS 4: TOMBOL SCAN QR UTAMA (TERKUNCI DI ATAS SAAT SCROLL!) */}
+                {/* BARIS 3: TOMBOL SCAN QR HIJAU (+25% LEBIH BESAR DARI SEBELUMNYA, TANPA SUBTITLE) */}
                 {!sessionCanRecordCheckpoints ? (
                   activeCourse.raceMode === CourseRaceMode.RELAY &&
                   (!activeSession.relayParentTeamKey ||
@@ -3704,20 +3569,15 @@ export default function ParticipantView({
                         );
                         void syncLatestCourseAndSession();
                       }}
-                      className="w-full flex items-center justify-center gap-3 rounded-xl bg-slate-800 border-2 border-amber-500/50 py-3.5 px-4 text-amber-200 shadow-lg transition cursor-not-allowed"
+                      className="w-full min-h-[96px] sm:min-h-[106px] flex items-center justify-center gap-3.5 rounded-xl bg-slate-800 border-2 border-amber-500/50 py-7 sm:py-8 px-6 text-amber-200 shadow-lg transition cursor-not-allowed"
                     >
-                      <Lock className="h-6 w-6 text-amber-400 shrink-0" />
+                      <Lock className="h-8 w-8 text-amber-400 shrink-0" />
                       <div className="text-left">
-                        <div className="text-xs sm:text-sm font-extrabold tracking-wide uppercase">
+                        <div className="text-base sm:text-lg font-extrabold tracking-wide uppercase">
                           {!activeSession.relayParentTeamKey ||
                           !activeSession.relayLegIndex
                             ? 'ISI IDENTITAS SUB-TEAM DI BAWAH'
                             : `MENUNGGU SUB-TEAM #${relayStatus?.waitingOnLeg || (activeSession.relayLegIndex - 1)}`}
-                        </div>
-                        <div className="text-[10px] text-slate-300 font-medium">
-                          {!activeSession.relayParentTeamKey
-                            ? 'Simpan Tim Induk & Urutan Sub-Team sebelum Scan Start QR'
-                            : 'Ketuk untuk cek giliran ulang atau minta Override Panitia'}
                         </div>
                       </div>
                     </button>
@@ -3725,37 +3585,66 @@ export default function ParticipantView({
                     <button
                       type="button"
                       onClick={() => setCameraActiveFor('START')}
-                      className="w-full flex items-center justify-center gap-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-3.5 sm:py-4 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer border-2 border-emerald-400/50"
+                      className="w-full min-h-[96px] sm:min-h-[106px] flex items-center justify-center gap-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-7 sm:py-8 px-6 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer border-2 border-emerald-400/60"
                     >
-                      <Play className="h-7 w-7 fill-current shrink-0" />
-                      <div className="text-left">
-                        <div className="text-base sm:text-lg font-extrabold tracking-wide uppercase leading-tight">
-                          SCAN START QR
-                        </div>
-                        <div className="text-[10px] sm:text-xs text-emerald-100 font-medium">
-                          Buka kamera layar penuh &amp; otomatis mulai waktu lomba
-                        </div>
-                      </div>
+                      <Play className="h-10 w-10 sm:h-11 sm:w-11 fill-current shrink-0" />
+                      <span className="text-xl sm:text-3xl font-black tracking-wide uppercase leading-none">
+                        SCAN START QR
+                      </span>
                     </button>
                   )
                 ) : !sessionMarkedFinishedLocallyOrServer ? (
                   <button
                     type="button"
                     onClick={() => setCameraActiveFor('AUTO_RACE')}
-                    className="w-full flex items-center justify-center gap-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-4 px-4 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer border-2 border-lime-400/60"
+                    className="w-full min-h-[96px] sm:min-h-[106px] flex items-center justify-center gap-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-7 sm:py-8 px-6 text-white shadow-lg shadow-emerald-950/80 transition cursor-pointer border-2 border-lime-400/60"
                   >
-                    <Camera className="h-8 w-8 shrink-0" />
-                    <div className="text-left">
-                      <div className="text-base sm:text-xl font-extrabold tracking-wide uppercase leading-tight">
-                        SCAN QR POS / FINISH
-                      </div>
-                      <div className="text-[10px] sm:text-xs text-emerald-100 font-medium">
-                        Kamera layar penuh • Otomatis kenali CP1–CP
-                        {activeCourse.checkpoints.length} atau Finish
-                      </div>
-                    </div>
+                    <Camera className="h-10 w-10 sm:h-11 sm:w-11 shrink-0" />
+                    <span className="text-xl sm:text-3xl font-black tracking-wide uppercase leading-none">
+                      SCAN QR POS / FINISH
+                    </span>
                   </button>
                 ) : null}
+
+                {/* BARIS 4: TAB NAVIGASI "Course | Map" TERKUNCI DI DALAM KOKPIT ATAS */}
+                <div className="grid grid-cols-2 border-t border-slate-800/90 pt-1 -mx-1">
+                  <button
+                    type="button"
+                    onClick={() => setRunnerViewTab('COURSE')}
+                    className={`py-2 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 cursor-pointer ${
+                      runnerViewTab === 'COURSE'
+                        ? 'border-amber-500 text-white bg-slate-950/60 rounded-t-lg'
+                        : 'border-transparent text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Course ({completedCheckpointCount}/
+                    {activeCourse.checkpoints.length})
+                  </button>
+
+                  {activeCourse.allowParticipantMapVisibility !== false ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRunnerViewTab('MAP');
+                        void getQuickGpsCoordinates();
+                      }}
+                      className={`py-2 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 cursor-pointer ${
+                        runnerViewTab === 'MAP'
+                          ? 'border-amber-500 text-amber-400 bg-slate-950/60 rounded-t-lg'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Map
+                    </button>
+                  ) : (
+                    <div
+                      className="py-2 text-center text-[11px] font-medium text-slate-500 border-b-2 border-transparent select-none"
+                      title="Dinonaktifkan oleh Organizer untuk kompetisi navigasi murni"
+                    >
+                      Map (Nonaktif)
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* ==============================================================
@@ -3854,36 +3743,6 @@ export default function ParticipantView({
                         Tenang, hasil lari Anda di atas tetap tersimpan di server &amp; Leaderboard panitia.
                       </p>
                     </div>
-                  </div>
-                )}
-
-                {/* TOMBOL POCKET MODE (KUNCI SAKU ATLET) — Layar OLED Gelap, Anti-Ghost-Touch & Hemat Baterai */}
-                {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && (
-                  <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-950/80 border border-slate-800 p-2.5">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400 border border-sky-500/30">
-                        <BatteryCharging className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                          Mode Saku / Kunci Layar
-                          <span className="rounded bg-sky-950 px-1.5 py-0.2 text-[9px] font-mono text-sky-300 border border-sky-500/40">
-                            Hemat Baterai 60%
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          Layar hitam pekat saat lari, GPS tetap lacak, anti-terpencet di saku
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsPocketLocked(true)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 active:scale-[0.98] px-3 py-2 text-xs font-bold text-white shadow-sm transition cursor-pointer shrink-0"
-                    >
-                      <Lock className="h-3.5 w-3.5" />
-                      <span>Kunci Layar</span>
-                    </button>
                   </div>
                 )}
 
@@ -4176,50 +4035,8 @@ export default function ParticipantView({
                   </div>
                 )}
 
-                {/* ============================================================
-                    TAB NAVIGASI "Course | Map" (GAYA REFERENSI iOrienteering)
-                    Jika Organizer mengaktifkan "Tampilkan Peta ke Peserta",
-                    tab "Map" muncul di sebelah kanan tab "Course".
-                   ============================================================ */}
-                <div className="pt-1 space-y-3">
-                  <div className="grid grid-cols-2 border-b border-slate-800 bg-slate-950/90 rounded-t-xl overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={() => setRunnerViewTab('COURSE')}
-                      className={`py-2.5 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 ${
-                        runnerViewTab === 'COURSE'
-                          ? 'border-amber-500 text-white bg-slate-900/90'
-                          : 'border-transparent text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Course ({completedCheckpointCount}/
-                      {activeCourse.checkpoints.length})
-                    </button>
-
-                    {activeCourse.allowParticipantMapVisibility !== false ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setRunnerViewTab('MAP');
-                          void getQuickGpsCoordinates();
-                        }}
-                        className={`py-2.5 text-xs sm:text-sm font-bold tracking-wide transition border-b-2 ${
-                          runnerViewTab === 'MAP'
-                            ? 'border-amber-500 text-white bg-slate-900/90'
-                            : 'border-transparent text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        Map
-                      </button>
-                    ) : (
-                      <div
-                        className="py-2.5 text-center text-[11px] font-medium text-slate-500 border-b-2 border-transparent select-none"
-                        title="Dinonaktifkan oleh Organizer untuk kompetisi navigasi murni"
-                      >
-                        Map (Nonaktif oleh Panitia)
-                      </div>
-                    )}
-                  </div>
+                {/* KONTEN UTAMA SESUAI TAB "Course | Map" DI KOKPIT ATAS */}
+                <div className="pt-0.5 space-y-3">
 
                   {runnerViewTab === 'MAP' &&
                   activeCourse.allowParticipantMapVisibility !== false ? (

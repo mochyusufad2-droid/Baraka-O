@@ -90,7 +90,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "3a9cc8ab1bd0f8cf146c17ce75d862d4"
   }, {
     "url": "index.html",
-    "revision": "2fffcc67f80662bfc5639ec18c19cd1c"
+    "revision": "5c12b3150e69b151d5976be64af6116a"
   }, {
     "url": "icon.svg",
     "revision": "ebb1b56e78a40d9610f8974a53f189f7"
@@ -98,79 +98,10 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "apple-touch-icon.png",
     "revision": "aec4d193bf8dfaac8b6cce066d10378c"
   }, {
-    "url": "assets/index-tDJNsxSu.css",
+    "url": "assets/index-zAyDjGS8.js",
     "revision": null
   }, {
-    "url": "assets/index-CK9roah7.js",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/yfTZrz5kgBJzML9teQMFlHSQ3K0CQnSIz97TcRbL58EoMG_aWCABjcqvIKhOHg8kDRaRTQpCKNFEW4g-lA63hsGpJGmMNxYvjZHKcuihrLISDk4k7YxHCOObBqRnZlTbqs3bExO0dJCSZVz8Ym2mH89VIRFK7sjbPzSvZK-vzbIj1HO7m2hTNTZZl5gEnDJb-3_f65a9ec9.jpeg",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/result_c44c58f8.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/course___map_io_871f5074.jpg",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/WhatsApp_Image_2026-11-14_at_13.35.38_549360cf.jpeg",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/WhatsApp_Image_2026-11-14_at_13.35.38-2_fe829809.jpeg",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/WhatsApp_Image_2026-10-30_at_19.26.44-2_f085c1a4.jpeg",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-08_at_23.39.16_5c402695.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-08_at_21.15.41_17f1ae3a.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-08_at_20.11.44_fda464b9.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_19.20.55_ac1cdd63.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_16.41.34_ccc7b3d2.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_06.14.58_a5fe7e03.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_05.17.07_8bdc916a.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_05.14.46_bda25ae0.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_05.03.20_4cd20041.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-07_at_04.32.16_08a04606.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-03_at_10.54.17_f2f32a16.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-03_at_10.09.56_bc5b9331.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-02_at_10.23.44_9c626036.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-02_at_08.40.28_57eef0be.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-02_at_08.40.22_fcb7196a.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-11-02_at_07.55.52_5e8f6d1f.png",
-    "revision": null
-  }, {
-    "url": "assets/aistudio/Screenshot_2026-10-31_at_06.21.15_5f1048ce.png",
+    "url": "assets/index-35AHCDVL.css",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",

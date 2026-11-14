@@ -52,6 +52,8 @@ export default function App() {
   const [loginRoleChoice, setLoginRoleChoice] = useState<UserRole>(
     UserRole.PARTICIPANT
   );
+  const [isParticipantInActiveCourse, setIsParticipantInActiveCourse] =
+    useState<boolean>(false);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -71,6 +73,7 @@ export default function App() {
 
   const handleLogoutToGate = useCallback(() => {
     setAuthenticatedRole(null);
+    setIsParticipantInActiveCourse(false);
   }, []);
 
   const handleExitLiveView = useCallback(() => {
@@ -95,44 +98,54 @@ export default function App() {
   }
 
   const currentRole = authenticatedRole ?? loginRoleChoice;
+  const hideOuterHeaderForRunnerCockpit =
+    currentRole === UserRole.PARTICIPANT && isParticipantInActiveCourse;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      {/* HEADER UTAMA ORIENTRA (DENGAN LOGO RESMI & TONE KOMPAS BIRU-ORANYE) */}
-      <header className="sticky top-0 z-30 border-b border-sky-500/25 bg-[#061529]/95 backdrop-blur shadow-lg shadow-black/30">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-3.5 py-2 sm:px-4 sm:py-3">
-          <div className="flex items-center gap-2.5 sm:gap-3">
-            <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-white p-0.5 shadow-md shadow-sky-950/60 ring-2 ring-sky-400/50 shrink-0 overflow-hidden">
-              <img
-                src="/orientra-logo.jpeg"
-                alt="ORIENTRA Logo"
-                className="h-full w-full object-contain scale-125"
-              />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-sm font-extrabold tracking-wider text-white sm:text-lg leading-tight">
-                  ORIENT<span className="text-amber-500">RA</span>
-                </h1>
+      {/* HEADER UTAMA ORIENTRA (DISEMBUNYIKAN SAAT PELARI DI DALAM KOKPIT LOMBA AGAR MENYATU DI HEADER KOKPIT) */}
+      {!hideOuterHeaderForRunnerCockpit && (
+        <header className="sticky top-0 z-30 border-b border-sky-500/25 bg-[#061529]/95 backdrop-blur shadow-lg shadow-black/30">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-3.5 py-2 sm:px-4 sm:py-3">
+            <div className="flex items-center gap-2.5 sm:gap-3">
+              <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-white p-0.5 shadow-md shadow-sky-950/60 ring-2 ring-sky-400/50 shrink-0 overflow-hidden">
+                <img
+                  src="/orientra-logo.jpeg"
+                  alt="ORIENTRA Logo"
+                  className="h-full w-full object-contain scale-125"
+                />
               </div>
-              <p className="text-[10px] sm:text-[11px] font-medium text-sky-300/90 leading-tight">
-                Digital Orienteering &amp; Race Platform
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-sm font-extrabold tracking-wider text-white sm:text-lg leading-tight">
+                    ORIENT<span className="text-amber-500">RA</span>
+                  </h1>
+                </div>
+                <p className="text-[10px] sm:text-[11px] font-medium text-sky-300/90 leading-tight">
+                  Digital Orienteering &amp; Race Platform
+                </p>
+              </div>
             </div>
-          </div>
 
-          {/* Indikator Peran Aktif khusus Organizer */}
-          {authenticatedRole === UserRole.ORGANIZER && (
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-300 shadow-sm">
-              <Shield className="h-3.5 w-3.5 text-amber-400" />
-              Dashboard Organizer
-            </span>
-          )}
-        </div>
-      </header>
+            {/* Indikator Peran Aktif khusus Organizer */}
+            {authenticatedRole === UserRole.ORGANIZER && (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-300 shadow-sm">
+                <Shield className="h-3.5 w-3.5 text-amber-400" />
+                Dashboard Organizer
+              </span>
+            )}
+          </div>
+        </header>
+      )}
 
       {/* KONTEN UTAMA */}
-      <main className="mx-auto max-w-6xl px-3 py-3 sm:px-4 sm:py-6">
+      <main
+        className={`mx-auto max-w-6xl ${
+          hideOuterHeaderForRunnerCockpit
+            ? 'px-2.5 py-1.5 sm:px-4 sm:py-3'
+            : 'px-3 py-3 sm:px-4 sm:py-6'
+        }`}
+      >
         {/* GERBANG PILIHAN LOGIN AWAL (HANYA MUNCUL SAAT BELUM LOGIN!) */}
         {authenticatedRole === null && (
           <div className="mx-auto mb-5 max-w-md rounded-2xl border border-sky-500/25 bg-[#0a1f38]/95 p-3.5 shadow-xl shadow-black/40">
@@ -172,6 +185,7 @@ export default function App() {
           <ParticipantView
             onAuthenticated={handleParticipantAuthenticated}
             onLogout={handleLogoutToGate}
+            onActiveCourseModeChange={setIsParticipantInActiveCourse}
           />
         ) : (
           <OrganizerDashboard

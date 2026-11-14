@@ -22,7 +22,7 @@ const TILE_LAYERS: Record<
     maxZoom: 19,
   },
   TOPO: {
-    label: 'Topografi',
+    label: 'Topo',
     url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
     attribution: '&copy; OpenTopoMap',
     maxZoom: 17,
@@ -178,7 +178,7 @@ export function ParticipantCourseMap({
     const map = L.map(mapContainerRef.current, {
       center: [defaultLat, defaultLng],
       zoom: 16,
-      zoomControl: true,
+      zoomControl: false,
     });
 
     // Jika peserta menggeser peta secara manual dengan jari, matikan auto-follow agar tidak melawan jari peserta
@@ -356,9 +356,6 @@ export function ParticipantCourseMap({
 
     if (!hasInitialFitRef.current && boundsPoints.length > 0) {
       hasInitialFitRef.current = true;
-      if (runnerCoords) {
-        boundsPoints.push([runnerCoords.latitude, runnerCoords.longitude]);
-      }
       const bounds = L.latLngBounds(boundsPoints);
       map.fitBounds(bounds, { padding: [36, 36], maxZoom: 17 });
     }
@@ -473,65 +470,75 @@ export function ParticipantCourseMap({
   };
 
   return (
-    <div className="space-y-2.5">
-      {/* Toolbar Peta Peserta */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-1 border border-slate-800">
-          {(['STREET', 'SATELLITE', 'TOPO'] as MapTileStyle[]).map((st) => (
-            <button
-              key={st}
-              type="button"
-              onClick={() => setTileStyle(st)}
-              className={`rounded px-2.5 py-1 text-[11px] font-semibold transition ${
-                tileStyle === st
-                  ? 'bg-amber-500 text-slate-950 font-bold'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              {TILE_LAYERS[st].label}
-            </button>
+    <div className="space-y-2">
+      {/* Kanvas Peta Interaktif Lega dengan Kontrol Mengambang Ramping (Gaya Hybrid V2) */}
+      <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950 shadow-inner">
+        <div
+          ref={mapContainerRef}
+          className="h-[54vh] min-h-[360px] sm:h-[460px] w-full z-10"
+        />
+
+        {/* Kiri Atas: Pemilih Basemap Mepet & Ringkas (Peta Jalan | Satelit | Topo) */}
+        <div className="absolute top-2 left-2 z-20 inline-flex items-center rounded-full bg-slate-950/90 border border-slate-700/85 p-0.5 shadow-lg backdrop-blur-sm">
+          {(['STREET', 'SATELLITE', 'TOPO'] as MapTileStyle[]).map((st, idx) => (
+            <React.Fragment key={st}>
+              {idx > 0 && (
+                <span className="text-[9px] text-slate-600 select-none px-0.5">
+                  |
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setTileStyle(st)}
+                className={`rounded-full px-2 py-0.5 text-[10px] leading-tight font-semibold transition cursor-pointer ${
+                  tileStyle === st
+                    ? 'bg-amber-500 text-slate-950 font-extrabold shadow-xs'
+                    : 'text-slate-200 hover:text-white'
+                }`}
+              >
+                {TILE_LAYERS[st].label}
+              </button>
+            </React.Fragment>
           ))}
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={handleFitCourseBounds}
-            className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 text-[11px] font-medium text-slate-200"
-          >
-            <Crosshair className="h-3.5 w-3.5 text-amber-400" />
-            Lihat Semua Pos
-          </button>
+        {/* Kanan Atas: Hanya 2 Tombol Taktis Utama (Diperkecil & Ramping: GPS Saya & Semua Pos) */}
+        <div className="absolute top-2 right-2 z-20 flex flex-col gap-1 rounded-lg bg-slate-950/80 border border-slate-800/85 p-0.5 shadow-lg backdrop-blur-sm">
           <button
             type="button"
             onClick={handleFocusMyLocation}
             disabled={isReadingGps}
-            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+            title="Fokus ke Posisi GPS Saya"
+            className={`flex flex-col items-center justify-center rounded-md px-1.5 py-1 min-w-[42px] transition cursor-pointer active:scale-95 ${
               autoFollowRunner
-                ? 'bg-sky-500/30 border-sky-400 text-white shadow-sm'
-                : 'bg-sky-500/15 hover:bg-sky-500/25 border-sky-500/30 text-sky-300'
+                ? 'bg-amber-400 text-slate-950 ring-1 ring-white shadow-xs'
+                : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs'
             }`}
           >
             <Navigation
-              className={`h-3.5 w-3.5 ${
-                autoFollowRunner ? 'text-sky-300 animate-pulse' : ''
+              className={`h-3 w-3 ${
+                autoFollowRunner || isReadingGps ? 'animate-pulse' : ''
               }`}
             />
-            {isReadingGps
-              ? 'Mencari GPS...'
-              : autoFollowRunner
-              ? 'Mengikuti Anda'
-              : 'Posisi Saya'}
+            <span className="text-[7.5px] font-extrabold leading-none mt-0.5">
+              {isReadingGps ? 'Cari...' : 'GPS Saya'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleFitCourseBounds}
+            title="Tampilkan Semua Pos Lomba"
+            className="flex flex-col items-center justify-center rounded-md bg-amber-500 hover:bg-amber-400 text-slate-950 px-1.5 py-1 min-w-[42px] shadow-xs transition cursor-pointer active:scale-95"
+          >
+            <Crosshair className="h-3 w-3" />
+            <span className="text-[7.5px] font-extrabold leading-none mt-0.5">
+              Semua Pos
+            </span>
           </button>
         </div>
-      </div>
 
-      {/* Kanvas Peta Interaktif */}
-      <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950 shadow-inner">
-        <div
-          ref={mapContainerRef}
-          className="h-[340px] sm:h-[400px] w-full z-10"
-        />
+        {/* Kiri Bawah: Indikator Akurasi GPS Live */}
         {runnerCoords && (
           (() => {
             const acc = Math.round(runnerCoords.accuracy || 10);
@@ -543,10 +550,10 @@ export function ParticipantCourseMap({
               ? 'bg-amber-400'
               : 'bg-rose-400';
             const badgeBg = isGood
-              ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200'
+              ? 'bg-slate-950/90 border-emerald-500/50 text-emerald-200'
               : isFair
-              ? 'bg-amber-950/90 border-amber-500/50 text-amber-200'
-              : 'bg-rose-950/90 border-rose-500/50 text-rose-200';
+              ? 'bg-slate-950/90 border-amber-500/50 text-amber-200'
+              : 'bg-slate-950/90 border-rose-500/50 text-rose-200';
             const statusLabel = isGood
               ? 'Sinyal Mantap'
               : isFair
@@ -555,9 +562,9 @@ export function ParticipantCourseMap({
 
             return (
               <div
-                className={`pointer-events-none absolute bottom-2.5 left-2.5 z-20 flex items-center gap-2 rounded-lg border px-2.5 py-1 text-[10px] font-mono shadow-lg backdrop-blur-sm ${badgeBg}`}
+                className={`pointer-events-none absolute bottom-2 left-2 z-20 flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-mono shadow-lg backdrop-blur-sm ${badgeBg}`}
               >
-                <span className={`h-2.5 w-2.5 rounded-full ${dotColor} animate-pulse`} />
+                <span className={`h-2 w-2 rounded-full ${dotColor} animate-pulse`} />
                 <span>
                   GPS ±{acc}m • <strong>{statusLabel}</strong>
                 </span>
