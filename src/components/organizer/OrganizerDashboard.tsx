@@ -316,6 +316,8 @@ export default function OrganizerDashboard({
     RelayDnfScoringMode.PARTIAL_WITH_PENALTY
   );
   const [newCourseRelayDnfPenalty, setNewCourseRelayDnfPenalty] = useState<string>('100');
+  const [newCourseRelayAllowDuplicateCps, setNewCourseRelayAllowDuplicateCps] =
+    useState<boolean>(true);
 
   // ==========================================================================
   // STATE EDIT COURSE AKTIF & KONFIRMASI HAPUS COURSE
@@ -344,6 +346,8 @@ export default function OrganizerDashboard({
     RelayDnfScoringMode.ZERO
   );
   const [editCourseRelayDnfPenalty, setEditCourseRelayDnfPenalty] = useState<string>('0');
+  const [editCourseRelayAllowDuplicateCps, setEditCourseRelayAllowDuplicateCps] =
+    useState<boolean>(true);
 
   const [confirmDeleteCourse, setConfirmDeleteCourse] = useState<Course | null>(null);
   const [focusedMonitoringSessionId, setFocusedMonitoringSessionId] = useState<string | null>(null);
@@ -1011,6 +1015,7 @@ export default function OrganizerDashboard({
       relayEnforceSequential: editCourseRelayEnforceSeq,
       relayDnfScoringMode: editCourseRelayDnfMode,
       relayDnfPenaltyPoints: liveDnfPenalty,
+      relayAllowDuplicateCheckpoints: editCourseRelayAllowDuplicateCps,
     };
   }, [
     selectedCourse,
@@ -1031,7 +1036,43 @@ export default function OrganizerDashboard({
     editCourseRelayEnforceSeq,
     editCourseRelayDnfMode,
     editCourseRelayDnfPenalty,
+    editCourseRelayAllowDuplicateCps,
   ]);
+
+  // Deteksi apakah ada perubahan pada form Edit Course yang belum disimpan ke server
+  const hasUnsavedCourseEdits = useMemo(() => {
+    if (!isEditingCourse || !selectedCourse || !effectiveSelectedCourse) return false;
+    return (
+      effectiveSelectedCourse.name !== selectedCourse.name ||
+      (effectiveSelectedCourse.description || '') !== (selectedCourse.description || '') ||
+      (effectiveSelectedCourse.locationName || '') !== (selectedCourse.locationName || '') ||
+      effectiveSelectedCourse.date !== selectedCourse.date ||
+      Boolean(effectiveSelectedCourse.scoringEnabled) !== Boolean(selectedCourse.scoringEnabled) ||
+      effectiveSelectedCourse.validationMethod !== selectedCourse.validationMethod ||
+      Number(effectiveSelectedCourse.defaultGpsRadiusMeters || 35) !==
+        Number(selectedCourse.defaultGpsRadiusMeters || 35) ||
+      Boolean(effectiveSelectedCourse.enforceOrder) !== Boolean(selectedCourse.enforceOrder) ||
+      Boolean(editCourseAllowMap) !== Boolean(selectedCourse.allowParticipantMapVisibility !== false) ||
+      Number(effectiveSelectedCourse.durationMinutes || 0) !==
+        Number(selectedCourse.durationMinutes || 0) ||
+      Boolean(effectiveSelectedCourse.overtimePenaltyEnabled) !==
+        Boolean(selectedCourse.overtimePenaltyEnabled) ||
+      Number(effectiveSelectedCourse.overtimePenaltyPointsPerMinute || 0) !==
+        Number(selectedCourse.overtimePenaltyPointsPerMinute || 0) ||
+      (effectiveSelectedCourse.raceMode || CourseRaceMode.REGULAR) !==
+        (selectedCourse.raceMode || CourseRaceMode.REGULAR) ||
+      Number(effectiveSelectedCourse.relaySubTeamCount || 3) !==
+        Number(selectedCourse.relaySubTeamCount || 3) ||
+      Boolean(effectiveSelectedCourse.relayEnforceSequential !== false) !==
+        Boolean(selectedCourse.relayEnforceSequential !== false) ||
+      (effectiveSelectedCourse.relayDnfScoringMode || RelayDnfScoringMode.ZERO) !==
+        (selectedCourse.relayDnfScoringMode || RelayDnfScoringMode.ZERO) ||
+      Number(effectiveSelectedCourse.relayDnfPenaltyPoints || 0) !==
+        Number(selectedCourse.relayDnfPenaltyPoints || 0) ||
+      Boolean(effectiveSelectedCourse.relayAllowDuplicateCheckpoints !== false) !==
+        Boolean(selectedCourse.relayAllowDuplicateCheckpoints !== false)
+    );
+  }, [isEditingCourse, selectedCourse, effectiveSelectedCourse, editCourseAllowMap]);
 
   // Helper untuk langsung memperbarui course di state lokal dashboard secara real-time tanpa jeda
   const applyUpdatedCourseLocally = useCallback((updatedCourse: Course) => {
@@ -1094,6 +1135,7 @@ export default function OrganizerDashboard({
     setEditCourseRelayEnforceSeq(course.relayEnforceSequential !== false);
     setEditCourseRelayDnfMode(course.relayDnfScoringMode || RelayDnfScoringMode.ZERO);
     setEditCourseRelayDnfPenalty(String(course.relayDnfPenaltyPoints ?? 0));
+    setEditCourseRelayAllowDuplicateCps(course.relayAllowDuplicateCheckpoints !== false);
     setIsEditingCourse(true);
   };
 
@@ -1135,6 +1177,7 @@ export default function OrganizerDashboard({
           relayEnforceSequential: editCourseRelayEnforceSeq,
           relayDnfScoringMode: editCourseRelayDnfMode,
           relayDnfPenaltyPoints: parsedRelayDnfPenalty,
+          relayAllowDuplicateCheckpoints: editCourseRelayAllowDuplicateCps,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1581,6 +1624,7 @@ export default function OrganizerDashboard({
           sess.validatedCheckpointIds.length,
           orderedSplits.length
         ),
+        validatedCheckpointIds: sess.validatedCheckpointIds || [],
         totalCheckpoints: course?.checkpoints.length || 0,
         grossScore,
         overtimeMinutes,
@@ -1648,6 +1692,7 @@ export default function OrganizerDashboard({
       return [];
     }
     const subTeamCount = Math.max(2, Number(activeCourse.relaySubTeamCount) || 3);
+    const allowDuplicateCps = activeCourse.relayAllowDuplicateCheckpoints !== false;
     const grouped = new Map<
       string,
       { parentTeamName: string; rows: typeof leaderboardRows }
@@ -1683,16 +1728,45 @@ export default function OrganizerDashboard({
           };
         });
 
-        const totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
-        const grossScore = legs.reduce((s, l) => s + (l.row?.grossScore || 0), 0);
+        let grossScore = legs.reduce((s, l) => s + (l.row?.grossScore || 0), 0);
         const penaltyPoints = legs.reduce((s, l) => s + (l.row?.penaltyPoints || 0), 0);
+        let totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
+        let totalCheckpointsCompleted = legs.reduce(
+          (s, l) => s + (l.row?.checkpointsCompleted || 0),
+          0
+        );
+
+        if (!allowDuplicateCps) {
+          const uniqueCpSet = new Set<string>();
+          for (const l of legs) {
+            if (!l.row) continue;
+            if (l.row.isDnf && activeCourse.relayDnfScoringMode === RelayDnfScoringMode.ZERO) {
+              continue;
+            }
+            for (const cpId of l.row.validatedCheckpointIds || []) {
+              uniqueCpSet.add(cpId);
+            }
+          }
+          totalCheckpointsCompleted = uniqueCpSet.size;
+          if (activeCourse.scoringEnabled) {
+            grossScore = Array.from(uniqueCpSet).reduce((sum, cpId) => {
+              const cp = (activeCourse.checkpoints || []).find((c) => c.id === cpId);
+              return sum + (cp ? Number(cp.points) || 0 : 0);
+            }, 0);
+            const nonZeroPenalties = legs.reduce((sum, l) => {
+              if (!l.row) return sum;
+              if (l.row.isDnf && activeCourse.relayDnfScoringMode === RelayDnfScoringMode.ZERO) {
+                return sum;
+              }
+              return sum + (l.row.penaltyPoints || 0);
+            }, 0);
+            totalScore = Math.max(0, grossScore - nonZeroPenalties);
+          }
+        }
+
         const totalDurationSeconds = legs.reduce(
           (s, l) =>
             s + (typeof l.row?.durationSeconds === 'number' ? l.row.durationSeconds : 0),
-          0
-        );
-        const totalCheckpointsCompleted = legs.reduce(
-          (s, l) => s + (l.row?.checkpointsCompleted || 0),
           0
         );
         const finishedLegsCount = legs.filter(
@@ -1821,6 +1895,7 @@ export default function OrganizerDashboard({
           relayEnforceSequential: newCourseRelayEnforceSeq,
           relayDnfScoringMode: newCourseRelayDnfMode,
           relayDnfPenaltyPoints: parsedRelayDnfPenalty,
+          relayAllowDuplicateCheckpoints: newCourseRelayAllowDuplicateCps,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -4005,6 +4080,23 @@ export default function OrganizerDashboard({
                               />
                             </div>
                           )}
+
+                          <label className="flex items-start gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={newCourseRelayAllowDuplicateCps}
+                              onChange={(e) =>
+                                setNewCourseRelayAllowDuplicateCps(e.target.checked)
+                              }
+                              className="rounded border-slate-700 mt-0.5"
+                            />
+                            <span className="leading-snug">
+                              Izinkan CP yang Sama Dihitung Berulang Antar Sub-Team{' '}
+                              <span className="text-slate-400">
+                                (Matikan jika 1 CP hanya boleh dihitung 1x untuk Tim Induk)
+                              </span>
+                            </span>
+                          </label>
                         </div>
                       )}
                     </div>
@@ -4214,20 +4306,28 @@ export default function OrganizerDashboard({
                           }`
                         : 'Tanpa Batas Durasi'}
                     </span>
-                    {effectiveSelectedCourse.raceMode === CourseRaceMode.RELAY ? (
+                    {selectedCourse.raceMode === CourseRaceMode.RELAY ? (
                       <span className="text-xs font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
-                        🏃 Mode Relay • {effectiveSelectedCourse.relaySubTeamCount || 3} Sub-Team
-                        {effectiveSelectedCourse.relayEnforceSequential !== false
+                        🏃 Mode Relay • {selectedCourse.relaySubTeamCount || 3} Sub-Team
+                        {selectedCourse.relayEnforceSequential !== false
                           ? ' (Giliran Terkunci)'
                           : ' (Giliran Bebas)'}
-                        {effectiveSelectedCourse.relayDnfScoringMode ===
+                        {selectedCourse.relayDnfScoringMode ===
                         RelayDnfScoringMode.PARTIAL_WITH_PENALTY
-                          ? ` • DNF: Skor CP - ${effectiveSelectedCourse.relayDnfPenaltyPoints || 0}`
+                          ? ` • DNF: Skor CP - ${selectedCourse.relayDnfPenaltyPoints || 0}`
                           : ' • DNF: 0 Poin'}
+                        {selectedCourse.relayAllowDuplicateCheckpoints === false
+                          ? ' • CP Unik'
+                          : ' • CP Akumulasi Penuh'}
                       </span>
                     ) : (
                       <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                        Mode Lomba Biasa
+                        Mode Lomba Biasa (Tersimpan di Server)
+                      </span>
+                    )}
+                    {hasUnsavedCourseEdits && (
+                      <span className="text-xs font-mono px-2.5 py-0.5 rounded bg-amber-500/25 text-amber-200 border border-amber-400 font-bold animate-pulse">
+                        ⚠️ Perubahan Edit Belum Disimpan ke Server!
                       </span>
                     )}
                   </div>
@@ -4290,13 +4390,29 @@ export default function OrganizerDashboard({
                   onSubmit={handleSaveEditCourse}
                   className="p-4 rounded-xl bg-sky-950/20 border border-sky-500/40 space-y-3.5 text-xs"
                 >
+                  {hasUnsavedCourseEdits && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-amber-500/20 border border-amber-400/60 px-3.5 py-2.5 text-amber-100">
+                      <div className="flex items-center gap-2 font-bold text-xs">
+                        <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
+                        <span>
+                          PERHATIAN: Anda telah mengubah pengaturan Course (mis. Mode Relay / Durasi), tetapi <u>belum disimpan ke server</u>!
+                        </span>
+                      </div>
+                      <button
+                        type="submit"
+                        className="px-3.5 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs shadow cursor-pointer shrink-0"
+                      >
+                        Simpan Perubahan Sekarang
+                      </button>
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-500/20 pb-2">
                     <div className="font-bold text-sky-300 flex items-center gap-2 text-sm">
                       <Edit3 className="w-4 h-4" />
                       Edit / Update Pengaturan Course Aktif ({selectedCourse.name})
                     </div>
                     <span className="text-[11px] text-emerald-300 font-mono">
-                      ⚡ Pratinjau Peta Real-Time Aktif • Kode QR Tetap Aman
+                      ⚡ Klik "Simpan Perubahan Course" agar HP Peserta menerima pengaturan terbaru
                     </span>
                   </div>
 
@@ -4559,6 +4675,24 @@ export default function OrganizerDashboard({
                             }
                             className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-rose-500/40 text-rose-200 font-mono disabled:opacity-40"
                           />
+                        </div>
+                        <div className="sm:col-span-4">
+                          <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-900 border border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={editCourseRelayAllowDuplicateCps}
+                              onChange={(e) =>
+                                setEditCourseRelayAllowDuplicateCps(e.target.checked)
+                              }
+                              className="rounded border-slate-700"
+                            />
+                            <span>
+                              Izinkan CP yang Sama Dihitung Berulang Antar Sub-Team (Akumulasi Penuh) —{' '}
+                              <span className="text-slate-400">
+                                Matikan jika tiap CP unik hanya boleh dihitung 1x untuk Tim Induk
+                              </span>
+                            </span>
+                          </label>
                         </div>
                       </div>
                     )}

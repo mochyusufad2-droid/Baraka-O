@@ -59,6 +59,7 @@ interface LeaderboardItem {
   attemptNumber: number;
   status: SessionStatus;
   checkpointsCompleted: number;
+  validatedCheckpointIds: string[];
   totalCheckpoints: number;
   grossScore: number;
   overtimeMinutes: number;
@@ -318,6 +319,7 @@ export function SpectatorLiveLeaderboardModal({
         attemptNumber: sess.attemptNumber || 1,
         status: sess.status,
         checkpointsCompleted: sess.validatedCheckpointIds?.length || 0,
+        validatedCheckpointIds: sess.validatedCheckpointIds || [],
         totalCheckpoints: c?.checkpoints?.length || 0,
         grossScore,
         overtimeMinutes,
@@ -377,6 +379,7 @@ export function SpectatorLiveLeaderboardModal({
   const relayParentRows = useMemo(() => {
     if (!isRelayCourse || !selectedCourse) return [];
     const subTeamCount = Math.max(2, Number(selectedCourse.relaySubTeamCount) || 3);
+    const allowDuplicateCps = selectedCourse.relayAllowDuplicateCheckpoints !== false;
     const grouped = new Map<string, { parentTeamName: string; rows: LeaderboardItem[] }>();
     for (const row of leaderboardRows) {
       const pKey = (
@@ -400,13 +403,40 @@ export function SpectatorLiveLeaderboardModal({
             matching[matching.length - 1];
           return { legIndex: legNum, row: picked || null };
         });
-        const totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
-        const totalDurationSeconds = legs.reduce(
-          (s, l) => s + (typeof l.row?.durationSeconds === 'number' ? l.row.durationSeconds : 0),
+        let totalScore = legs.reduce((s, l) => s + (l.row?.totalScore || 0), 0);
+        let totalCheckpointsCompleted = legs.reduce(
+          (s, l) => s + (l.row?.checkpointsCompleted || 0),
           0
         );
-        const totalCheckpointsCompleted = legs.reduce(
-          (s, l) => s + (l.row?.checkpointsCompleted || 0),
+        if (!allowDuplicateCps) {
+          const uniqueCpSet = new Set<string>();
+          for (const l of legs) {
+            if (!l.row) continue;
+            if (l.row.isDnf && selectedCourse.relayDnfScoringMode === RelayDnfScoringMode.ZERO) {
+              continue;
+            }
+            for (const cpId of l.row.validatedCheckpointIds || []) {
+              uniqueCpSet.add(cpId);
+            }
+          }
+          totalCheckpointsCompleted = uniqueCpSet.size;
+          if (selectedCourse.scoringEnabled) {
+            const uniqueGross = Array.from(uniqueCpSet).reduce((sum, cpId) => {
+              const cp = (selectedCourse.checkpoints || []).find((c) => c.id === cpId);
+              return sum + (cp ? Number(cp.points) || 0 : 0);
+            }, 0);
+            const nonZeroPenalties = legs.reduce((sum, l) => {
+              if (!l.row) return sum;
+              if (l.row.isDnf && selectedCourse.relayDnfScoringMode === RelayDnfScoringMode.ZERO) {
+                return sum;
+              }
+              return sum + (l.row.penaltyPoints || 0);
+            }, 0);
+            totalScore = Math.max(0, uniqueGross - nonZeroPenalties);
+          }
+        }
+        const totalDurationSeconds = legs.reduce(
+          (s, l) => s + (typeof l.row?.durationSeconds === 'number' ? l.row.durationSeconds : 0),
           0
         );
         const finishedLegsCount = legs.filter((l) => l.row?.status === SessionStatus.FINISHED).length;

@@ -207,6 +207,18 @@ interface RelayTeamLegInfo {
   isMe?: boolean;
 }
 
+interface RelayExistingParentTeam {
+  parentTeamKey: string;
+  parentTeamName: string;
+  takenLegs: {
+    legIndex: number;
+    participantTeamName?: string | null;
+    status?: SessionStatus | null;
+    isDnf?: boolean;
+    isMe?: boolean;
+  }[];
+}
+
 interface RelayTeamStatus {
   isRelayLocked: boolean;
   lockReason?: string | null;
@@ -215,6 +227,7 @@ interface RelayTeamStatus {
   legIndex?: number | null;
   subTeamCount: number;
   legs: RelayTeamLegInfo[];
+  existingParentTeams?: RelayExistingParentTeam[];
 }
 
 interface ParticipantViewProps {
@@ -611,11 +624,22 @@ export default function ParticipantView({
         return;
       }
       if (data.course) {
+        const incomingCourse = data.course;
         setActiveCourse((prev) => {
-          if (prev && JSON.stringify(prev) === JSON.stringify(data.course)) {
+          if (prev && JSON.stringify(prev) === JSON.stringify(incomingCourse)) {
             return prev;
           }
-          return data.course!;
+          if (
+            prev &&
+            prev.raceMode !== CourseRaceMode.RELAY &&
+            incomingCourse.raceMode === CourseRaceMode.RELAY
+          ) {
+            setFeedbackBanner({
+              type: 'warning',
+              text: `Panitia baru saja mengaktifkan Mode Relay (${incomingCourse.relaySubTeamCount || 3} Sub-Team) pada Course "${incomingCourse.name}". Silakan isi Nama Tim Induk & Urutan Sub-Team Anda!`,
+            });
+          }
+          return incomingCourse;
         });
       }
       if (data.relayStatus !== undefined) {
@@ -3161,7 +3185,7 @@ export default function ParticipantView({
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                   />
                   <p className="mt-1 text-[11px] text-amber-300/90 leading-snug">
-                    * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>.
+                    * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>. Jika lomba <strong>Mode Relay (Estafet)</strong>, isi dengan nama unik Sub-Team Anda (contoh: <em>Garuda 1</em>); Nama Tim Induk dipilih setelah Scan Setup QR.
                   </p>
                 </div>
                 <div>
@@ -3410,6 +3434,20 @@ export default function ParticipantView({
                         ? 'SEDANG LARI'
                         : 'SIAP START'}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void syncLatestCourseAndSession();
+                        setFeedbackBanner({
+                          type: 'success',
+                          text: 'Menyegarkan pengaturan Course & status sesi terbaru dari server...',
+                        });
+                      }}
+                      className="rounded-md p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer"
+                      title="Segarkan Pengaturan Course dari Panitia"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
 
@@ -3524,9 +3562,80 @@ export default function ParticipantView({
                           onSubmit={handleSaveRelayProfile}
                           className="space-y-2.5 pt-2 border-t border-purple-500/25 text-xs"
                         >
+                          {/* Direktori Pilihan Cepat Tim Induk yang Sudah Ada di Course Ini (Anti-Typo) */}
+                          {relayStatus?.existingParentTeams &&
+                            relayStatus.existingParentTeams.length > 0 && (
+                              <div className="rounded-lg bg-slate-950/90 border border-purple-500/30 p-2.5 space-y-1.5">
+                                <div className="text-[11px] font-bold text-purple-200 flex items-center justify-between">
+                                  <span>
+                                    📋 Pilih Tim Induk yang Sudah Ada (Anti-Typo untuk Sub-Team #2, #3, dst.):
+                                  </span>
+                                  <span className="text-[10px] font-mono text-slate-400">
+                                    Ketuk untuk pilih
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-1 gap-1.5 max-h-40 overflow-y-auto pr-1">
+                                  {relayStatus.existingParentTeams.map((pt) => {
+                                    const isSelectedParent =
+                                      relayParentInput.trim().toUpperCase() === pt.parentTeamKey;
+                                    const firstEmptyLeg = pt.takenLegs.find(
+                                      (tl) => !tl.participantTeamName || tl.isMe
+                                    );
+                                    return (
+                                      <button
+                                        key={`pick-parent-${pt.parentTeamKey}`}
+                                        type="button"
+                                        onClick={() => {
+                                          setRelayParentInput(pt.parentTeamName);
+                                          if (firstEmptyLeg) {
+                                            setRelayLegInput(firstEmptyLeg.legIndex);
+                                          }
+                                        }}
+                                        className={`w-full text-left rounded-lg border px-2.5 py-2 transition cursor-pointer ${
+                                          isSelectedParent
+                                            ? 'border-purple-400 bg-purple-500/20 text-white'
+                                            : 'border-slate-800 bg-slate-900/90 text-slate-200 hover:border-purple-500/50'
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between gap-2 font-bold text-xs">
+                                          <span className="truncate text-purple-200">
+                                            {pt.parentTeamName}
+                                          </span>
+                                          <span className="text-[10px] font-mono text-emerald-300 shrink-0">
+                                            {firstEmptyLeg
+                                              ? `Pilih (Saran: #${firstEmptyLeg.legIndex})`
+                                              : 'Penuh'}
+                                          </span>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1 mt-1">
+                                          {pt.takenLegs.map((tl) => (
+                                            <span
+                                              key={`pt-${pt.parentTeamKey}-leg-${tl.legIndex}`}
+                                              className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                                                tl.participantTeamName && !tl.isMe
+                                                  ? 'bg-slate-800 text-slate-400 border border-slate-700'
+                                                  : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-bold'
+                                              }`}
+                                            >
+                                              #{tl.legIndex}:{' '}
+                                              {tl.participantTeamName
+                                                ? tl.isMe
+                                                  ? 'Anda'
+                                                  : tl.participantTeamName
+                                                : 'Kosong'}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
                           <div>
                             <label className="block text-purple-200 font-semibold mb-1">
-                              Nama Tim Induk (Sama untuk seluruh Sub-Team dalam tim Anda) *
+                              Nama Tim Induk (Ketik baru jika Anda Sub-Team #1, atau klik daftar di atas) *
                             </label>
                             <input
                               type="text"
@@ -3546,20 +3655,37 @@ export default function ParticipantView({
                               {Array.from(
                                 { length: Math.max(2, Number(activeCourse.relaySubTeamCount) || 3) },
                                 (_, i) => i + 1
-                              ).map((legNum) => (
-                                <button
-                                  key={`leg-pick-${legNum}`}
-                                  type="button"
-                                  onClick={() => setRelayLegInput(legNum)}
-                                  className={`px-3 py-1.5 rounded-lg font-mono font-bold border transition cursor-pointer ${
-                                    relayLegInput === legNum
-                                      ? 'bg-purple-500 text-white border-purple-300 shadow'
-                                      : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-purple-400'
-                                  }`}
-                                >
-                                  Sub-Team #{legNum}
-                                </button>
-                              ))}
+                              ).map((legNum) => {
+                                const matchedParent = relayStatus?.existingParentTeams?.find(
+                                  (pt) =>
+                                    pt.parentTeamKey ===
+                                    relayParentInput.trim().replace(/\s+/g, ' ').toUpperCase()
+                                );
+                                const slotInfo = matchedParent?.takenLegs.find(
+                                  (tl) => tl.legIndex === legNum
+                                );
+                                const occupiedByOther =
+                                  Boolean(slotInfo?.participantTeamName) && !slotInfo?.isMe;
+                                return (
+                                  <button
+                                    key={`leg-pick-${legNum}`}
+                                    type="button"
+                                    onClick={() => setRelayLegInput(legNum)}
+                                    className={`px-3 py-1.5 rounded-lg font-mono font-bold border transition cursor-pointer ${
+                                      relayLegInput === legNum
+                                        ? 'bg-purple-500 text-white border-purple-300 shadow'
+                                        : occupiedByOther
+                                        ? 'bg-slate-950/60 text-slate-500 border-slate-800'
+                                        : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-purple-400'
+                                    }`}
+                                  >
+                                    Sub-Team #{legNum}
+                                    {occupiedByOther
+                                      ? ` (${slotInfo?.participantTeamName})`
+                                      : ''}
+                                  </button>
+                                );
+                              })}
                             </div>
                           </div>
 

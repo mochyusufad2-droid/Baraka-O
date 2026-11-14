@@ -90,7 +90,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "3a9cc8ab1bd0f8cf146c17ce75d862d4"
   }, {
     "url": "index.html",
-    "revision": "11609237b81d8bc4bce19906819c2faf"
+    "revision": "4df843313a3bc4314b3ca3ac9d83dad0"
   }, {
     "url": "icon.svg",
     "revision": "ebb1b56e78a40d9610f8974a53f189f7"
@@ -98,10 +98,10 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "apple-touch-icon.png",
     "revision": "aec4d193bf8dfaac8b6cce066d10378c"
   }, {
-    "url": "assets/index-Cr5wm4oh.css",
+    "url": "assets/index-HhONwj0u.css",
     "revision": null
   }, {
-    "url": "assets/index-BKi-MuoF.js",
+    "url": "assets/index-DgA2jD7L.js",
     "revision": null
   }, {
     "url": "assets/aistudio/yfTZrz5kgBJzML9teQMFlHSQ3K0CQnSIz97TcRbL58EoMG_aWCABjcqvIKhOHg8kDRaRTQpCKNFEW4g-lA63hsGpJGmMNxYvjZHKcuihrLISDk4k7YxHCOObBqRnZlTbqs3bExO0dJCSZVz8Ym2mH89VIRFK7sjbPzSvZK-vzbIj1HO7m2hTNTZZl5gEnDJb-3_f65a9ec9.jpeg",

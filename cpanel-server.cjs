@@ -78255,6 +78255,7 @@ function normalizeRestoredCourse(raw) {
     relayEnforceSequential: raw.relayEnforceSequential !== void 0 ? Boolean(raw.relayEnforceSequential) : true,
     relayDnfScoringMode: raw.relayDnfScoringMode === RelayDnfScoringMode.ZERO ? RelayDnfScoringMode.ZERO : RelayDnfScoringMode.PARTIAL_WITH_PENALTY,
     relayDnfPenaltyPoints: raw.relayDnfPenaltyPoints !== void 0 ? Math.max(0, Number(raw.relayDnfPenaltyPoints) || 0) : 0,
+    relayAllowDuplicateCheckpoints: raw.relayAllowDuplicateCheckpoints !== void 0 ? Boolean(raw.relayAllowDuplicateCheckpoints) : true,
     setupQrCode: raw.setupQrCode && !raw.setupQrCode.includes("HIDDEN") ? raw.setupQrCode : `BARAKA:SETUP:${courseId}`,
     startQrCode: raw.startQrCode && !raw.startQrCode.includes("HIDDEN") ? raw.startQrCode : `BARAKA:START:${courseId}`,
     finishQrCode: raw.finishQrCode && !raw.finishQrCode.includes("HIDDEN") ? raw.finishQrCode : `BARAKA:FINISH:${courseId}`,
@@ -79074,7 +79075,7 @@ function checkRelayStartLock(session, course) {
     (s) => s.courseId === course.id && s.relayParentTeamKey === session.relayParentTeamKey && s.relayLegIndex === prevLegIndex
   );
   const prevCompleted = prevLegSessions.some(
-    (s) => s.status === SessionStatus.FINISHED || Boolean(s.relayOverrideUnlocked)
+    (s) => s.status === SessionStatus.FINISHED
   );
   if (prevCompleted) {
     return { locked: false };
@@ -79112,6 +79113,38 @@ function buildRelayTeamStatus(session, course) {
       isMe: picked?.id === session.id
     };
   });
+  const parentGroups = /* @__PURE__ */ new Map();
+  for (const s of db.sessions) {
+    if (s.courseId !== course.id || !s.relayParentTeamKey) continue;
+    if (!parentGroups.has(s.relayParentTeamKey)) {
+      parentGroups.set(s.relayParentTeamKey, {
+        parentTeamKey: s.relayParentTeamKey,
+        parentTeamName: s.relayParentTeamName || s.relayParentTeamKey,
+        sessions: []
+      });
+    }
+    parentGroups.get(s.relayParentTeamKey).sessions.push(s);
+  }
+  const existingParentTeams = Array.from(parentGroups.values()).map((grp) => {
+    const takenLegs = Array.from({ length: subTeamCount }, (_, idx) => {
+      const legNum = idx + 1;
+      const legSessions = grp.sessions.filter((s) => s.relayLegIndex === legNum);
+      const picked = legSessions.find((s) => s.status === SessionStatus.FINISHED && !s.isDnf) || legSessions.find((s) => s.status === SessionStatus.ACTIVE) || legSessions[legSessions.length - 1];
+      const part = picked ? partMap.get(picked.participantId) : void 0;
+      return {
+        legIndex: legNum,
+        participantTeamName: part?.teamName || part?.name || null,
+        status: picked?.status || null,
+        isDnf: Boolean(picked?.isDnf),
+        isMe: picked?.id === session.id
+      };
+    });
+    return {
+      parentTeamKey: grp.parentTeamKey,
+      parentTeamName: grp.parentTeamName,
+      takenLegs
+    };
+  });
   return {
     isRelayLocked: lockCheck.locked,
     lockReason: lockCheck.reason || null,
@@ -79119,7 +79152,8 @@ function buildRelayTeamStatus(session, course) {
     parentTeamName: session.relayParentTeamName || null,
     legIndex: session.relayLegIndex || null,
     subTeamCount,
-    legs
+    legs,
+    existingParentTeams
   };
 }
 function recalculateSessionScore(session, course) {
@@ -79555,13 +79589,22 @@ function processSingleReport(payload, authenticatedParticipantId) {
       return { report: rejected, session, isDuplicate: false };
     }
     if (session.status !== SessionStatus.FINISHED) {
+      const startMs = session.startedAt ? Date.parse(session.startedAt) : 0;
+      const latestCpMs = db.reports.filter(
+        (r) => r.sessionId === session.id && r.syncStatus === SyncStatus.ACCEPTED_SERVER
+      ).reduce((maxMs, r) => {
+        const t = Date.parse(r.measuredAt);
+        return !Number.isNaN(t) && t > maxMs ? t : maxMs;
+      }, startMs);
+      const candidateFinishMs = Date.parse(safeMeasuredAt);
+      const effectiveFinishIso = !Number.isNaN(candidateFinishMs) && candidateFinishMs >= latestCpMs ? safeMeasuredAt : Date.parse(serverNow) >= latestCpMs ? serverNow : new Date(latestCpMs + 1e3).toISOString();
       session.status = SessionStatus.FINISHED;
-      session.finishedAt = safeMeasuredAt;
+      session.finishedAt = effectiveFinishIso;
       session.finishedReceivedAt = serverNow;
       if (session.startedAt) {
         const diffSec = Math.max(
           0,
-          Math.round((Date.parse(safeMeasuredAt) - Date.parse(session.startedAt)) / 1e3)
+          Math.round((Date.parse(effectiveFinishIso) - Date.parse(session.startedAt)) / 1e3)
         );
         session.durationSeconds = diffSec;
       }
@@ -80072,6 +80115,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       attemptNumber: s.attemptNumber || 1,
       status: s.status,
       checkpointsCompleted: (s.validatedCheckpointIds || []).length,
+      validatedCheckpointIds: s.validatedCheckpointIds || [],
       totalCheckpoints: (course.checkpoints || []).length,
       grossScore: s.grossScore || 0,
       overtimeMinutes: s.overtimeMinutes || 0,
@@ -80109,6 +80153,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
   }));
   const isRelay = course.raceMode === CourseRaceMode.RELAY;
   const subTeamCount = Math.max(2, Number(course.relaySubTeamCount) || 3);
+  const allowDuplicateCps = course.relayAllowDuplicateCheckpoints !== false;
   let relayTeamLeaderboard = [];
   if (isRelay) {
     const groupedByParent = /* @__PURE__ */ new Map();
@@ -80136,6 +80181,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
           status: picked?.status || null,
           isDnf: Boolean(picked?.isDnf),
           checkpointsCompleted: picked?.checkpointsCompleted || 0,
+          validatedCheckpointIds: picked?.validatedCheckpointIds || [],
           totalScore: picked?.totalScore || 0,
           grossScore: picked?.grossScore || 0,
           penaltyPoints: picked?.penaltyPoints || 0,
@@ -80143,9 +80189,31 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
           relayOverrideUnlocked: Boolean(picked?.relayOverrideUnlocked)
         };
       });
-      const totalScore = legs.reduce((sum, l) => sum + (l.totalScore || 0), 0);
-      const grossScore = legs.reduce((sum, l) => sum + (l.grossScore || 0), 0);
+      let grossScore = legs.reduce((sum, l) => sum + (l.grossScore || 0), 0);
       const penaltyPoints = legs.reduce((sum, l) => sum + (l.penaltyPoints || 0), 0);
+      let totalScore = legs.reduce((sum, l) => sum + (l.totalScore || 0), 0);
+      let totalCheckpointsCompleted = legs.reduce((sum, l) => sum + (l.checkpointsCompleted || 0), 0);
+      if (!allowDuplicateCps) {
+        const uniqueCpSet = /* @__PURE__ */ new Set();
+        for (const l of legs) {
+          if (l.isDnf && course.relayDnfScoringMode === RelayDnfScoringMode.ZERO) continue;
+          for (const cpId of l.validatedCheckpointIds || []) {
+            uniqueCpSet.add(cpId);
+          }
+        }
+        totalCheckpointsCompleted = uniqueCpSet.size;
+        if (course.scoringEnabled) {
+          grossScore = Array.from(uniqueCpSet).reduce((sum, cpId) => {
+            const cp = (course.checkpoints || []).find((c) => c.id === cpId);
+            return sum + (cp ? Number(cp.points) || 0 : 0);
+          }, 0);
+          const nonZeroPenalties = legs.reduce((sum, l) => {
+            if (l.isDnf && course.relayDnfScoringMode === RelayDnfScoringMode.ZERO) return sum;
+            return sum + (l.penaltyPoints || 0);
+          }, 0);
+          totalScore = Math.max(0, grossScore - nonZeroPenalties);
+        }
+      }
       const totalDurationSeconds = legs.reduce(
         (sum, l) => sum + (typeof l.durationSeconds === "number" ? l.durationSeconds : 0),
         0
@@ -80154,7 +80222,6 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       const cleanFinishedLegsCount = legs.filter((l) => l.status === "FINISHED" && !l.isDnf).length;
       const dnfLegsCount = legs.filter((l) => l.status === "FINISHED" && l.isDnf).length;
       const activeLegsCount = legs.filter((l) => l.status === "ACTIVE").length;
-      const totalCheckpointsCompleted = legs.reduce((sum, l) => sum + (l.checkpointsCompleted || 0), 0);
       return {
         parentTeamKey,
         parentTeamName: group.parentTeamName,
@@ -80199,7 +80266,8 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       relaySubTeamCount: subTeamCount,
       relayEnforceSequential: course.relayEnforceSequential !== false,
       relayDnfScoringMode: course.relayDnfScoringMode || RelayDnfScoringMode.ZERO,
-      relayDnfPenaltyPoints: course.relayDnfPenaltyPoints || 0
+      relayDnfPenaltyPoints: course.relayDnfPenaltyPoints || 0,
+      relayAllowDuplicateCheckpoints: allowDuplicateCps
     },
     totalParticipants: rankedLeaderboard.length,
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -80879,6 +80947,7 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
     relayEnforceSequential,
     relayDnfScoringMode,
     relayDnfPenaltyPoints,
+    relayAllowDuplicateCheckpoints,
     startLocation,
     finishLocation
   } = req.body;
@@ -80947,6 +81016,7 @@ app.post("/api/organizer/courses", requireOrganizer, (req, res) => {
     relayEnforceSequential: relayEnforceSequential !== void 0 ? Boolean(relayEnforceSequential) : true,
     relayDnfScoringMode: parsedRelayDnfMode,
     relayDnfPenaltyPoints: parsedRelayDnfPenalty,
+    relayAllowDuplicateCheckpoints: relayAllowDuplicateCheckpoints !== void 0 ? Boolean(relayAllowDuplicateCheckpoints) : true,
     startLocation: startLocation && typeof startLocation.latitude === "number" && typeof startLocation.longitude === "number" ? startLocation : void 0,
     finishLocation: finishLocation && typeof finishLocation.latitude === "number" && typeof finishLocation.longitude === "number" ? finishLocation : void 0,
     setupQrCode: `BARAKA:SETUP:${courseId}`,
@@ -80991,6 +81061,7 @@ app.put("/api/organizer/courses/:courseId", requireOrganizer, (req, res) => {
     relayEnforceSequential,
     relayDnfScoringMode,
     relayDnfPenaltyPoints,
+    relayAllowDuplicateCheckpoints,
     startLocation,
     finishLocation
   } = req.body;
@@ -81039,6 +81110,9 @@ app.put("/api/organizer/courses/:courseId", requireOrganizer, (req, res) => {
       0,
       Math.round(Number(relayDnfPenaltyPoints) || 0)
     );
+  }
+  if (relayAllowDuplicateCheckpoints !== void 0) {
+    course.relayAllowDuplicateCheckpoints = Boolean(relayAllowDuplicateCheckpoints);
   }
   if (startLocation !== void 0) {
     course.startLocation = startLocation && typeof startLocation.latitude === "number" && typeof startLocation.longitude === "number" ? startLocation : void 0;

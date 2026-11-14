@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import { Copy, Download, FileText, Printer, RefreshCw } from 'lucide-react';
-import { Course, ValidationMethod } from '../../types';
+import {
+  Course,
+  CourseRaceMode,
+  RelayDnfScoringMode,
+  ValidationMethod,
+} from '../../types';
 
 export interface PrintableQrItem {
   id: string;
@@ -724,13 +729,32 @@ export function CourseInfoSheetModal({
       ? 'Tanpa Radius GPS'
       : `${course.defaultGpsRadiusMeters} Meter`;
 
-  // Paginasi tabel jika jumlah CP sangat banyak (Halaman 1 maks 20 baris karena ada kotak spesifikasi di atas, halaman berikutnya 28 baris)
+  const isRelayCourse = course.raceMode === CourseRaceMode.RELAY;
+  const raceModeText = isRelayCourse
+    ? `Mode Relay (${course.relaySubTeamCount || 3} Sub-Team • ${
+        course.relayEnforceSequential !== false ? 'Giliran Terkunci' : 'Giliran Bebas'
+      })`
+    : 'Mode Lomba Biasa (Individu / Tim Tunggal)';
+
+  const relayRuleText = isRelayCourse
+    ? `${
+        course.relayDnfScoringMode === RelayDnfScoringMode.PARTIAL_WITH_PENALTY
+          ? `DNF: Poin CP Tetap Dihitung (-${course.relayDnfPenaltyPoints || 0} Poin)`
+          : 'DNF: 0 Poin (Hangus)'
+      } • ${
+        course.relayAllowDuplicateCheckpoints === false
+          ? 'CP Unik Tim Induk'
+          : 'Akumulasi CP Penuh'
+      }`
+    : 'Standar Orienteering';
+
+  // Paginasi tabel jika jumlah CP sangat banyak (Halaman 1 maks 18 baris karena ada kotak spesifikasi di atas, halaman berikutnya 28 baris)
   const pages = useMemo(() => {
     if (sortedCheckpoints.length === 0) {
       return [[]];
     }
     const result: typeof sortedCheckpoints[] = [];
-    const firstPageMax = 20;
+    const firstPageMax = 18;
     const nextPageMax = 28;
 
     result.push(sortedCheckpoints.slice(0, firstPageMax));
@@ -797,7 +821,7 @@ export function CourseInfoSheetModal({
 
     // Kotak Spesifikasi Course (Ditampilkan penuh di Halaman 1, atau ringkas di halaman lanjutan)
     if (pageIndex === 0) {
-      const boxH = 220;
+      const boxH = 288;
       ctx.fillStyle = '#f8fafc';
       ctx.strokeStyle = '#94a3b8';
       ctx.lineWidth = 1.5;
@@ -829,10 +853,18 @@ export function CourseInfoSheetModal({
           label: 'RADIUS GPS',
           value: gpsRadiusText,
         },
+        {
+          label: 'KONSEP / MODE LOMBA',
+          value: raceModeText,
+        },
+        {
+          label: 'ATURAN SKOR RELAY / DNF',
+          value: relayRuleText,
+        },
       ];
 
       const colW = contentW / 2;
-      const rowH = boxH / 3;
+      const rowH = boxH / 4;
 
       specs.forEach((spec, idx) => {
         const col = idx % 2;
@@ -864,8 +896,8 @@ export function CourseInfoSheetModal({
         ctx.fillText(spec.label, cellX + 18, cellY + 26);
 
         ctx.fillStyle = '#0f172a';
-        ctx.font = 'bold 18px sans-serif';
-        ctx.fillText(spec.value.slice(0, 48), cellX + 18, cellY + 52);
+        ctx.font = 'bold 17px sans-serif';
+        ctx.fillText(spec.value.slice(0, 52), cellX + 18, cellY + 52);
       });
 
       cursorY += boxH + 32;
@@ -1223,13 +1255,29 @@ export function CourseInfoSheetModal({
                           {durationText}
                         </div>
                       </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          4. Konsep / Mode Lomba
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          <span
+                            className={`inline-block rounded px-2 py-0.5 text-xs font-bold ${
+                              isRelayCourse
+                                ? 'bg-purple-100 text-purple-900 border border-purple-300'
+                                : 'bg-slate-200 text-slate-800 border border-slate-300'
+                            }`}
+                          >
+                            {raceModeText}
+                          </span>
+                        </div>
+                      </div>
                     </div>
 
                     {/* Kolom Kanan */}
                     <div className="divide-y divide-slate-200">
                       <div className="p-3.5">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                          4. Metode Validasi Pos
+                          5. Metode Validasi Pos
                         </div>
                         <div className="text-sm font-extrabold text-slate-900 mt-0.5">
                           {validationText}
@@ -1237,7 +1285,7 @@ export function CourseInfoSheetModal({
                       </div>
                       <div className="p-3.5">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                          5. Info Penalti Point
+                          6. Info Penalti Point
                         </div>
                         <div
                           className={`text-sm font-extrabold mt-0.5 ${
@@ -1249,10 +1297,18 @@ export function CourseInfoSheetModal({
                       </div>
                       <div className="p-3.5">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                          6. Radius GPS
+                          7. Radius GPS
                         </div>
                         <div className="text-sm font-extrabold text-slate-900 mt-0.5">
                           {gpsRadiusText}
+                        </div>
+                      </div>
+                      <div className="p-3.5">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          8. Aturan Skor Relay / DNF
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                          {relayRuleText}
                         </div>
                       </div>
                     </div>

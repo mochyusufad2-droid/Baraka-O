@@ -111,6 +111,7 @@ export interface Course {
   relayEnforceSequential?: boolean;       // Kunci urutan estafet: Sub-Team k menunggu k-1 Finish/DNF (default true)
   relayDnfScoringMode?: RelayDnfScoringMode; // Aturan skor sub-team yang DNF di mode RELAY
   relayDnfPenaltyPoints?: number;         // Penalti poin tambahan per sub-team DNF (untuk mode PARTIAL_WITH_PENALTY)
+  relayAllowDuplicateCheckpoints?: boolean; // True = tiap sub-team boleh ambil CP yang sama & poin dijumlahkan penuh; False = CP yang sama hanya dihitung 1x untuk Tim Induk (default true)
   startLocation?: GeoPointLocation;       // Titik koordinat Start di peta (Segitiga 🔺)
   finishLocation?: GeoPointLocation;      // Titik koordinat Finish di peta (Lingkaran Ganda ◎)
   setupQrCode: string;                    // Payload Setup QR untuk Load Course
