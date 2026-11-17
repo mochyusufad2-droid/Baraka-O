@@ -79288,8 +79288,29 @@ function processSingleReport(payload, authenticatedParticipantId) {
     saveDb(db);
     return { report: rejected, session, isDuplicate: false };
   }
-  const measuredTimeMs = Date.parse(payload.measuredAt);
-  const safeMeasuredAt = Number.isNaN(measuredTimeMs) ? serverNow : payload.measuredAt;
+  const rawMeasuredTimeMs = Date.parse(payload.measuredAt);
+  let safeMeasuredAt = Number.isNaN(rawMeasuredTimeMs) ? serverNow : payload.measuredAt;
+  let serverDetectedClockTamper = Boolean(payload.clockTamperCorrected);
+  if ((payload.reportType === "CHECKPOINT" || payload.reportType === "FINISH") && session.startedAt) {
+    const startMs = Date.parse(session.startedAt);
+    if (!Number.isNaN(startMs)) {
+      const latestAcceptedMs = db.reports.filter(
+        (r) => r.sessionId === session.id && r.syncStatus === SyncStatus.ACCEPTED_SERVER
+      ).reduce((maxMs, r) => {
+        const t = Date.parse(r.measuredAt);
+        return !Number.isNaN(t) && t > maxMs ? t : maxMs;
+      }, startMs);
+      const monotonicMs = typeof payload.elapsedSecondsFromStart === "number" && !Number.isNaN(payload.elapsedSecondsFromStart) && payload.elapsedSecondsFromStart >= 0 ? startMs + Math.round(payload.elapsedSecondsFromStart * 1e3) : 0;
+      const minValidEventMs = Math.max(startMs, latestAcceptedMs, monotonicMs);
+      const currentCandidateMs = Date.parse(safeMeasuredAt);
+      if (Number.isNaN(currentCandidateMs) || currentCandidateMs < minValidEventMs - 2e3) {
+        safeMeasuredAt = new Date(
+          Math.max(minValidEventMs, latestAcceptedMs + 1e3)
+        ).toISOString();
+        serverDetectedClockTamper = true;
+      }
+    }
+  }
   if (isSetupQrPayload(payload.qrPayloadScanned, course)) {
     const setupErrorMsg = session.status === SessionStatus.NOT_STARTED ? "Anda sudah scan Setup, silakan scan Start." : "Ditolak: Silakan scan Check Point atau Finish.";
     const rejectedSetup = {
@@ -79533,6 +79554,7 @@ function processSingleReport(payload, authenticatedParticipantId) {
     const acceptedCp = {
       ...payload,
       measuredAt: safeMeasuredAt,
+      clockTamperCorrected: serverDetectedClockTamper || void 0,
       receivedAt: serverNow,
       syncStatus: SyncStatus.ACCEPTED_SERVER,
       serverVerified: true,
@@ -79602,11 +79624,12 @@ function processSingleReport(payload, authenticatedParticipantId) {
       session.finishedAt = effectiveFinishIso;
       session.finishedReceivedAt = serverNow;
       if (session.startedAt) {
-        const diffSec = Math.max(
+        const wallDiffSec = Math.max(
           0,
           Math.round((Date.parse(effectiveFinishIso) - Date.parse(session.startedAt)) / 1e3)
         );
-        session.durationSeconds = diffSec;
+        const monotonicSec = typeof payload.elapsedSecondsFromStart === "number" && !Number.isNaN(payload.elapsedSecondsFromStart) && payload.elapsedSecondsFromStart > 0 ? Math.round(payload.elapsedSecondsFromStart) : 0;
+        session.durationSeconds = Math.max(wallDiffSec, monotonicSec);
       }
       recalculateSessionScore(session, course);
     }
@@ -79626,6 +79649,7 @@ function processSingleReport(payload, authenticatedParticipantId) {
     const acceptedFinish = {
       ...payload,
       measuredAt: safeMeasuredAt,
+      clockTamperCorrected: serverDetectedClockTamper || void 0,
       receivedAt: serverNow,
       syncStatus: SyncStatus.ACCEPTED_SERVER,
       serverVerified: true,
@@ -80107,6 +80131,48 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
   const partMap = new Map((db.participants || []).map((p) => [p.id, p]));
   const leaderboard = sessions.map((s) => {
     const part = partMap.get(s.participantId);
+    const startMs = s.startedAt ? Date.parse(s.startedAt) : void 0;
+    const validStartMs = startMs !== void 0 && !Number.isNaN(startMs) ? startMs : void 0;
+    const finishMs = s.finishedAt ? Date.parse(s.finishedAt) : void 0;
+    const validFinishMs = finishMs !== void 0 && !Number.isNaN(finishMs) ? finishMs : void 0;
+    const cpReports = (db.reports || []).filter(
+      (r) => r.sessionId === s.id && r.reportType === "CHECKPOINT" && r.syncStatus === SyncStatus.ACCEPTED_SERVER
+    ).sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+    const seenCpIds = /* @__PURE__ */ new Set();
+    const splits = [];
+    let prevMs = validStartMs;
+    for (const rep of cpReports) {
+      if (seenCpIds.has(rep.checkpointId)) continue;
+      seenCpIds.add(rep.checkpointId);
+      const cp = (course.checkpoints || []).find((c) => c.id === rep.checkpointId);
+      const repMs = Date.parse(rep.measuredAt);
+      const validRepMs = !Number.isNaN(repMs) ? repMs : void 0;
+      const cumulativeSeconds = validStartMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1e3)) : void 0;
+      const legSplitSeconds = prevMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - prevMs) / 1e3)) : cumulativeSeconds;
+      if (validRepMs !== void 0) prevMs = validRepMs;
+      splits.push({
+        stepIndex: splits.length + 1,
+        checkpointId: rep.checkpointId,
+        shortCode: cp?.code || `#${splits.length + 1}`,
+        points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
+        cumulativeSeconds,
+        legSplitSeconds
+      });
+    }
+    for (const cpId of s.validatedCheckpointIds || []) {
+      if (seenCpIds.has(cpId)) continue;
+      seenCpIds.add(cpId);
+      const cp = (course.checkpoints || []).find((c) => c.id === cpId);
+      splits.push({
+        stepIndex: splits.length + 1,
+        checkpointId: cpId,
+        shortCode: cp?.code || `#${splits.length + 1}`,
+        points: cp ? Number(cp.points) || 0 : 0
+      });
+    }
+    const finishCumulativeSeconds = s.durationSeconds ?? (validStartMs !== void 0 && validFinishMs !== void 0 ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1e3)) : void 0);
+    const lastSplitCumSec = splits.length > 0 ? splits[splits.length - 1].cumulativeSeconds : 0;
+    const finishSplitSeconds = finishCumulativeSeconds !== void 0 && lastSplitCumSec !== void 0 ? Math.max(0, finishCumulativeSeconds - lastSplitCumSec) : void 0;
     return {
       sessionId: s.id,
       teamName: part?.teamName || part?.name || "Tim Peserta",
@@ -80122,6 +80188,9 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       penaltyPoints: s.penaltyPoints || 0,
       totalScore: s.totalScore || 0,
       durationSeconds: s.durationSeconds,
+      splits,
+      finishCumulativeSeconds,
+      finishSplitSeconds,
       isDnf: Boolean(s.isDnf),
       dnfReason: s.dnfReason,
       startedAt: s.startedAt,
@@ -81187,6 +81256,84 @@ app.post("/api/organizer/relay/override-session", requireOrganizer, (req, res) =
   res.json({
     message: action === "UNLOCK_LEG" ? "Kunci giliran Sub-Team berhasil dibuka manual (Override Panitia)." : action === "FORCE_FINISH" ? "Sesi Sub-Team berhasil diselesaikan (Force Finish) dan giliran berikutnya terbuka." : "Sesi Sub-Team ditandai DNF (Force DNF) dan giliran berikutnya terbuka.",
     session
+  });
+});
+app.post("/api/organizer/courses/:courseId/mass-start", requireOrganizer, (req, res) => {
+  const auth = req.organizerAuth;
+  const { courseId } = req.params;
+  const { includeAllRelayLegs } = req.body;
+  const course = db.courses.find((c) => c.id === courseId);
+  if (!course) {
+    res.status(404).json({ error: "Course tidak ditemukan." });
+    return;
+  }
+  if (!canAccessCourse(course, auth)) {
+    res.status(403).json({
+      error: "Anda tidak memiliki akses untuk memicu Mass Start pada Course ini."
+    });
+    return;
+  }
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const isSequentialRelay = course.raceMode === CourseRaceMode.RELAY && course.relayEnforceSequential !== false && !includeAllRelayLegs;
+  const waitingSessions = (db.sessions || []).filter((s) => {
+    if (s.courseId !== course.id || s.status !== SessionStatus.NOT_STARTED || s.isDnf) {
+      return false;
+    }
+    if (isSequentialRelay) {
+      return !s.relayLegIndex || s.relayLegIndex === 1;
+    }
+    return true;
+  });
+  if (waitingSessions.length === 0) {
+    res.status(400).json({
+      error: isSequentialRelay ? "Tidak ada Sub-Team #1 berstatus Siap Start (NOT_STARTED) pada Course Relay ini." : "Tidak ada tim berstatus Siap Start (NOT_STARTED) yang menunggu pelepasan pada Course ini."
+    });
+    return;
+  }
+  const startedSessionIds = [];
+  for (const sess of waitingSessions) {
+    sess.status = SessionStatus.ACTIVE;
+    sess.startedAt = nowIso;
+    sess.startedReceivedAt = nowIso;
+    if (course.startLocation) {
+      sess.lastLocation = {
+        participantId: sess.participantId,
+        sessionId: sess.id,
+        latitude: course.startLocation.latitude,
+        longitude: course.startLocation.longitude,
+        accuracyMeters: 15,
+        measuredAt: nowIso,
+        receivedAt: nowIso
+      };
+    }
+    const massStartReport = {
+      reportId: `rep_mass_start_${sess.id}_${Date.now()}`,
+      courseId: course.id,
+      sessionId: sess.id,
+      participantId: sess.participantId,
+      checkpointId: "START",
+      reportType: "START",
+      validationUsed: "QR",
+      qrPayloadScanned: "MASS_START_ORGANIZER",
+      latitude: course.startLocation?.latitude,
+      longitude: course.startLocation?.longitude,
+      accuracyMeters: 15,
+      measuredAt: nowIso,
+      receivedAt: nowIso,
+      syncStatus: SyncStatus.ACCEPTED_SERVER,
+      serverVerified: true,
+      pointsAwarded: 0
+    };
+    db.reports.push(massStartReport);
+    startedSessionIds.push(sess.id);
+  }
+  saveDb(db);
+  void pushDbToCloudNow(db);
+  res.json({
+    message: `Mass Start berhasil! ${startedSessionIds.length} tim resmi dilepas serentak pada ${new Date(nowIso).toLocaleTimeString("id-ID")}.`,
+    startedCount: startedSessionIds.length,
+    startedAt: nowIso,
+    startedSessionIds
   });
 });
 app.post("/api/organizer/courses/sync-backup", requireOrganizer, (req, res) => {

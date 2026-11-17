@@ -19,6 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  CheckpointReport,
   Course,
   CourseRaceMode,
   ORIENTEERING_AGE_GROUPS,
@@ -27,12 +28,14 @@ import {
   ParticipantSession,
   RelayDnfScoringMode,
   SessionStatus,
+  SyncStatus,
 } from '../../types';
 
 interface SpectatorLiveLeaderboardModalProps {
   courses: Course[];
   sessions: ParticipantSession[];
   participants: ParticipantPublic[];
+  reports?: CheckpointReport[];
   initialCourseId?: string;
   onClose: () => void;
 }
@@ -109,6 +112,7 @@ export function SpectatorLiveLeaderboardModal({
   courses,
   sessions,
   participants,
+  reports = [],
   initialCourseId,
   onClose,
 }: SpectatorLiveLeaderboardModalProps) {
@@ -117,7 +121,7 @@ export function SpectatorLiveLeaderboardModal({
   );
   const [genderFilter, setGenderFilter] = useState<string>('ALL');
   const [ageGroupFilter, setAgeGroupFilter] = useState<string>('ALL');
-  const [showSplits, setShowSplits] = useState<boolean>(false);
+  const [showSplits, setShowSplits] = useState<boolean>(true);
   const [relayViewMode, setRelayViewMode] = useState<'ACCUMULATED' | 'SUBTEAMS'>('ACCUMULATED');
   const [autoScroll, setAutoScroll] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
@@ -293,18 +297,78 @@ export function SpectatorLiveLeaderboardModal({
         }
       }
 
-      // Simple splits based on validatedCheckpointIds
-      const splits: SplitStep[] = (sess.validatedCheckpointIds || []).map(
-        (cpId, idx) => {
-          const cp = c?.checkpoints.find((chk) => chk.id === cpId);
-          return {
-            stepIndex: idx + 1,
-            checkpointId: cpId,
-            shortCode: cp?.code || `#${idx + 1}`,
-            points: cp ? Number(cp.points) || 0 : 0,
-          };
-        }
+      // Hitung Waktu Kumulatif & Split Antar-Pos dari riwayat laporan
+      const sessionReports = reports.filter(
+        (r) =>
+          r.sessionId === sess.id &&
+          r.reportType === 'CHECKPOINT' &&
+          r.syncStatus === SyncStatus.ACCEPTED_SERVER
       );
+      const cpTimeMap = new Map<string, number>();
+      for (const rep of sessionReports) {
+        const tMs = Date.parse(rep.measuredAt);
+        if (!Number.isNaN(tMs)) {
+          const prev = cpTimeMap.get(rep.checkpointId);
+          if (prev === undefined || tMs < prev) {
+            cpTimeMap.set(rep.checkpointId, tMs);
+          }
+        }
+      }
+
+      const visitedEntries = (sess.validatedCheckpointIds || [])
+        .map((cpId) => {
+          const cp = c?.checkpoints.find((chk) => chk.id === cpId);
+          if (!cp) return null;
+          return { cp, hitMs: cpTimeMap.get(cpId) };
+        })
+        .filter(
+          (item): item is { cp: NonNullable<typeof c>['checkpoints'][number]; hitMs: number | undefined } =>
+            item !== null
+        )
+        .sort((a, b) => {
+          if (a.hitMs !== undefined && b.hitMs !== undefined) {
+            return a.hitMs - b.hitMs;
+          }
+          if (a.hitMs !== undefined) return -1;
+          if (b.hitMs !== undefined) return 1;
+          return a.cp.orderIndex - b.cp.orderIndex;
+        });
+
+      let prevEventMs = startMs && !Number.isNaN(startMs) ? startMs : undefined;
+      const splits: SplitStep[] = visitedEntries.map((entry, idx) => {
+        const { cp, hitMs } = entry;
+        const cumulativeSeconds =
+          startMs !== undefined && hitMs !== undefined && hitMs >= startMs
+            ? Math.round((hitMs - startMs) / 1000)
+            : undefined;
+        const legSplitSeconds =
+          prevEventMs !== undefined &&
+          hitMs !== undefined &&
+          hitMs >= prevEventMs
+            ? Math.round((hitMs - prevEventMs) / 1000)
+            : undefined;
+        if (hitMs !== undefined) {
+          prevEventMs = hitMs;
+        }
+        return {
+          stepIndex: idx + 1,
+          checkpointId: cp.id,
+          shortCode: cp.code || `#${idx + 1}`,
+          points: cp ? Number(cp.points) || 0 : 0,
+          cumulativeSeconds,
+          legSplitSeconds,
+        };
+      });
+
+      const finishCumulativeSeconds =
+        sess.status === SessionStatus.FINISHED ? liveDurationSec : undefined;
+      const finishSplitSeconds =
+        sess.status === SessionStatus.FINISHED &&
+        finishMs !== undefined &&
+        prevEventMs !== undefined &&
+        finishMs >= prevEventMs
+          ? Math.round((finishMs - prevEventMs) / 1000)
+          : undefined;
 
       return {
         sessionId: sess.id,
@@ -327,7 +391,8 @@ export function SpectatorLiveLeaderboardModal({
         totalScore: netScore,
         durationSeconds: liveDurationSec,
         splits,
-        finishCumulativeSeconds: liveDurationSec,
+        finishCumulativeSeconds,
+        finishSplitSeconds,
         isDnf: sess.isDnf,
         dnfReason: sess.dnfReason,
         relayParentTeamName: sess.relayParentTeamName,

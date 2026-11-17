@@ -4,10 +4,11 @@
  */
 
 import { useCallback, useState, useEffect } from 'react';
-import { Shield, Smartphone } from 'lucide-react';
+import { BookOpen, Shield, Smartphone } from 'lucide-react';
 import OrganizerDashboard from './components/organizer/OrganizerDashboard';
 import ParticipantView from './components/participant/ParticipantView';
 import PublicLiveLeaderboard from './components/public/PublicLiveLeaderboard';
+import { TutorialGuideModal } from './components/public/TutorialGuideModal';
 import { loadPersistedParticipantState } from './services/offlineQueue';
 import { UserRole } from './types';
 
@@ -54,6 +55,7 @@ export default function App() {
   );
   const [isParticipantInActiveCourse, setIsParticipantInActiveCourse] =
     useState<boolean>(false);
+  const [isTutorialGuideOpen, setIsTutorialGuideOpen] = useState<boolean>(false);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -127,15 +129,31 @@ export default function App() {
               </div>
             </div>
 
-            {/* Indikator Peran Aktif khusus Organizer */}
-            {authenticatedRole === UserRole.ORGANIZER && (
-              <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-300 shadow-sm">
-                <Shield className="h-3.5 w-3.5 text-amber-400" />
-                Dashboard Organizer
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsTutorialGuideOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 px-3 py-1.5 text-xs font-bold text-emerald-300 shadow-sm transition cursor-pointer"
+                title="Buka & Unduh Panduan Bergambar Peserta/Organizer (.md / PDF) + Prompt NotebookLM"
+              >
+                <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Panduan &amp; Download (.md)</span>
+              </button>
+
+              {/* Indikator Peran Aktif khusus Organizer */}
+              {authenticatedRole === UserRole.ORGANIZER && (
+                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 shadow-sm">
+                  <Shield className="h-3.5 w-3.5 text-amber-400" />
+                  Dashboard Organizer
+                </span>
+              )}
+            </div>
           </div>
         </header>
+      )}
+
+      {isTutorialGuideOpen && (
+        <TutorialGuideModal onClose={() => setIsTutorialGuideOpen(false)} />
       )}
 
       {/* KONTEN UTAMA */}

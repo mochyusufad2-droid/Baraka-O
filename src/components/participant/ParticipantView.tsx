@@ -673,8 +673,29 @@ export default function ParticipantView({
         return;
       }
       if (data.session) {
+        const incomingSession = data.session;
         setActiveSession((prev) => {
-          const next = mergeServerSessionSafely(prev, data.session!);
+          const wasNotStarted =
+            prev &&
+            prev.status === SessionStatus.NOT_STARTED &&
+            !hasLocalStartReport;
+          const next = mergeServerSessionSafely(prev, incomingSession);
+          if (
+            wasNotStarted &&
+            next.status === SessionStatus.ACTIVE &&
+            next.startedAt
+          ) {
+            triggerRunnerFeedback('success');
+            showRunnerToast(
+              'success',
+              '🚀 MASS START DIMULAI!',
+              'Panitia telah melepas waktu Start serentak. Semangat berlari!'
+            );
+            setFeedbackBanner({
+              type: 'success',
+              text: '🚀 Waktu lomba telah dimulai oleh Panitia (Mass Start)! Silakan langsung menuju Pos Checkpoint.',
+            });
+          }
           if (prev && JSON.stringify(prev) === JSON.stringify(next)) {
             return prev;
           }
@@ -691,7 +712,9 @@ export default function ParticipantView({
     isEffectivelyOnline,
     cameraActiveFor,
     simulatedOffline,
+    hasLocalStartReport,
     mergeServerSessionSafely,
+    showRunnerToast,
   ]);
 
   useEffect(() => {
@@ -1204,6 +1227,54 @@ export default function ParticipantView({
   }, [isSessionActivelyRunning, localReports]);
 
   // ==========================================================================
+  // PENGAMAN ANTI-MANIPULASI JAM HP (MONOTONIC CLOCK ANCHOR)
+  // ==========================================================================
+  const monotonicAnchorRef = useRef<{
+    sessionId: string;
+    startedWallMs: number;
+    startedPerfMs: number;
+    lastEventSafeMs: number;
+    lastEventPerfMs: number;
+  } | null>(null);
+
+  // Inisialisasi / sinkronkan jangkar waktu monotonik saat sesi mulai berjalan
+  useEffect(() => {
+    if (!activeSession) {
+      monotonicAnchorRef.current = null;
+      return;
+    }
+    const startIso =
+      activeSession.startedAt ||
+      localReports.find(
+        (r) =>
+          r.reportType === 'START' && r.syncStatus !== SyncStatus.REJECTED_SERVER
+      )?.measuredAt;
+
+    if (!startIso) return;
+    const startWallMs = Date.parse(startIso);
+    if (Number.isNaN(startWallMs)) return;
+
+    const nowPerf =
+      typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const nowWall = Date.now();
+
+    if (
+      !monotonicAnchorRef.current ||
+      monotonicAnchorRef.current.sessionId !== activeSession.id
+    ) {
+      // Hitung estimasi perfMs saat start berdasarkan selisih wall clock saat ini (minimal 0)
+      const initialElapsedMs = Math.max(0, nowWall - startWallMs);
+      monotonicAnchorRef.current = {
+        sessionId: activeSession.id,
+        startedWallMs: startWallMs,
+        startedPerfMs: nowPerf - initialElapsedMs,
+        lastEventSafeMs: startWallMs + initialElapsedMs,
+        lastEventPerfMs: nowPerf,
+      };
+    }
+  }, [activeSession?.id, activeSession?.startedAt, localReports]);
+
+  // ==========================================================================
   // FUNGSI INTI SIMPAN LAPORAN OFFLINE-FIRST & AUTO-PROSES HASIL SCAN KAMERA
   // ==========================================================================
 
@@ -1220,7 +1291,87 @@ export default function ParticipantView({
     }) => {
       if (!participant || !activeCourse || !activeSession || !token) return;
 
-      const measuredAt = new Date().toISOString();
+      const rawWallMs = Date.now();
+      const nowPerfMs =
+        typeof performance !== 'undefined' ? performance.now() : rawWallMs;
+
+      let safeEventMs = rawWallMs;
+      let elapsedSecondsFromStart: number | undefined = undefined;
+      let clockTamperCorrected = false;
+
+      if (params.reportType === 'START') {
+        monotonicAnchorRef.current = {
+          sessionId: activeSession.id,
+          startedWallMs: rawWallMs,
+          startedPerfMs: nowPerfMs,
+          lastEventSafeMs: rawWallMs,
+          lastEventPerfMs: nowPerfMs,
+        };
+        elapsedSecondsFromStart = 0;
+      } else {
+        const anchor = monotonicAnchorRef.current;
+        if (anchor && anchor.sessionId === activeSession.id) {
+          const monotonicElapsedMs = Math.max(
+            0,
+            nowPerfMs - anchor.startedPerfMs
+          );
+          const expectedWallMs = anchor.startedWallMs + monotonicElapsedMs;
+          const minMonotonicNextMs =
+            anchor.lastEventSafeMs +
+            Math.max(1000, nowPerfMs - anchor.lastEventPerfMs);
+
+          // Jika jam HP peserta dimundurkan/dimajukan > 3 detik dibanding detak silikon (performance.now),
+          // kunci ke waktu monotonik agar durasi lari tidak bisa dicurangi saat offline!
+          if (Math.abs(rawWallMs - expectedWallMs) > 3000) {
+            safeEventMs = Math.max(expectedWallMs, minMonotonicNextMs);
+            clockTamperCorrected = true;
+          } else if (rawWallMs <= anchor.lastEventSafeMs) {
+            safeEventMs = anchor.lastEventSafeMs + 1000;
+            clockTamperCorrected = true;
+          }
+
+          elapsedSecondsFromStart = Math.max(
+            1,
+            Math.round((safeEventMs - anchor.startedWallMs) / 1000)
+          );
+          anchor.lastEventSafeMs = safeEventMs;
+          anchor.lastEventPerfMs = nowPerfMs;
+        } else {
+          // Fallback jika halaman sempat di-refresh di tengah lomba: pastikan tidak pernah mundur dari laporan terakhir
+          const prevAcceptedTimes = localReports
+            .filter((r) => r.syncStatus !== SyncStatus.REJECTED_SERVER)
+            .map((r) => Date.parse(r.measuredAt))
+            .filter((ms) => !Number.isNaN(ms));
+          if (activeSession.startedAt) {
+            const stMs = Date.parse(activeSession.startedAt);
+            if (!Number.isNaN(stMs)) prevAcceptedTimes.push(stMs);
+          }
+          const maxPrevMs =
+            prevAcceptedTimes.length > 0 ? Math.max(...prevAcceptedTimes) : 0;
+          if (maxPrevMs > 0 && safeEventMs <= maxPrevMs) {
+            safeEventMs = maxPrevMs + 1000;
+            clockTamperCorrected = true;
+          }
+          const baseStartIso =
+            activeSession.startedAt ||
+            localReports.find(
+              (r) =>
+                r.reportType === 'START' &&
+                r.syncStatus !== SyncStatus.REJECTED_SERVER
+            )?.measuredAt;
+          if (baseStartIso) {
+            const baseStartMs = Date.parse(baseStartIso);
+            if (!Number.isNaN(baseStartMs)) {
+              elapsedSecondsFromStart = Math.max(
+                1,
+                Math.round((safeEventMs - baseStartMs) / 1000)
+              );
+            }
+          }
+        }
+      }
+
+      const measuredAt = new Date(safeEventMs).toISOString();
       const newReport: CheckpointReport = {
         reportId: createUniqueReportId(params.reportType.toLowerCase()),
         courseId: activeCourse.id,
@@ -1234,6 +1385,8 @@ export default function ParticipantView({
         longitude: params.longitude,
         accuracyMeters: params.accuracyMeters,
         measuredAt,
+        elapsedSecondsFromStart,
+        clockTamperCorrected,
         syncStatus: SyncStatus.SAVED_LOCAL,
         serverVerified: false,
       };
@@ -1385,6 +1538,7 @@ export default function ParticipantView({
       activeCourse,
       activeSession,
       token,
+      localReports,
       simulatedOffline,
       showRunnerToast,
       triggerSyncQueue,
@@ -2046,20 +2200,28 @@ export default function ParticipantView({
   // ==========================================================================
 
   const toggleCameraFlash = useCallback(async () => {
-    const stream = streamRef.current;
-    if (!stream) return;
-    const track = stream.getVideoTracks()[0];
-    if (!track) return;
-
     const nextFlash = !flashOn;
-    try {
-      await track.applyConstraints({
-        advanced: [{ torch: nextFlash } as MediaTrackConstraintSet],
-      });
-      setFlashOn(nextFlash);
-    } catch {
-      setFlashSupported(false);
+    const stream = streamRef.current;
+    const track = stream?.getVideoTracks()?.[0];
+
+    if (track) {
+      try {
+        await track.applyConstraints({
+          advanced: [{ torch: nextFlash } as MediaTrackConstraintSet],
+        });
+      } catch {
+        try {
+          await track.applyConstraints({
+            torch: nextFlash,
+          } as unknown as MediaTrackConstraints);
+        } catch {
+          // Jika LED hardware torch dibatasi browser (misal iOS Safari tertent),
+          // tetap aktifkan Screen Light Ring (cahaya putih terang di sekeliling kotak bidik)
+          // agar QR Code tetap terang dan terbaca di tempat gelap!
+        }
+      }
     }
+    setFlashOn(nextFlash);
   }, [flashOn]);
 
   // Simpan referensi handler QR ke dalam useRef agar useEffect kamera HANYA bergantung pada [cameraActiveFor]
@@ -2697,16 +2859,175 @@ export default function ParticipantView({
       return activeSession.durationSeconds;
     }
     if (!effectiveStartIso) return undefined;
-    const endMs = effectiveFinishIso ? Date.parse(effectiveFinishIso) : nowTick;
-    return Math.max(
-      0,
-      Math.floor((endMs - Date.parse(effectiveStartIso)) / 1000)
-    );
+    const startMs = Date.parse(effectiveStartIso);
+    if (Number.isNaN(startMs)) return undefined;
+
+    if (effectiveFinishIso) {
+      const finMs = Date.parse(effectiveFinishIso);
+      if (!Number.isNaN(finMs)) {
+        return Math.max(0, Math.floor((finMs - startMs) / 1000));
+      }
+    }
+
+    // Gunakan jangkar waktu monotonik agar jika jam HP dimundurkan saat lari, stopwatch tetap berjalan maju dengan jujur
+    const anchor = monotonicAnchorRef.current;
+    if (
+      anchor &&
+      activeSession &&
+      anchor.sessionId === activeSession.id &&
+      typeof performance !== 'undefined'
+    ) {
+      const monoSec = Math.floor(
+        Math.max(0, performance.now() - anchor.startedPerfMs) / 1000
+      );
+      const wallSec = Math.floor(Math.max(0, nowTick - startMs) / 1000);
+      return Math.max(monoSec, wallSec);
+    }
+
+    return Math.max(0, Math.floor((nowTick - startMs) / 1000));
   }, [
-    activeSession?.durationSeconds,
+    activeSession,
     effectiveStartIso,
     effectiveFinishIso,
     nowTick,
+  ]);
+
+  // Hitung rincian Split Time Antar-Pos (Waktu Kumulatif dari Start + Waktu Tempuh Leg Antar-Pos)
+  const participantSplitSummary = useMemo(() => {
+    if (!activeCourse || !activeSession || !effectiveStartIso) {
+      return {
+        byCheckpointId: new Map<
+          string,
+          {
+            orderVisited: number;
+            checkpoint: Checkpoint;
+            cumulativeSeconds: number;
+            legSplitSeconds: number;
+            measuredAt: string;
+            isFastestLeg: boolean;
+          }
+        >(),
+        orderedLegs: [] as Array<{
+          orderVisited: number;
+          checkpoint: Checkpoint;
+          cumulativeSeconds: number;
+          legSplitSeconds: number;
+          measuredAt: string;
+          isFastestLeg: boolean;
+        }>,
+        finishSplitSeconds: undefined as number | undefined,
+        finishCumulativeSeconds: undefined as number | undefined,
+      };
+    }
+
+    const startMs = Date.parse(effectiveStartIso);
+    if (Number.isNaN(startMs)) {
+      return {
+        byCheckpointId: new Map(),
+        orderedLegs: [],
+        finishSplitSeconds: undefined,
+        finishCumulativeSeconds: undefined,
+      };
+    }
+
+    // Kumpulkan laporan CHECKPOINT yang sah (tidak ditolak server), ambil yang pertama kali tercatat per pos
+    const cpFirstReportMap = new Map<string, CheckpointReport>();
+    const chronologicalReports = [...localReports]
+      .filter(
+        (r) =>
+          r.reportType === 'CHECKPOINT' &&
+          r.syncStatus !== SyncStatus.REJECTED_SERVER &&
+          r.checkpointId &&
+          r.checkpointId !== 'START' &&
+          r.checkpointId !== 'FINISH'
+      )
+      .sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+
+    for (const rep of chronologicalReports) {
+      if (!cpFirstReportMap.has(rep.checkpointId)) {
+        cpFirstReportMap.set(rep.checkpointId, rep);
+      }
+    }
+
+    const sortedVisited = Array.from(cpFirstReportMap.entries())
+      .map(([cpId, rep]) => {
+        const cp = activeCourse.checkpoints.find((c) => c.id === cpId);
+        return cp ? { cp, rep, ms: Date.parse(rep.measuredAt) } : null;
+      })
+      .filter(
+        (
+          item
+        ): item is { cp: Checkpoint; rep: CheckpointReport; ms: number } =>
+          item !== null && !Number.isNaN(item.ms)
+      )
+      .sort((a, b) => a.ms - b.ms);
+
+    let prevCumulativeSec = 0;
+    const rawLegs = sortedVisited.map((item, idx) => {
+      const cumSec =
+        item.rep.elapsedSecondsFromStart !== undefined &&
+        item.rep.elapsedSecondsFromStart > prevCumulativeSec
+          ? item.rep.elapsedSecondsFromStart
+          : Math.max(
+              prevCumulativeSec + 1,
+              Math.round((item.ms - startMs) / 1000)
+            );
+      const legSec = Math.max(1, cumSec - prevCumulativeSec);
+      prevCumulativeSec = cumSec;
+      return {
+        orderVisited: idx + 1,
+        checkpoint: item.cp,
+        cumulativeSeconds: cumSec,
+        legSplitSeconds: legSec,
+        measuredAt: item.rep.measuredAt,
+        isFastestLeg: false,
+      };
+    });
+
+    if (rawLegs.length > 1) {
+      const minLegSec = Math.min(...rawLegs.map((l) => l.legSplitSeconds));
+      const fastestIdx = rawLegs.findIndex(
+        (l) => l.legSplitSeconds === minLegSec
+      );
+      if (fastestIdx >= 0) {
+        rawLegs[fastestIdx].isFastestLeg = true;
+      }
+    }
+
+    const byCheckpointId = new Map<
+      string,
+      (typeof rawLegs)[number]
+    >();
+    for (const leg of rawLegs) {
+      byCheckpointId.set(leg.checkpoint.id, leg);
+    }
+
+    let finishCumulativeSeconds: number | undefined = undefined;
+    let finishSplitSeconds: number | undefined = undefined;
+    if (sessionMarkedFinishedLocallyOrServer) {
+      const totalSec =
+        activeSession.durationSeconds !== undefined
+          ? activeSession.durationSeconds
+          : liveStopwatchSeconds;
+      if (totalSec !== undefined && totalSec >= prevCumulativeSec) {
+        finishCumulativeSeconds = totalSec;
+        finishSplitSeconds = Math.max(0, totalSec - prevCumulativeSec);
+      }
+    }
+
+    return {
+      byCheckpointId,
+      orderedLegs: rawLegs,
+      finishSplitSeconds,
+      finishCumulativeSeconds,
+    };
+  }, [
+    activeCourse,
+    activeSession,
+    effectiveStartIso,
+    localReports,
+    sessionMarkedFinishedLocallyOrServer,
+    liveStopwatchSeconds,
   ]);
 
   // Hitung rincian Poin Kotor, Menit Terlambat (Overtime), Potongan Penalti, dan Skor Bersih
@@ -2811,16 +3132,19 @@ export default function ParticipantView({
                 ORIENT<span className="text-amber-400">RA</span>
               </span>
             </div>
-            <div className="flex items-center gap-5">
+            <div className="flex items-center gap-3">
               {flashSupported && (
                 <button
                   type="button"
                   onClick={toggleCameraFlash}
-                  className={`text-sm sm:text-base font-medium uppercase tracking-wider transition ${
-                    flashOn ? 'text-lime-400' : 'text-white hover:text-slate-200'
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs sm:text-sm font-extrabold uppercase tracking-wider transition cursor-pointer ${
+                    flashOn
+                      ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_15px_rgba(251,191,36,0.75)]'
+                      : 'border-white/25 bg-white/10 text-white hover:bg-white/20'
                   }`}
                 >
-                  {flashOn ? 'FLASH OFF' : 'FLASH ON'}
+                  <span>🔦</span>
+                  <span>{flashOn ? 'SENTER ON' : 'SENTER'}</span>
                 </button>
               )}
               <button
@@ -2829,15 +3153,15 @@ export default function ParticipantView({
                   setCameraActiveFor(null);
                   setFlashOn(false);
                 }}
-                className="text-sm sm:text-base font-medium uppercase tracking-wider text-white hover:text-slate-200"
+                className="text-sm sm:text-base font-bold uppercase tracking-wider text-white hover:text-slate-200 cursor-pointer"
               >
-                CANCEL
+                BATAL
               </button>
             </div>
           </div>
 
           {/* AREA KAMERA PENUH DENGAN KOTAK BIDIK PERSEGI BESAR, 4 SIKU HIJAU & GARIS MERAH */}
-          <div className="relative flex-1 overflow-hidden bg-black flex items-center justify-center">
+          <div className="relative flex-1 overflow-hidden bg-black flex flex-col items-center justify-center">
             <video
               ref={videoRef}
               className="absolute inset-0 h-full w-full object-cover"
@@ -2845,11 +3169,13 @@ export default function ParticipantView({
               muted
             />
 
-            {/* KOTAK BIDIK TENGAH (VIEWFINDER) BESAR DENGAN SHADOW GELAP DI KELILINGNYA */}
+            {/* KOTAK BIDIK TENGAH (VIEWFINDER) BESAR DENGAN SHADOW GELAP ATAU RING CAHAYA PUTIH SAAT SENTER AKTIF */}
             <div
-              className="relative z-10 h-64 w-64 sm:h-72 sm:w-72 bg-white/10"
+              className="relative z-10 h-64 w-64 sm:h-72 sm:w-72 bg-white/10 transition-shadow duration-200"
               style={{
-                boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.48)',
+                boxShadow: flashOn
+                  ? '0 0 0 9999px rgba(255, 255, 255, 0.82)'
+                  : '0 0 0 9999px rgba(0, 0, 0, 0.48)',
               }}
             >
               {/* Siku Kiri Atas (Hijau Terang) */}
@@ -2865,9 +3191,31 @@ export default function ParticipantView({
               <div className="pointer-events-none absolute top-1/2 left-0 right-0 -translate-y-1/2 h-[1.5px] bg-red-500/85 shadow-[0_0_6px_rgba(239,68,68,0.9)]" />
             </div>
 
+            {/* TOMBOL SENTER (FLASHLIGHT) BESAR DI BAWAH KOTAK BIDIK — MUDAH DITEKAN SAAT MALAM / RIMBUN */}
+            {flashSupported && (
+              <div className="relative z-20 mt-5">
+                <button
+                  type="button"
+                  onClick={toggleCameraFlash}
+                  className={`inline-flex items-center gap-2 rounded-full border-2 px-5 py-2.5 text-xs sm:text-sm font-extrabold tracking-wide shadow-xl transition active:scale-95 cursor-pointer ${
+                    flashOn
+                      ? 'border-amber-500 bg-amber-400 text-slate-950 shadow-[0_0_24px_rgba(251,191,36,0.9)]'
+                      : 'border-white/30 bg-slate-900/85 text-white hover:bg-slate-800 backdrop-blur-md'
+                  }`}
+                >
+                  <span className="text-base">🔦</span>
+                  <span>
+                    {flashOn
+                      ? 'Senter Aktif (Ketuk untuk Matikan)'
+                      : 'Nyalakan Senter / Flash Kamera'}
+                  </span>
+                </button>
+              </div>
+            )}
+
             {/* Petunjuk Mode Scan Singkat di Bagian Bawah Layar Kamera */}
             <div className="absolute bottom-6 left-4 right-4 z-20 flex flex-col items-center gap-2 text-center pointer-events-none">
-              <div className="rounded-full bg-black/70 px-4 py-1.5 text-xs font-semibold text-slate-200 border border-white/15 backdrop-blur-sm shadow-lg">
+              <div className="rounded-full bg-black/75 px-4 py-1.5 text-xs font-semibold text-slate-200 border border-white/15 backdrop-blur-sm shadow-lg">
                 {!activeCourse || cameraActiveFor === 'SETUP'
                   ? 'Arahkan kotak ke Setup QR Code dari Panitia'
                   : !sessionCanRecordCheckpoints
@@ -3723,6 +4071,97 @@ export default function ParticipantView({
                         </div>
                       )}
                     </div>
+                    {/* TABEL RINCIAN SPLIT TIME ANTAR-POS (MUNCUL OTOMATIS SAAT SELESAI) */}
+                    {participantSplitSummary.orderedLegs.length > 0 && (
+                      <div className="mt-2 rounded-xl border border-slate-700/80 bg-slate-950/90 p-3 text-left space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-extrabold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
+                            <Clock className="h-3.5 w-3.5 text-amber-400" />
+                            Rincian Split Time Antar-Pos
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            +Split Pos • Kumulatif
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-[11px] border-collapse">
+                            <thead>
+                              <tr className="border-b border-slate-800 text-slate-400 font-mono text-[10px] uppercase">
+                                <th className="py-1.5 pr-2 text-left">Urutan</th>
+                                <th className="py-1.5 px-2 text-left">Pos</th>
+                                <th className="py-1.5 px-2 text-right">
+                                  Split Antar-Pos
+                                </th>
+                                <th className="py-1.5 pl-2 text-right">
+                                  Waktu Kumulatif
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/70 font-mono">
+                              {participantSplitSummary.orderedLegs.map((leg) => (
+                                <tr
+                                  key={`finish-split-${leg.checkpoint.id}`}
+                                  className={
+                                    leg.isFastestLeg
+                                      ? 'bg-emerald-950/40 text-emerald-200'
+                                      : 'text-slate-200'
+                                  }
+                                >
+                                  <td className="py-1.5 pr-2 text-slate-400 font-bold">
+                                    #{leg.orderVisited}
+                                  </td>
+                                  <td className="py-1.5 px-2 font-sans font-bold text-white">
+                                    {leg.checkpoint.code}
+                                    {leg.checkpoint.name ? (
+                                      <span className="font-normal text-slate-400">
+                                        {' '}
+                                        ({leg.checkpoint.name})
+                                      </span>
+                                    ) : null}
+                                    {leg.isFastestLeg && (
+                                      <span className="ml-1.5 inline-flex items-center rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-extrabold text-emerald-300 border border-emerald-500/30">
+                                        ⚡ Tercepat
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right font-bold text-emerald-300">
+                                    +{formatStopwatchSeconds(leg.legSplitSeconds)}
+                                  </td>
+                                  <td className="py-1.5 pl-2 text-right text-amber-300 font-bold">
+                                    {formatStopwatchSeconds(leg.cumulativeSeconds)}
+                                  </td>
+                                </tr>
+                              ))}
+                              {participantSplitSummary.finishSplitSeconds !==
+                                undefined &&
+                                participantSplitSummary.finishCumulativeSeconds !==
+                                  undefined && (
+                                  <tr className="bg-sky-950/40 text-sky-200 font-bold">
+                                    <td className="py-1.5 pr-2 text-sky-400">
+                                      🏁
+                                    </td>
+                                    <td className="py-1.5 px-2 font-sans font-extrabold text-sky-200">
+                                      Garis FINISH
+                                    </td>
+                                    <td className="py-1.5 px-2 text-right text-emerald-300">
+                                      +
+                                      {formatStopwatchSeconds(
+                                        participantSplitSummary.finishSplitSeconds
+                                      )}
+                                    </td>
+                                    <td className="py-1.5 pl-2 text-right text-amber-300">
+                                      {formatStopwatchSeconds(
+                                        participantSplitSummary.finishCumulativeSeconds
+                                      )}
+                                    </td>
+                                  </tr>
+                                )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="space-y-2.5 pt-1">
                       <button
                         type="button"
@@ -4106,8 +4545,30 @@ export default function ParticipantView({
                                       </span>
                                     </>
                                   ) : null}
-                                  <div className="text-[11px] text-slate-400">
-                                    {cp.points} Poin
+                                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                    <span>{cp.points} Poin</span>
+                                    {participantSplitSummary.byCheckpointId.has(
+                                      cp.id
+                                    ) && (
+                                      <span className="inline-flex items-center gap-1 rounded bg-slate-900/90 border border-emerald-500/30 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                                        <span>
+                                          +
+                                          {formatStopwatchSeconds(
+                                            participantSplitSummary.byCheckpointId.get(
+                                              cp.id
+                                            )!.legSplitSeconds
+                                          )}
+                                        </span>
+                                        <span className="text-slate-500">•</span>
+                                        <span className="text-amber-300">
+                                          {formatStopwatchSeconds(
+                                            participantSplitSummary.byCheckpointId.get(
+                                              cp.id
+                                            )!.cumulativeSeconds
+                                          )}
+                                        </span>
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               </div>

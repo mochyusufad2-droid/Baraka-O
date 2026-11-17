@@ -186,6 +186,8 @@ export interface CheckpointReport {
   longitude?: number;
   accuracyMeters?: number;
   measuredAt: string;   // Waktu kejadian asli di HP peserta (tidak boleh ditimpa server)
+  elapsedSecondsFromStart?: number; // Detik tempuh berdasarkan monotonic clock perangkat (anti-manipulasi jam HP)
+  clockTamperCorrected?: boolean;   // True jika terdeteksi perubahan jam manual di HP saat offline dan telah dikoreksi
   receivedAt?: string;  // Waktu diterima server (diisi oleh backend)
   syncStatus: SyncStatus;
   serverVerified: boolean;

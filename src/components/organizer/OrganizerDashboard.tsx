@@ -38,6 +38,7 @@ import {
   Eye,
   Unlock,
   Flag,
+  Play,
 } from 'lucide-react';
 import {
   AllTimePlatformStats,
@@ -401,6 +402,12 @@ export default function OrganizerDashboard({
   >('UNLOCK_LEG');
   const [relayOverrideReason, setRelayOverrideReason] = useState<string>('');
   const [isExecutingRelayOverride, setIsExecutingRelayOverride] = useState<boolean>(false);
+
+  // State khusus Mass Start (Pelepasan Serentak 1-Klik)
+  const [confirmMassStartCourse, setConfirmMassStartCourse] = useState<Course | null>(null);
+  const [includeAllRelayLegsInMassStart, setIncludeAllRelayLegsInMassStart] =
+    useState<boolean>(false);
+  const [isExecutingMassStart, setIsExecutingMassStart] = useState<boolean>(false);
 
   // Full Database Backup & Restore States (Migrasi Mandiri)
   const [isExportingDb, setIsExportingDb] = useState<boolean>(false);
@@ -2380,6 +2387,53 @@ export default function OrganizerDashboard({
     }
   };
 
+  // Organizer: Mass Start (Pelepasan Serentak 1-Klik untuk semua tim yang sudah Scan Setup QR di Course terpilih)
+  const handleExecuteMassStart = async () => {
+    if (!token || !confirmMassStartCourse) return;
+    setIsExecutingMassStart(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(
+        `/api/organizer/courses/${encodeURIComponent(
+          confirmMassStartCourse.id
+        )}/mass-start`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            includeAllRelayLegs: includeAllRelayLegsInMassStart,
+          }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal menjalankan Mass Start.');
+        return;
+      }
+      setConfirmMassStartCourse(null);
+      setIncludeAllRelayLegsInMassStart(false);
+      await fetchDashboard();
+      if (data.startedCount > 0) {
+        showTemporarySuccess(
+          data.message ||
+            `🚀 Mass Start berhasil! ${data.startedCount} tim pada Course "${confirmMassStartCourse.name}" resmi dilepas serentak.`
+        );
+      } else {
+        setErrorMsg(
+          data.message ||
+            'Tidak ada tim berstatus Siap Start (NOT_STARTED) di Course ini. Pastikan peserta sudah Scan Setup QR.'
+        );
+      }
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat memicu Mass Start.');
+    } finally {
+      setIsExecutingMassStart(false);
+    }
+  };
+
   // Superadmin: Export Full Database Backup (.json)
   const handleExportFullDatabase = async () => {
     if (!token) return;
@@ -3234,12 +3288,38 @@ export default function OrganizerDashboard({
                   </h2>
                 </div>
                 {selectedCourse && (
-                  <button
-                    onClick={() => setActiveTab('COURSES')}
-                    className="text-xs px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-semibold transition cursor-pointer"
-                  >
-                    Kelola Peta &amp; Course →
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!isSuperAdminReadOnly && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIncludeAllRelayLegsInMassStart(false);
+                          setConfirmMassStartCourse(selectedCourse);
+                        }}
+                        className="text-xs px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold shadow-md shadow-emerald-500/20 flex items-center gap-1.5 transition cursor-pointer"
+                        title="Lepas serentak semua tim yang sudah Scan Setup QR di Course ini tanpa perlu antre scan Start QR"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-slate-950" />
+                        <span>
+                          Mass Start (
+                          {
+                            dashboard.sessions.filter(
+                              (s: ParticipantSession) =>
+                                s.courseId === selectedCourse.id &&
+                                s.status === SessionStatus.NOT_STARTED
+                            ).length
+                          }{' '}
+                          Siap)
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setActiveTab('COURSES')}
+                      className="text-xs px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-semibold transition cursor-pointer"
+                    >
+                      Kelola Peta &amp; Course →
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -5053,12 +5133,38 @@ export default function OrganizerDashboard({
                   Pemantauan Pergerakan Peserta di Lapangan
                 </h2>
               </div>
-              <div className="text-xs text-slate-400">
-                Hanya menyimpan{' '}
-                <strong className="text-slate-200">
-                  1 posisi terakhir per sesi
-                </strong>{' '}
-                (dikirim tiap <strong>5 menit</strong> &amp; saat scan pos — hemat baterai &amp; kuota).
+              <div className="flex flex-wrap items-center gap-3">
+                {selectedCourse && !isSuperAdminReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIncludeAllRelayLegsInMassStart(false);
+                      setConfirmMassStartCourse(selectedCourse);
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold text-xs shadow-md shadow-emerald-500/20 flex items-center gap-1.5 transition cursor-pointer"
+                    title="Lepas serentak semua peserta berstatus Siap Start (NOT_STARTED) di Course ini"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-slate-950" />
+                    <span>
+                      Mass Start Course Ini (
+                      {
+                        dashboard.sessions.filter(
+                          (s: ParticipantSession) =>
+                            s.courseId === selectedCourse.id &&
+                            s.status === SessionStatus.NOT_STARTED
+                        ).length
+                      }{' '}
+                      Tim Siap)
+                    </span>
+                  </button>
+                )}
+                <div className="text-xs text-slate-400">
+                  Hanya menyimpan{' '}
+                  <strong className="text-slate-200">
+                    1 posisi terakhir per sesi
+                  </strong>{' '}
+                  (dikirim tiap <strong>5 menit</strong> &amp; saat scan pos — hemat baterai &amp; kuota).
+                </div>
               </div>
             </div>
 
@@ -5408,6 +5514,31 @@ export default function OrganizerDashboard({
                       Show Split (#1..#{splitColumnCount || 1})
                     </button>
                   </div>
+                )}
+
+                {selectedCourse && !isSuperAdminReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIncludeAllRelayLegsInMassStart(false);
+                      setConfirmMassStartCourse(selectedCourse);
+                    }}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold text-xs shadow-md shadow-emerald-500/20 transition cursor-pointer"
+                    title="Lepas serentak semua tim yang sudah Scan Setup QR di Course ini"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-slate-950" />
+                    <span>
+                      Mass Start (
+                      {
+                        dashboard.sessions.filter(
+                          (s: ParticipantSession) =>
+                            s.courseId === selectedCourse.id &&
+                            s.status === SessionStatus.NOT_STARTED
+                        ).length
+                      }{' '}
+                      Siap)
+                    </span>
+                  </button>
                 )}
 
                 {selectedCourse && (
@@ -6881,6 +7012,7 @@ export default function OrganizerDashboard({
           courses={dashboard.courses}
           sessions={dashboard.sessions}
           participants={dashboard.participants}
+          reports={dashboard.reports}
           initialCourseId={selectedCourse?.id}
           onClose={() => setIsSpectatorFullscreen(false)}
         />
@@ -7299,6 +7431,135 @@ export default function OrganizerDashboard({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Konfirmasi Mass Start (Pelepasan Serentak 1-Klik) */}
+      {confirmMassStartCourse && dashboard && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-500/50 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                  <Play className="w-5 h-5 fill-emerald-300" />
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400 font-bold">
+                    Pelepasan Serentak (Mass Start)
+                  </span>
+                  <h3 className="text-base font-bold text-white">
+                    {confirmMassStartCourse.name}
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmMassStartCourse(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {(() => {
+              const waitingSessions = dashboard.sessions.filter(
+                (s: ParticipantSession) =>
+                  s.courseId === confirmMassStartCourse.id &&
+                  s.status === SessionStatus.NOT_STARTED
+              );
+              const isRelaySeq =
+                confirmMassStartCourse.raceMode === CourseRaceMode.RELAY &&
+                confirmMassStartCourse.relayEnforceSequential !== false;
+              const eligibleCount = isRelaySeq && !includeAllRelayLegsInMassStart
+                ? waitingSessions.filter(
+                    (s: ParticipantSession) =>
+                      (Number(s.relayLegIndex) || 1) === 1 ||
+                      s.relayOverrideUnlocked
+                  ).length
+                : waitingSessions.length;
+
+              return (
+                <div className="space-y-3 text-xs">
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">
+                        Tim Sudah Scan Setup QR (Siap Start):
+                      </span>
+                      <strong className="font-mono text-sm text-emerald-300">
+                        {waitingSessions.length} Tim
+                      </strong>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">
+                        Tim yang Akan Dilepas Sekarang:
+                      </span>
+                      <strong className="font-mono text-sm text-amber-300">
+                        {eligibleCount} Tim
+                      </strong>
+                    </div>
+                  </div>
+
+                  <p className="text-slate-300 leading-relaxed">
+                    Seluruh tim yang siap di atas akan mendapatkan{' '}
+                    <strong className="text-white">
+                      waktu Start resmi yang persis sama detik ini
+                    </strong>{' '}
+                    dan stopwatch di HP mereka langsung berjalan otomatis tanpa perlu mengantre scan Start QR di gerbang.
+                  </p>
+
+                  {isRelaySeq && (
+                    <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-purple-950/30 border border-purple-500/40 text-purple-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={includeAllRelayLegsInMassStart}
+                        onChange={(e) =>
+                          setIncludeAllRelayLegsInMassStart(e.target.checked)
+                        }
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <div className="font-bold">
+                          Mode Relay: Lepas Semua Sub-Team Sekaligus?
+                        </div>
+                        <div className="text-[11px] opacity-85">
+                          Secara default hanya <strong>Sub-Team #1</strong> yang dilepas saat Mass Start. Centang opsi ini hanya jika seluruh pelari estafet berlari paralel.
+                        </div>
+                      </div>
+                    </label>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                    <button
+                      type="button"
+                      disabled={isExecutingMassStart}
+                      onClick={() => setConfirmMassStartCourse(null)}
+                      className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isExecutingMassStart || eligibleCount === 0}
+                      onClick={handleExecuteMassStart}
+                      className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shadow-lg shadow-emerald-500/20"
+                    >
+                      {isExecutingMassStart ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Melepas Peserta...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3.5 h-3.5 fill-slate-950" />
+                          Lepas Serentak Sekarang ({eligibleCount} Tim)
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
