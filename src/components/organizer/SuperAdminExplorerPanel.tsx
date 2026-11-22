@@ -230,19 +230,14 @@ export function SuperAdminGlobalOverviewBlocks({
               <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
             </span>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-bold">
-                  BLOK A • RADAR LIVE SAAT INI (REAL-TIME)
-                </span>
-              </div>
               <h2 className="text-base font-extrabold text-white">
-                Pantauan Langsung Course &amp; Peserta yang Sedang Running Lomba Detik Ini
+                Radar Lomba Aktif (Real-Time)
               </h2>
             </div>
           </div>
 
           <span className="text-[11px] font-mono px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-            Auto-Refresh Real-Time Aktif
+            Live Auto-Refresh
           </span>
         </div>
 
@@ -250,7 +245,7 @@ export function SuperAdminGlobalOverviewBlocks({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Course Sedang Running Lomba</span>
+              <span>Course Aktif</span>
               <Radio
                 className={`w-4 h-4 ${
                   liveStats.runningCoursesCount > 0
@@ -264,17 +259,14 @@ export function SuperAdminGlobalOverviewBlocks({
                 {liveStats.runningCoursesCount}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                Course Sedang Live
+                / {courses.length} Course
               </span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              Dari total <strong className="text-white">{courses.length} Course</strong> yang tersedia saat ini
             </div>
           </div>
 
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Peserta Sedang Running (ACTIVE)</span>
+              <span>Sedang Lari</span>
               <Activity className="w-4 h-4 text-amber-400" />
             </div>
             <div className="flex items-baseline gap-2">
@@ -285,14 +277,11 @@ export function SuperAdminGlobalOverviewBlocks({
                 Tim di Lintasan
               </span>
             </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              Stopwatch sedang berjalan (sudah Start, belum Finish)
-            </div>
           </div>
 
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Sudah Finish / Selesai Lomba</span>
+              <span>Sudah Finish</span>
               <CheckCircle2 className="w-4 h-4 text-sky-400" />
             </div>
             <div className="flex items-baseline gap-2">
@@ -300,17 +289,8 @@ export function SuperAdminGlobalOverviewBlocks({
                 {liveStats.finishedRunnersCount}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                Sesi Selesai
+                Sesi{liveStats.dnfRunnersCount > 0 ? ` (${liveStats.dnfRunnersCount} DNF)` : ''}
               </span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {liveStats.dnfRunnersCount > 0 ? (
-                <span>
-                  Termasuk catatan <strong className="text-rose-400">{liveStats.dnfRunnersCount} DNF (Gugur)</strong>
-                </span>
-              ) : (
-                <span>Seluruh sesi selesai tanpa DNF</span>
-              )}
             </div>
           </div>
         </div>
@@ -318,13 +298,13 @@ export function SuperAdminGlobalOverviewBlocks({
         {/* Daftar Course yang Sedang Running Detik Ini */}
         <div className="rounded-xl bg-slate-950/70 border border-slate-800/90 p-3.5 space-y-2.5">
           <div className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-bold">
-            Daftar Course yang Sedang Running Saat Ini ({liveStats.runningCoursesCount} Course):
+            Course Berlangsung ({liveStats.runningCoursesCount}):
           </div>
 
           {liveStats.runningCourses.length === 0 ? (
             <div className="py-3 px-3 rounded-lg bg-slate-900/60 border border-slate-800/80 text-xs text-slate-400 flex items-center justify-between">
               <span>
-                Saat ini sedang tidak ada peserta yang berstatus ACTIVE di lintasan (0 tim sedang berlari).
+                Belum ada tim yang sedang berlari di lintasan saat ini.
               </span>
               <span className="text-[11px] font-mono text-slate-500">
                 Standby
@@ -404,11 +384,8 @@ export function SuperAdminGlobalOverviewBlocks({
               <Award className="w-5 h-5" />
             </div>
             <div>
-              <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 font-bold">
-                BLOK B • REKAM JEJAK KUMULATIF ORIENTRA (SEJAK AWAL DIBUAT HINGGA SEKARANG)
-              </span>
               <h2 className="text-base font-extrabold text-white">
-                Total Akumulasi Penyelenggara, Course, Peserta &amp; Lokasi yang Pernah Dipakai
+                Statistik Platform ORIENTRA
               </h2>
             </div>
           </div>
@@ -421,13 +398,9 @@ export function SuperAdminGlobalOverviewBlocks({
               title="Buka Laporan Overview Investor (PDF/CSV) & Generator Materi Presentasi Google NotebookLM"
             >
               <FileText className="w-3.5 h-3.5" />
-              <span>Laporan Investor &amp; Prompt NotebookLM</span>
+              <span>Laporan &amp; Prompt NotebookLM</span>
               <Sparkles className="w-3.5 h-3.5" />
             </button>
-
-            <span className="text-[11px] font-mono px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30">
-              All-Time Platform Ledger
-            </span>
           </div>
         </div>
 
@@ -435,54 +408,53 @@ export function SuperAdminGlobalOverviewBlocks({
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Total Organizer</span>
+              <span>Organizer</span>
               <Shield className="w-4 h-4 text-purple-400" />
             </div>
             <div className="text-2xl sm:text-3xl font-black font-mono text-white">
               {cumulativeStats.totalOrganizersEver}
             </div>
             <div className="text-[11px] text-slate-400 mt-1">
-              Panitia/Instansi pernah terdaftar ({organizers.length} aktif)
+              {organizers.length} aktif
             </div>
           </div>
 
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Total Course</span>
+              <span>Course</span>
               <Compass className="w-4 h-4 text-amber-400" />
             </div>
             <div className="text-2xl sm:text-3xl font-black font-mono text-amber-400">
               {cumulativeStats.totalCoursesEver}
             </div>
             <div className="text-[11px] text-slate-400 mt-1">
-              Pernah dibuat ({courses.length} aktif •{' '}
-              {cumulativeStats.totalCheckpointsActive} CP)
+              {courses.length} aktif • {cumulativeStats.totalCheckpointsActive} CP
             </div>
           </div>
 
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Total Peserta</span>
+              <span>Peserta</span>
               <Users className="w-4 h-4 text-sky-400" />
             </div>
             <div className="text-2xl sm:text-3xl font-black font-mono text-sky-400">
               {cumulativeStats.totalParticipantsEver}
             </div>
             <div className="text-[11px] text-slate-400 mt-1">
-              Tim/Peserta pernah ikut ({cumulativeStats.totalSessionsEver} total sesi)
+              {cumulativeStats.totalSessionsEver} sesi lomba
             </div>
           </div>
 
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span>Total Lokasi Lomba</span>
+              <span>Lokasi Lomba</span>
               <MapPin className="w-4 h-4 text-emerald-400" />
             </div>
             <div className="text-2xl sm:text-3xl font-black font-mono text-emerald-400">
               {cumulativeStats.totalLocationsEver}
             </div>
             <div className="text-[11px] text-slate-400 mt-1">
-              Titik lokasi unik pernah memakai ORIENTRA
+              Lokasi tercatat
             </div>
           </div>
         </div>
@@ -494,8 +466,7 @@ export function SuperAdminGlobalOverviewBlocks({
             <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-bold flex items-center gap-1.5">
               <MapPin className="w-3.5 h-3.5" />
               <span>
-                Daftar Lokasi yang Pernah Dipakai Menggunakan ORIENTRA (
-                {cumulativeStats.totalLocationsEver} Lokasi):
+                Lokasi ({cumulativeStats.totalLocationsEver}):
               </span>
             </div>
 
@@ -713,7 +684,7 @@ export function ParticipantDetailModal({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
-                INFO DETAIL LENGKAP PESERTA
+                Detail Peserta
               </span>
               {effectiveCourse && (
                 <span className="text-xs font-mono text-sky-300">
@@ -723,9 +694,12 @@ export function ParticipantDetailModal({
             </div>
             <h2 className="text-xl font-extrabold text-white mt-1 flex flex-wrap items-center gap-2">
               <span>Tim {participant.teamName}</span>
-              <span className="text-sm font-normal text-slate-300">
-                (Pendaftar: {participant.name})
-              </span>
+              {participant.name.trim().toLowerCase() !==
+                participant.teamName.trim().toLowerCase() && (
+                <span className="text-sm font-normal text-slate-300">
+                  (Pendaftar: {participant.name})
+                </span>
+              )}
             </h2>
           </div>
 
@@ -756,11 +730,11 @@ export function ParticipantDetailModal({
           </div>
         </div>
 
-        {/* 1. BIODATA & IDENTITAS AKUN PESERTA */}
+        {/* BIODATA TIM */}
         <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4 space-y-3">
           <div className="text-xs font-mono uppercase text-sky-400 font-bold flex items-center gap-1.5">
             <User className="w-3.5 h-3.5" />
-            <span>1. Biodata &amp; Identitas Akun Peserta</span>
+            <span>Biodata Tim</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -875,12 +849,12 @@ export function ParticipantDetailModal({
           )}
         </div>
 
-        {/* 2. RINGKASAN SESI LOMBA & SKOR */}
+        {/* RINGKASAN SKOR */}
         <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4 space-y-3">
           <div className="text-xs font-mono uppercase text-amber-400 font-bold flex items-center gap-1.5">
             <Trophy className="w-3.5 h-3.5" />
             <span>
-              2. Ringkasan Sesi Lomba &amp; Perhitungan Skor{' '}
+              Ringkasan Skor{' '}
               {effectiveCourse ? `(${effectiveCourse.name})` : ''}
             </span>
           </div>
@@ -985,14 +959,12 @@ export function ParticipantDetailModal({
           )}
         </div>
 
-        {/* 3. TABEL RINCIAN URUTAN KUNJUNGAN POS (SPLIT TIME) */}
+        {/* RINCIAN SPLIT TIME */}
         {activeRow && (
           <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4 space-y-3">
             <div className="text-xs font-mono uppercase text-emerald-400 font-bold flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5" />
-              <span>
-                3. Rincian Urutan Scan Pos Checkpoint &amp; Split Time
-              </span>
+              <span>Rincian Split Time</span>
             </div>
 
             <div className="overflow-x-auto">
@@ -1103,13 +1075,13 @@ export function ParticipantDetailModal({
           </div>
         )}
 
-        {/* 4. CHECKLIST SELURUH POS PADA COURSE */}
+        {/* CHECKLIST POS */}
         {effectiveCourse && effectiveCourse.checkpoints.length > 0 && (
           <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4 space-y-3">
             <div className="text-xs font-mono uppercase text-sky-400 font-bold flex items-center gap-1.5">
               <MapIcon className="w-3.5 h-3.5" />
               <span>
-                4. Status Kunjungan Seluruh Pos pada Course ({effectiveCourse.checkpoints.length} Pos CP)
+                Status Pos ({effectiveCourse.checkpoints.length} CP)
               </span>
             </div>
 

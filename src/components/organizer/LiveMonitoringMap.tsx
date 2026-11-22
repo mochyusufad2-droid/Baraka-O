@@ -174,7 +174,7 @@ export function resolveSessionPositionOnCourse(
       latitude: sess.lastLocation.latitude,
       longitude: sess.lastLocation.longitude,
       accuracyMeters: sess.lastLocation.accuracyMeters,
-      sourceLabel: 'GPS Real-Time (Tiap 2 Menit / Scan)',
+      sourceLabel: 'GPS Live',
       measuredAt: sess.lastLocation.measuredAt,
       isStale,
     };
@@ -188,7 +188,7 @@ export function resolveSessionPositionOnCourse(
       sessionId: sess.id,
       latitude: course.finishLocation.latitude,
       longitude: course.finishLocation.longitude,
-      sourceLabel: 'Posisi Garis Finish',
+      sourceLabel: 'Garis Finish',
       measuredAt: sess.finishedAt,
       isStale: false,
     };
@@ -207,7 +207,7 @@ export function resolveSessionPositionOnCourse(
         sessionId: sess.id,
         latitude: cp.latitude,
         longitude: cp.longitude,
-        sourceLabel: `Terakhir Scan di Pos #${cp.orderIndex} (${cp.code})`,
+        sourceLabel: `Pos #${cp.orderIndex} (${cp.code})`,
         measuredAt: sess.startedAt,
         isStale: false,
       };
@@ -220,7 +220,7 @@ export function resolveSessionPositionOnCourse(
       sessionId: sess.id,
       latitude: course.startLocation.latitude,
       longitude: course.startLocation.longitude,
-      sourceLabel: 'Baru Berangkat dari Titik Start',
+      sourceLabel: 'Garis Start',
       measuredAt: sess.startedAt,
       isStale: false,
     };
@@ -530,23 +530,12 @@ export function LiveMonitoringMap({
   ).length;
 
   return (
-    <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-3.5 space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-            <Radio className="h-4 w-4 animate-pulse" />
+          <span className="rounded bg-emerald-500/20 px-2.5 py-1 text-xs font-mono font-bold text-emerald-300 border border-emerald-500/30">
+            📍 {trackedCount} Tim di Peta
           </span>
-          <div>
-            <div className="text-sm font-bold text-white flex items-center gap-2">
-              <span>Peta Live Monitoring Pergerakan Peserta</span>
-              <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-mono text-emerald-300 border border-emerald-500/30">
-                {trackedCount} Peserta Terlacak di Peta
-              </span>
-            </div>
-            <div className="text-xs text-slate-400">
-              Update posisi otomatis setiap <strong>5 menit</strong> (hemat baterai &amp; kuota) serta setiap kali peserta melakukan <strong>Scan Pos</strong>.
-            </div>
-          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -556,7 +545,7 @@ export function LiveMonitoringMap({
                 key={st}
                 type="button"
                 onClick={() => setTileStyle(st)}
-                className={`rounded px-2.5 py-1 text-[11px] font-semibold transition ${
+                className={`rounded px-2.5 py-1 text-[11px] font-semibold transition cursor-pointer ${
                   tileStyle === st
                     ? 'bg-emerald-500 text-slate-950 font-bold'
                     : 'text-slate-400 hover:text-white'
@@ -570,10 +559,10 @@ export function LiveMonitoringMap({
           <button
             type="button"
             onClick={handleFitAll}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-200 transition"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-200 transition cursor-pointer"
           >
             <Crosshair className="h-3.5 w-3.5 text-emerald-400" />
-            Pusatkan Peta &amp; Peserta
+            Pusatkan Peta
           </button>
         </div>
       </div>
@@ -584,25 +573,19 @@ export function LiveMonitoringMap({
       </div>
 
       {/* Legenda Status Marker Peserta */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300 pt-1">
-        <div className="flex flex-wrap items-center gap-4">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-emerald-500 border border-white inline-block" />
-            Sedang Lari (Aktif / Fresh)
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-amber-500 border border-white inline-block" />
-            Sinyal GPS &gt; 6 Menit (Stale)
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-sky-400 border border-white inline-block" />
-            Sudah Finish
-          </span>
-        </div>
-        <div className="text-[11px] text-slate-400 flex items-center gap-1">
-          <Navigation className="h-3.5 w-3.5 text-sky-400" />
-          Klik tombol <strong>"Lihat di Peta"</strong> pada kartu peserta di bawah untuk menyorot posisi peserta.
-        </div>
+      <div className="flex flex-wrap items-center gap-4 text-xs text-slate-300 pt-0.5">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 border border-white inline-block" />
+          Aktif Lari
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-full bg-amber-500 border border-white inline-block" />
+          GPS &gt;5m
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-full bg-sky-400 border border-white inline-block" />
+          Finish
+        </span>
       </div>
     </div>
   );

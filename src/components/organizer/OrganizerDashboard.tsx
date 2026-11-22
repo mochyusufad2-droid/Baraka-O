@@ -2834,8 +2834,8 @@ export default function OrganizerDashboard({
             <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
               <span className="font-bold text-white text-xs sm:text-sm truncate">
                 {dashboard?.currentOrganizer?.isSuperAdmin
-                  ? 'PUSAT KENDALI SUPERADMIN'
-                  : `DASHBOARD ORGANIZER: ${dashboard?.currentOrganizer?.name || 'Panitia'}`}
+                  ? 'SUPERADMIN'
+                  : `${dashboard?.currentOrganizer?.name || 'Panitia'}`}
               </span>
               <span
                 className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${
@@ -2848,18 +2848,11 @@ export default function OrganizerDashboard({
               >
                 {dashboard?.currentOrganizer?.isSuperAdmin
                   ? isSuperAdminEmergencyMode
-                    ? 'SUPERADMIN • MODE INTERVENSI DARURAT'
-                    : 'SUPERADMIN • MODE PANTAU (READ-ONLY)'
-                  : `${dashboard?.currentOrganizer?.code || 'ORGANIZER'} • TERISOLASI`}
+                    ? 'MODE INTERVENSI DARURAT'
+                    : 'MODE PANTAU'
+                  : `${dashboard?.currentOrganizer?.code || 'ORGANIZER'}`}
               </span>
             </div>
-            <p className="text-[11px] sm:text-xs text-slate-400 leading-snug mt-0.5">
-              {dashboard?.currentOrganizer?.isSuperAdmin
-                ? isSuperAdminEmergencyMode
-                  ? 'Mode Intervensi Darurat aktif: Anda dapat mengedit/menghapus Course, Peta, CP, dan Peserta milik Admin'
-                  : 'Kewenangan utama: Kelola Akun Admin/Organizer & pantau seluruh Course, Peta, CP, dan Peserta (Read-Only)'
-                : 'Hanya menampilkan Course yang Anda buat & peserta yang ikut di Course Anda'}
-            </p>
             {!dashboard?.currentOrganizer?.isSuperAdmin && (
               <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-950/80 border border-slate-700/80 text-slate-300 font-mono">
@@ -3014,47 +3007,23 @@ export default function OrganizerDashboard({
       {/* Bar Status Mode Pantau (Read-Only) & Tombol Intervensi Darurat Khusus Superadmin */}
       {isSuperAdminUser && (
         <div
-          className={`rounded-xl border p-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 transition ${
+          className={`rounded-xl border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 transition ${
             isSuperAdminEmergencyMode
               ? 'bg-rose-950/30 border-rose-500/50 text-rose-200'
               : 'bg-sky-950/25 border-sky-500/30 text-sky-200'
           }`}
         >
-          <div className="flex items-start sm:items-center gap-3">
-            <div
-              className={`p-2 rounded-lg border shrink-0 ${
-                isSuperAdminEmergencyMode
-                  ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
-                  : 'bg-sky-500/15 border-sky-500/30 text-sky-300'
-              }`}
-            >
-              {isSuperAdminEmergencyMode ? (
-                <AlertTriangle className="w-4 h-4" />
-              ) : (
-                <Lock className="w-4 h-4" />
-              )}
-            </div>
-            <div className="text-xs leading-relaxed">
-              {isSuperAdminEmergencyMode ? (
-                <>
-                  <div className="font-bold text-rose-300">
-                    MODE INTERVENSI DARURAT AKTIF (Akses Edit &amp; Hapus Terbuka)
-                  </div>
-                  <p className="text-rose-200/80 text-[11px]">
-                    Kunci pengaman sedang dibuka. Anda dapat mengubah/menghapus Course, titik Peta, Pos CP, dan Peserta milik Admin. Segera kunci kembali setelah intervensi selesai.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <div className="font-bold text-sky-300">
-                    MODE PANTAU (READ-ONLY) — Pengaman Data Admin Aktif
-                  </div>
-                  <p className="text-slate-300 text-[11px]">
-                    Akses penuh pendaftaran/kelola Admin tersedia di tab <strong>5. Kelola Organizer</strong>. Data Course, Peta, CP, dan Peserta dikunci agar tidak terubah secara tidak sengaja.
-                  </p>
-                </>
-              )}
-            </div>
+          <div className="flex items-center gap-2 text-xs">
+            {isSuperAdminEmergencyMode ? (
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <Lock className="w-4 h-4 text-sky-400 shrink-0" />
+            )}
+            <span className="font-semibold">
+              {isSuperAdminEmergencyMode
+                ? 'Intervensi Darurat Aktif — Akses Edit & Hapus Terbuka'
+                : 'Mode Pantau (Read-Only) — Data Course & Peserta Terkunci'}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -3062,10 +3031,10 @@ export default function OrganizerDashboard({
               <button
                 type="button"
                 onClick={() => setActiveTab('ORGANIZERS')}
-                className="px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
               >
                 <Shield className="w-3.5 h-3.5" />
-                Kelola Akun Admin
+                Kelola Admin
               </button>
             )}
 
@@ -3077,22 +3046,22 @@ export default function OrganizerDashboard({
                   setIsEditingCourse(false);
                   setEditingCheckpointId(null);
                   showTemporarySuccess(
-                    'Mode Pantau (Read-Only) diaktifkan kembali. Data Admin kini terkunci aman.'
+                    'Mode Pantau (Read-Only) diaktifkan kembali.'
                   );
                 }}
-                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
               >
                 <Lock className="w-3.5 h-3.5" />
-                Kunci Kembali ke Mode Pantau
+                Kunci Kembali
               </button>
             ) : (
               <button
                 type="button"
                 onClick={() => setIsConfirmEmergencyOpen(true)}
-                className="px-3.5 py-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
               >
                 <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                Tombol Darurat (Intervensi)
+                Intervensi Darurat
               </button>
             )}
           </div>
@@ -3102,15 +3071,15 @@ export default function OrganizerDashboard({
       {/* Main Navigation Tabs (Tab Klasik 1 - 5) */}
       <div className="flex overflow-x-auto border-b border-slate-800">
         {[
-          { id: 'OVERVIEW', label: '1. Overview', icon: LayoutDashboard },
-          { id: 'COURSES', label: '2. Course & Peta Pos', icon: MapIcon },
-          { id: 'MONITORING', label: '3. Live Monitoring', icon: Radio },
-          { id: 'RESULT', label: '4. Result & Leaderboard', icon: Trophy },
+          { id: 'OVERVIEW', label: '1. Ringkasan', icon: LayoutDashboard },
+          { id: 'COURSES', label: '2. Course & Peta', icon: MapIcon },
+          { id: 'MONITORING', label: '3. Monitoring', icon: Radio },
+          { id: 'RESULT', label: '4. Hasil', icon: Trophy },
           ...(dashboard?.currentOrganizer?.isSuperAdmin
             ? [
                 {
                   id: 'ORGANIZERS',
-                  label: `5. Kelola Organizer (${
+                  label: `5. Admin (${
                     dashboard.organizers?.length || 0
                   })`,
                   icon: Shield,
@@ -3204,20 +3173,20 @@ export default function OrganizerDashboard({
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Total Peserta Terdaftar</span>
+                <span>Peserta Terdaftar</span>
                 <Users className="w-4 h-4 text-sky-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-white">
                 {dashboard.participants.length}
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Nama Tim Wajib &amp; PIN Ter-hash
+                Tim / Peserta
               </div>
             </div>
 
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Sedang Berlomba (ACTIVE)</span>
+                <span>Sedang Lari</span>
                 <Radio className="w-4 h-4 text-emerald-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-emerald-400">
@@ -3241,7 +3210,7 @@ export default function OrganizerDashboard({
 
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Sudah Finish (FINISHED)</span>
+                <span>Sudah Finish</span>
                 <CheckCircle2 className="w-4 h-4 text-amber-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-amber-400">
@@ -3252,13 +3221,13 @@ export default function OrganizerDashboard({
                 }
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Total Sesi Masuk: {dashboard.sessions.length}
+                Total Sesi: {dashboard.sessions.length}
               </div>
             </div>
 
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Total Course &amp; Pos CP</span>
+                <span>Course &amp; Pos CP</span>
                 <MapIcon className="w-4 h-4 text-purple-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-white">
@@ -3378,14 +3347,9 @@ export default function OrganizerDashboard({
                   </div>
 
                   {/* Info Pemusatan QR Code Massal */}
-                  <div className="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-                    <div className="text-slate-300">
-                      Seluruh QR Code resmi untuk Course ini (
-                      <strong className="text-white">
-                        SETUP, START, {selectedCourse.checkpoints.length} POS CP,
-                        dan FINISH
-                      </strong>
-                      ) telah disatukan di menu cetak massal.
+                  <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="text-slate-300 font-medium">
+                      QR Code Course (Setup, Start, {selectedCourse.checkpoints.length} CP, Finish)
                     </div>
                     <button
                       type="button"
@@ -3393,13 +3357,13 @@ export default function OrganizerDashboard({
                       className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1.5 transition"
                     >
                       <Printer className="w-3.5 h-3.5" />
-                      Buka Lembar QR Massal
+                      Cetak Semua QR Course
                     </button>
                   </div>
                 </div>
               ) : (
                 <p className="text-xs text-slate-400">
-                  Silakan buat Course di tab Course &amp; Peta Pos.
+                  Silakan buat Course di tab Course &amp; Peta.
                 </p>
               )}
             </div>
@@ -3407,27 +3371,17 @@ export default function OrganizerDashboard({
             {/* Register Participant Form / Read-Only Participant Monitor */}
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
-                <span className="text-[11px] font-mono uppercase text-sky-400">
-                  {isSuperAdminReadOnly
-                    ? 'Mode Pantau Peserta (Read-Only)'
-                    : 'Registrasi Peserta & Password'}
-                </span>
                 <h3 className="text-base font-bold text-white">
                   {isSuperAdminReadOnly
-                    ? 'Daftar Peserta Terdaftar'
-                    : 'Tambah Akun Peserta / Tim'}
+                    ? 'Daftar Peserta'
+                    : 'Tambah Peserta / Tim'}
                 </h3>
               </div>
 
               {isSuperAdminReadOnly ? (
-                <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2 text-xs">
-                  <div className="font-semibold text-sky-300 flex items-center gap-1.5">
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>Pendaftaran &amp; Edit Peserta Dikunci</span>
-                  </div>
-                  <p className="text-slate-400 text-[11px] leading-relaxed">
-                    Dalam <strong>Mode Pantau</strong>, Superadmin hanya memantau daftar peserta yang didaftarkan oleh Admin penyelenggara atau mandiri. Jika perlu membantu Admin mereset password atau menambah/menghapus peserta, aktifkan <strong>Tombol Darurat (Intervensi)</strong> di bagian atas.
-                  </p>
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-400 flex items-center gap-2">
+                  <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <span>Mode Pantau aktif. Tambah/edit peserta dikunci.</span>
                 </div>
               ) : (
                 <form
@@ -3465,14 +3419,11 @@ export default function OrganizerDashboard({
                     <input
                       type="text"
                       required
-                      placeholder="Contoh: Garuda Rimba (atau Nama Peserta jika individu)"
+                      placeholder="Contoh: Garuda Rimba"
                       value={partTeam}
                       onChange={(e) => setPartTeam(e.target.value)}
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
                     />
-                    <p className="mt-1 text-[10px] text-amber-300/90 leading-snug">
-                      * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>. Peserta login menggunakan Nama Tim &amp; Password.
-                    </p>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
@@ -3642,9 +3593,12 @@ export default function OrganizerDashboard({
                               <span className="text-emerald-300 group-hover:text-amber-300 font-bold underline decoration-emerald-500/40 underline-offset-2">
                                 {p.teamName}
                               </span>
-                              <span className="text-slate-400 text-[11px]">
-                                (Pendaftar: {p.name})
-                              </span>
+                              {p.name.trim().toLowerCase() !==
+                                p.teamName.trim().toLowerCase() && (
+                                <span className="text-slate-400 text-[11px]">
+                                  (Pendaftar: {p.name})
+                                </span>
+                              )}
                             </div>
                             <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-[10px]">
                               <span className="font-mono text-slate-300 bg-slate-800 px-1.5 py-0.5 rounded">
@@ -3770,52 +3724,20 @@ export default function OrganizerDashboard({
               {/* Left 5 cols: Create Unified Course Form (or Read-Only Superadmin Monitor Panel) */}
               <div className="lg:col-span-5 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
-                <span className="text-[11px] font-mono uppercase text-amber-400">
-                  {isSuperAdminReadOnly
-                    ? 'Mode Pantau Course (Read-Only)'
-                    : '1-Step Course Setup'}
-                </span>
                 <h3 className="text-sm font-bold text-white">
                   {isSuperAdminReadOnly
-                    ? 'Pemantauan Course & Peta Pos Admin'
-                    : 'Buat Course Baru, Durasi & Aturan Penalti'}
+                    ? 'Mode Pantau Course'
+                    : 'Buat Course Baru'}
                 </h3>
               </div>
 
               {isSuperAdminReadOnly ? (
-                <div className="space-y-4 text-xs">
-                  <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
-                    <div className="font-bold text-sky-300 flex items-center gap-2 text-sm">
-                      <Lock className="w-4 h-4 shrink-0" />
-                      <span>Pembuatan &amp; Perubahan Course Dikunci</span>
-                    </div>
-                    <p className="text-slate-300 leading-relaxed">
-                      Saat ini Anda berada dalam <strong>Mode Pantau (Read-Only)</strong>. Seluruh pembuatan dan pengelolaan teknis Course dilakukan oleh masing-masing Admin/Organizer penyelenggara.
-                    </p>
-                    <ul className="space-y-1.5 text-slate-400 pt-1">
-                      <li>• Pilih salah satu Course di sebelah kanan untuk melihat <strong>Peta Lintasan</strong>, <strong>Titik Start/CP/Finish</strong>, dan <strong>Tabel Pos Checkpoint</strong>.</li>
-                      <li>• Anda tetap dapat membuka &amp; mengunduh <strong>Lembar Info Course</strong> serta <strong>Print QR Code Massal</strong>.</li>
-                      <li>• Untuk mendaftarkan Admin baru atau mengatur kuota Course, buka tab <strong>5. Kelola Organizer</strong>.</li>
-                    </ul>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('ORGANIZERS')}
-                      className="flex-1 py-2.5 px-3 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow"
-                    >
-                      <Shield className="w-4 h-4" />
-                      Buka Kelola Akun Admin
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setIsConfirmEmergencyOpen(true)}
-                      className="py-2.5 px-3 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/40 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
-                    >
-                      <AlertTriangle className="w-4 h-4 text-rose-400" />
-                      Intervensi Darurat
-                    </button>
+                <div className="space-y-3 text-xs">
+                  <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300 flex items-start gap-2.5">
+                    <Lock className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                    <span>
+                      Mode Pantau aktif. Pilih Course di sebelah kanan untuk melihat peta pos, lembar info, dan cetak QR.
+                    </span>
                   </div>
                 </div>
               ) : (
@@ -3950,16 +3872,16 @@ export default function OrganizerDashboard({
                           className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
                         >
                           <option value={ValidationMethod.QR_AND_GPS}>
-                            QR + GPS Wajib Keduanya (QR_AND_GPS)
+                            QR + GPS
                           </option>
                           <option value={ValidationMethod.QR_ONLY}>
-                            QR Code Saja (QR_ONLY)
+                            QR Saja
                           </option>
                           <option value={ValidationMethod.GPS_AUTO}>
-                            GPS Radius Saja (GPS_AUTO)
+                            GPS Otomatis
                           </option>
                           <option value={ValidationMethod.QR_OR_GPS}>
-                            QR atau GPS Salah Satu (QR_OR_GPS)
+                            QR atau GPS
                           </option>
                         </select>
                       </div>
@@ -4248,17 +4170,10 @@ export default function OrganizerDashboard({
             <div className="lg:col-span-7 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
-                  <span className="text-[11px] font-mono uppercase text-emerald-400">
-                    Daftar Course Aktif
-                  </span>
                   <h3 className="text-sm font-bold text-white">
-                    Pilih Course untuk Edit, Hapus, Kelola Peta Pos &amp; Print QR
-                    Massal
+                    Daftar Course ({filteredCoursesByOrganizer.length})
                   </h3>
                 </div>
-                <span className="text-xs font-mono text-slate-400">
-                  {filteredCoursesByOrganizer.length} Course
-                </span>
               </div>
 
               {filteredCoursesByOrganizer.length === 0 ? (
@@ -4386,7 +4301,7 @@ export default function OrganizerDashboard({
                           }`
                         : 'Tanpa Batas Durasi'}
                     </span>
-                    {selectedCourse.raceMode === CourseRaceMode.RELAY ? (
+                    {selectedCourse.raceMode === CourseRaceMode.RELAY && (
                       <span className="text-xs font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
                         🏃 Mode Relay • {selectedCourse.relaySubTeamCount || 3} Sub-Team
                         {selectedCourse.relayEnforceSequential !== false
@@ -4399,10 +4314,6 @@ export default function OrganizerDashboard({
                         {selectedCourse.relayAllowDuplicateCheckpoints === false
                           ? ' • CP Unik'
                           : ' • CP Akumulasi Penuh'}
-                      </span>
-                    ) : (
-                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                        Mode Lomba Biasa (Tersimpan di Server)
                       </span>
                     )}
                     {hasUnsavedCourseEdits && (
@@ -4430,7 +4341,7 @@ export default function OrganizerDashboard({
                         className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold text-xs transition"
                       >
                         <Edit3 className="w-3.5 h-3.5" />
-                        {isEditingCourse ? 'Tutup Edit Course' : 'Edit Course'}
+                        {isEditingCourse ? 'Tutup Edit' : 'Edit Course'}
                       </button>
 
                       <button
@@ -4439,7 +4350,7 @@ export default function OrganizerDashboard({
                         className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold text-xs transition"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        Hapus Course
+                        Hapus
                       </button>
                     </>
                   )}
@@ -4450,7 +4361,7 @@ export default function OrganizerDashboard({
                     className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/10 transition cursor-pointer"
                   >
                     <Printer className="w-4 h-4" />
-                    Print QR Code Massal (2 - 8 QR / Halaman)
+                    Print QR Massal
                   </button>
 
                   <button
@@ -4563,16 +4474,16 @@ export default function OrganizerDashboard({
                         className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
                       >
                         <option value={ValidationMethod.QR_AND_GPS}>
-                          QR + GPS Wajib Keduanya (QR_AND_GPS)
+                          QR + GPS
                         </option>
                         <option value={ValidationMethod.QR_ONLY}>
-                          QR Code Saja (QR_ONLY)
+                          QR Saja
                         </option>
                         <option value={ValidationMethod.GPS_AUTO}>
-                          GPS Radius Saja (GPS_AUTO)
+                          GPS Otomatis
                         </option>
                         <option value={ValidationMethod.QR_OR_GPS}>
-                          QR atau GPS Salah Satu (QR_OR_GPS)
+                          QR atau GPS
                         </option>
                       </select>
                     </div>
@@ -5056,9 +4967,7 @@ export default function OrganizerDashboard({
                                   {cp.name}
                                 </span>
                               ) : (
-                                <span className="text-slate-500 italic">
-                                  - (Tanpa nama lokasi) -
-                                </span>
+                                <span className="text-slate-600">-</span>
                               )}
                             </td>
                             <td className="py-2.5 px-3 font-mono text-emerald-400 font-semibold">
@@ -5125,12 +5034,9 @@ export default function OrganizerDashboard({
           <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
-                <span className="text-[11px] font-mono uppercase text-emerald-400 flex items-center gap-1.5">
-                  <Radio className="w-3.5 h-3.5 animate-pulse" />
-                  Real-Time Telemetry &amp; Last Known Position (~5 Menit)
-                </span>
-                <h2 className="text-lg font-bold text-white mt-0.5">
-                  Pemantauan Pergerakan Peserta di Lapangan
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                  <span>Live Monitoring Peserta</span>
                 </h2>
               </div>
               <div className="flex flex-wrap items-center gap-3">
@@ -5146,7 +5052,7 @@ export default function OrganizerDashboard({
                   >
                     <Play className="w-3.5 h-3.5 fill-slate-950" />
                     <span>
-                      Mass Start Course Ini (
+                      Mass Start (
                       {
                         dashboard.sessions.filter(
                           (s: ParticipantSession) =>
@@ -5154,17 +5060,10 @@ export default function OrganizerDashboard({
                             s.status === SessionStatus.NOT_STARTED
                         ).length
                       }{' '}
-                      Tim Siap)
+                      Siap)
                     </span>
                   </button>
                 )}
-                <div className="text-xs text-slate-400">
-                  Hanya menyimpan{' '}
-                  <strong className="text-slate-200">
-                    1 posisi terakhir per sesi
-                  </strong>{' '}
-                  (dikirim tiap <strong>5 menit</strong> &amp; saat scan pos — hemat baterai &amp; kuota).
-                </div>
               </div>
             </div>
 
@@ -5248,21 +5147,31 @@ export default function OrganizerDashboard({
                                     : '🏃 RELAY: Belum Set Tim Induk'}
                                 </span>
                               )}
-                              <span className="text-xs text-slate-400">
-                                (Pendaftar: {participant?.name || '-'})
-                              </span>
+                              {participant?.name &&
+                                participant.name.trim().toLowerCase() !==
+                                  (participant.teamName || '').trim().toLowerCase() && (
+                                  <span className="text-xs text-slate-400">
+                                    (Pendaftar: {participant.name})
+                                  </span>
+                                )}
                             </div>
-                            <div className="text-xs text-slate-400 mt-0.5">
-                              Course:{' '}
-                              <span className="text-slate-200 font-medium">
-                                {course?.name || sess.courseId}
-                              </span>
-                              {sess.relayMemberNames && (
-                                <span className="ml-2 text-purple-300/90">
-                                  • Anggota: {sess.relayMemberNames}
-                                </span>
-                              )}
-                            </div>
+                            {(!selectedCourse || sess.relayMemberNames) && (
+                              <div className="text-xs text-slate-400 mt-0.5">
+                                {!selectedCourse && (
+                                  <span>
+                                    Course:{' '}
+                                    <span className="text-slate-200 font-medium">
+                                      {course?.name || sess.courseId}
+                                    </span>
+                                  </span>
+                                )}
+                                {sess.relayMemberNames && (
+                                  <span className="text-purple-300/90">
+                                    {!selectedCourse ? ' • ' : ''}Anggota: {sess.relayMemberNames}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
 
                           <div className="flex flex-wrap items-center gap-1.5 justify-end">
@@ -5437,12 +5346,9 @@ export default function OrganizerDashboard({
           <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
-                <span className="text-[11px] font-mono uppercase text-amber-400">
-                  Official Race Leaderboard
-                </span>
-                <h2 className="text-lg font-bold text-white mt-0.5 flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold text-white flex flex-wrap items-center gap-2">
                   <span>
-                    Hasil Lomba &amp; Peringkat (
+                    Hasil &amp; Klasemen (
                     {selectedCourse?.name || 'Semua Course'})
                   </span>
                   {selectedCourse?.raceMode === CourseRaceMode.RELAY && (
@@ -5451,11 +5357,6 @@ export default function OrganizerDashboard({
                     </span>
                   )}
                 </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {selectedCourse?.raceMode === CourseRaceMode.RELAY
-                    ? 'Akumulasi skor dan waktu seluruh Sub-Team membentuk Klasemen Resmi Tim Induk.'
-                    : 'Urutan peringkat: Status (FINISHED prioritas utama) → Skor Akhir Bersih (setelah dikurangi penalti keterlambatan) → Waktu tempuh tercepat.'}
-                </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -5871,10 +5772,24 @@ export default function OrganizerDashboard({
                                 {row.relayMemberNames ? ` (${row.relayMemberNames})` : ''}
                               </div>
                             )}
-                            <div className="text-[10px] text-slate-400">
-                              Pendaftar: {row.participantName}
-                              {partObj?.phone ? ` • WA: ${partObj.phone}` : ''}
-                            </div>
+                            {(row.participantName.trim().toLowerCase() !==
+                              row.teamName.trim().toLowerCase() ||
+                              partObj?.phone) && (
+                              <div className="text-[10px] text-slate-400">
+                                {row.participantName.trim().toLowerCase() !==
+                                  row.teamName.trim().toLowerCase() && (
+                                  <span>Pendaftar: {row.participantName}</span>
+                                )}
+                                {partObj?.phone
+                                  ? `${
+                                      row.participantName.trim().toLowerCase() !==
+                                      row.teamName.trim().toLowerCase()
+                                        ? ' • '
+                                        : ''
+                                    }WA: ${partObj.phone}`
+                                  : ''}
+                              </div>
+                            )}
                           </button>
                         </td>
                         <td className="py-3 px-3 text-slate-300 whitespace-nowrap">
@@ -5885,13 +5800,9 @@ export default function OrganizerDashboard({
                         </td>
                         <td className="py-3 px-3 text-slate-300 whitespace-nowrap">
                           <div>{row.courseName}</div>
-                          {row.attemptNumber && row.attemptNumber > 1 ? (
+                          {row.attemptNumber && row.attemptNumber > 1 && (
                             <span className="inline-block mt-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                              Attempt #{row.attemptNumber} (Re-run)
-                            </span>
-                          ) : (
-                            <span className="inline-block mt-0.5 text-[10px] font-mono text-slate-500">
-                              Attempt #1 (Utama)
+                              Attempt #{row.attemptNumber}
                             </span>
                           )}
                         </td>
@@ -6119,16 +6030,10 @@ export default function OrganizerDashboard({
                     <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/20 text-purple-400">
                       <KeyRound className="w-4 h-4" />
                     </div>
-                    <span className="text-[11px] font-mono uppercase text-purple-400 font-bold">
+                    <h2 className="text-base font-bold text-white">
                       Kredensial Superadmin
-                    </span>
+                    </h2>
                   </div>
-                  <h2 className="text-base font-bold text-white mt-1">
-                    Ubah Username &amp; Password Superadmin
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                    Ubah username login Superadmin (agar tidak kosong) dan perbarui Password utama secara aman.
-                  </p>
                 </div>
 
                 <form onSubmit={handleUpdateSuperadminCredentials} className="space-y-3">
@@ -6148,12 +6053,9 @@ export default function OrganizerDashboard({
                       type="text"
                       value={superNewUsername}
                       onChange={(e) => setSuperNewUsername(e.target.value)}
-                      placeholder="Contoh: superadmin atau masteradmin"
+                      placeholder="Contoh: superadmin"
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                     />
-                    <p className="text-[10px] text-slate-500 mt-0.5">
-                      Min 3 karakter (huruf, angka, titik, strip, underscore).
-                    </p>
                   </div>
 
                   <div>
@@ -6165,7 +6067,7 @@ export default function OrganizerDashboard({
                       required
                       value={superCurrentPin}
                       onChange={(e) => setSuperCurrentPin(e.target.value)}
-                      placeholder="Masukkan Password saat ini untuk verifikasi"
+                      placeholder="Password saat ini"
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                     />
                   </div>
@@ -6179,7 +6081,7 @@ export default function OrganizerDashboard({
                       type="password"
                       value={superNewPin}
                       onChange={(e) => setSuperNewPin(e.target.value)}
-                      placeholder="Minimal 6 karakter (kosongkan jika tidak ganti)"
+                      placeholder="Minimal 6 karakter"
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                     />
                   </div>
@@ -6202,27 +6104,17 @@ export default function OrganizerDashboard({
                     className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow"
                   >
                     <KeyRound className="w-3.5 h-3.5" />
-                    {superCredLoading ? 'Menyimpan...' : 'Simpan Kredensial Superadmin'}
+                    {superCredLoading ? 'Menyimpan...' : 'Simpan Kredensial'}
                   </button>
                 </form>
               </div>
 
               {/* Form Buat Akun Organizer Baru */}
               <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div>
-                <span className="text-[11px] font-mono uppercase text-purple-400">
-                  Otoritas Superadmin
-                </span>
-                <h2 className="text-base font-bold text-white mt-0.5">
-                  Buat Akun Login Organizer Baru
+              <div className="border-b border-slate-800 pb-3">
+                <h2 className="text-base font-bold text-white">
+                  Buat Akun Organizer Baru
                 </h2>
-                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                  Organizer yang dibuat di sini hanya dapat melihat &amp; mengelola
-                  Course yang ia buat sendiri serta peserta yang ikut di Course
-                  buatannya. Organizer bisa login cukup dengan{' '}
-                  <strong className="text-slate-200">PIN saja</strong> atau{' '}
-                  <strong className="text-slate-200">Username + PIN</strong>.
-                </p>
               </div>
 
               <form
@@ -6685,86 +6577,60 @@ export default function OrganizerDashboard({
               )}
             </div>
             </div>
-          </div>
-        )}
-
-      {/* KARTU KESIAPAN HOSTING MANDIRI (SELF-HOSTED) — KONSISTEN MUNCUL DI BAGIAN BAWAH DILUAR TAB ATAU LEVEL APAPUN */}
-      {dashboard && dashboard.currentOrganizer?.isSuperAdmin && (
-        <div className="bg-[#0a1f38] border border-amber-500/30 rounded-xl p-5 space-y-4 shadow-xl">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
-                    <Database className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 font-bold">
-                      Kesiapan Hosting Mandiri (Self-Hosted)
-                    </span>
-                    <h2 className="text-base font-bold text-white">
-                      Pencadangan &amp; Pemulihan Database Penuh (100% Mandiri)
-                    </h2>
-                  </div>
+            {/* KARTU HOSTING MANDIRI & BACKUP DATABASE (DI DALAM TAB 5 ADMIN) */}
+            <div className="bg-[#0a1f38] border border-amber-500/30 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-xl">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
+                  <Database className="h-4 w-4" />
                 </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isDownloadingCpanelBundle}
-                    onClick={handleDownloadCpanelBundle}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-emerald-500/20"
-                  >
-                    <Download
-                      className={`w-4 h-4 ${isDownloadingCpanelBundle ? 'animate-bounce' : ''}`}
-                    />
-                    {isDownloadingCpanelBundle
-                      ? 'Menyiapkan Bundel...'
-                      : 'Download Paket Siap Upload cPanel (.zip)'}
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isExportingDb}
-                    onClick={handleExportFullDatabase}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-amber-500/20"
-                  >
-                    <Download className={`w-4 h-4 ${isExportingDb ? 'animate-bounce' : ''}`} />
-                    {isExportingDb ? 'Mengekspor...' : 'Download Full Database (.json)'}
-                  </button>
-
-                  <label className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition cursor-pointer border border-slate-700">
-                    <Upload className="w-4 h-4 text-emerald-400" />
-                    <span>Upload &amp; Pulihkan Database (.json)</span>
-                    <input
-                      type="file"
-                      accept=".json"
-                      onChange={handleSelectRestoreFile}
-                      className="hidden"
-                    />
-                  </label>
+                <div>
+                  <h2 className="text-sm font-bold text-white">
+                    Hosting cPanel &amp; Backup Database
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Paket ZIP cPanel aman di-update tanpa menimpa database live.
+                  </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-300">
-                <div className="bg-slate-950/60 border border-emerald-500/30 rounded-lg p-3">
-                  <div className="font-bold text-emerald-300 mb-1">🛡️ Bundel Update Aman (.ZIP)</div>
-                  <p className="text-slate-400 leading-relaxed text-[11px]">
-                    Tombol <strong className="text-emerald-300">Download Paket Siap Upload cPanel (.zip)</strong> hanya berisi update fitur/tampilan terbaru dan <strong>tidak menimpa</strong> file database live <code className="text-amber-300">data/baraka-db.json</code> di hosting Anda.
-                  </p>
-                </div>
-                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
-                  <div className="font-bold text-amber-300 mb-1">📦 Backup Database Terpisah (.JSON)</div>
-                  <p className="text-slate-400 leading-relaxed text-[11px]">
-                    Gunakan tombol <strong className="text-amber-300">Download Full Database (.json)</strong> untuk mencadangkan atau memindahkan seluruh Course, Pos, Peserta, Akun Organizer, dan Skor.
-                  </p>
-                </div>
-                <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3">
-                  <div className="font-bold text-purple-300 mb-1">🚀 Alur Update Mudah ke cPanel</div>
-                  <p className="text-slate-400 leading-relaxed text-[11px]">
-                    Setiap selesai mengubah fitur lewat AI Studio, cukup unduh bundel <strong>.zip</strong>, unggah &amp; Extract di folder aplikasi cPanel, lalu klik <strong>Restart</strong> di Setup Node.js App.
-                  </p>
-                </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isDownloadingCpanelBundle}
+                  onClick={handleDownloadCpanelBundle}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-emerald-500/20"
+                >
+                  <Download
+                    className={`w-3.5 h-3.5 ${isDownloadingCpanelBundle ? 'animate-bounce' : ''}`}
+                  />
+                  {isDownloadingCpanelBundle
+                    ? 'Menyiapkan...'
+                    : 'Download Paket cPanel (.zip)'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isExportingDb}
+                  onClick={handleExportFullDatabase}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-amber-500/20"
+                >
+                  <Download className={`w-3.5 h-3.5 ${isExportingDb ? 'animate-bounce' : ''}`} />
+                  {isExportingDb ? 'Mengekspor...' : 'Backup Database (.json)'}
+                </button>
+
+                <label className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition cursor-pointer border border-slate-700">
+                  <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Restore Database (.json)</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={handleSelectRestoreFile}
+                    className="hidden"
+                  />
+                </label>
               </div>
             </div>
+          </div>
         )}
 
       {/* Modal Konfirmasi Hapus 1 Peserta */}

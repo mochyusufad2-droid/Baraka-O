@@ -134,19 +134,11 @@ export default function App() {
                 type="button"
                 onClick={() => setIsTutorialGuideOpen(true)}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 px-3 py-1.5 text-xs font-bold text-emerald-300 shadow-sm transition cursor-pointer"
-                title="Buka & Unduh Panduan Bergambar Peserta/Organizer (.md / PDF) + Prompt NotebookLM"
+                title="Buka Panduan Lengkap Peserta & Organizer (PDF / Markdown / NotebookLM)"
               >
                 <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
-                <span>Panduan &amp; Download (.md)</span>
+                <span>Panduan</span>
               </button>
-
-              {/* Indikator Peran Aktif khusus Organizer */}
-              {authenticatedRole === UserRole.ORGANIZER && (
-                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 shadow-sm">
-                  <Shield className="h-3.5 w-3.5 text-amber-400" />
-                  Dashboard Organizer
-                </span>
-              )}
             </div>
           </div>
         </header>
@@ -166,11 +158,8 @@ export default function App() {
       >
         {/* GERBANG PILIHAN LOGIN AWAL (HANYA MUNCUL SAAT BELUM LOGIN!) */}
         {authenticatedRole === null && (
-          <div className="mx-auto mb-5 max-w-md rounded-2xl border border-sky-500/25 bg-[#0a1f38]/95 p-3.5 shadow-xl shadow-black/40">
-            <p className="mb-2.5 text-center text-[11px] font-semibold uppercase tracking-wider text-sky-300/90">
-              Pilih Akses Masuk ORIENTRA
-            </p>
-            <div className="grid grid-cols-2 gap-2.5">
+          <div className="mx-auto mb-4 max-w-md rounded-2xl border border-sky-500/25 bg-[#0a1f38]/95 p-2.5 shadow-xl shadow-black/40">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => setLoginRoleChoice(UserRole.PARTICIPANT)}
@@ -181,7 +170,7 @@ export default function App() {
                 }`}
               >
                 <Smartphone className="h-4 w-4" />
-                Masuk Peserta
+                Peserta
               </button>
               <button
                 type="button"
@@ -193,7 +182,7 @@ export default function App() {
                 }`}
               >
                 <Shield className="h-4 w-4" />
-                Masuk Organizer
+                Organizer
               </button>
             </div>
           </div>

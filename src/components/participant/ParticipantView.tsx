@@ -3398,8 +3398,8 @@ export default function ParticipantView({
         </div>
       )}
 
-      {/* BANNER PENGAMAN OFFLINE BROWSER & OPSI PASANG IKON DI LAYAR HP */}
-      <PWAInstallBanner />
+      {/* BANNER PENGAMAN OFFLINE BROWSER (HANYA DI HALAMAN AWAL SEBELUM MASUK COURSE) */}
+      {!activeCourse && <PWAInstallBanner />}
 
       {/* PITA OTOMATIS ANTREAN OFFLINE (HANYA MUNCUL JIKA ADA DATA SCAN BELUM TERKIRIM KE SERVER) */}
       {pendingSyncCount > 0 && (
@@ -3518,35 +3518,30 @@ export default function ParticipantView({
       )}
 
       {/* ====================================================================
-          LANGKAH 1: REGISTRASI (NAMA TIM WAJIB) ATAU LOGIN PESERTA
+          LANGKAH 1: REGISTRASI ATAU LOGIN PESERTA
          ==================================================================== */}
       {!participant ? (
         <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-4">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div>
-              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                Langkah 1 — Identitas Peserta
-              </span>
-              <h2 className="text-lg font-bold text-white">
-                Masuk / Daftar Peserta
-              </h2>
-            </div>
+            <h2 className="text-base font-bold text-white">
+              Akses Peserta
+            </h2>
             <div className="flex rounded-lg bg-slate-950 p-1 border border-slate-800">
               <button
                 type="button"
                 onClick={() => setAuthTab('login')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                className={`rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
                   authTab === 'login'
                     ? 'bg-emerald-600 text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                Login Tim
+                Login
               </button>
               <button
                 type="button"
                 onClick={() => setAuthTab('register')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                className={`rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
                   authTab === 'register'
                     ? 'bg-emerald-600 text-white'
                     : 'text-slate-400 hover:text-white'
@@ -3561,8 +3556,7 @@ export default function ParticipantView({
             <form onSubmit={handleRegister} className="space-y-3">
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Nama Peserta Pendaftar{' '}
-                  <span className="text-rose-400">*</span>
+                  Nama Lengkap <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="text"
@@ -3577,7 +3571,7 @@ export default function ParticipantView({
                 <div>
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <label className="block text-xs font-medium text-slate-300">
-                      Nama Tim (Wajib) <span className="text-rose-400">*</span>
+                      Nama Tim / Username <span className="text-rose-400">*</span>
                     </label>
                     {regName.trim() && regTeam.trim() !== regName.trim() && (
                       <button
@@ -3585,7 +3579,7 @@ export default function ParticipantView({
                         onClick={() => setRegTeam(regName.trim())}
                         className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 underline cursor-pointer"
                       >
-                        Peserta Individu? Pakai Nama Pendaftar
+                        Samakan Nama
                       </button>
                     )}
                   </div>
@@ -3594,16 +3588,13 @@ export default function ParticipantView({
                     required
                     value={regTeam}
                     onChange={(e) => setRegTeam(e.target.value)}
-                    placeholder="Nama Tim (atau Nama Anda jika individu)"
+                    placeholder="Nama Tim (atau Nama Anda)"
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                   />
-                  <p className="mt-1 text-[11px] text-amber-300/90 leading-snug">
-                    * Jika peserta individu, isi <strong>Nama Tim</strong> dengan <strong>Nama Peserta Pendaftar</strong>. Jika lomba <strong>Mode Relay (Estafet)</strong>, isi dengan nama unik Sub-Team Anda (contoh: <em>Garuda 1</em>); Nama Tim Induk dipilih setelah Scan Setup QR.
-                  </p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Nomor WhatsApp / HP
+                    No. WhatsApp
                   </label>
                   <input
                     type="tel"
@@ -3617,7 +3608,7 @@ export default function ParticipantView({
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Gender (Kategori)
+                    Gender
                   </label>
                   <select
                     value={regGender}
@@ -3633,7 +3624,7 @@ export default function ParticipantView({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Kelompok Umur (Orienteering)
+                    Kelompok Umur
                   </label>
                   <select
                     value={regAgeGroup}
@@ -3642,9 +3633,7 @@ export default function ParticipantView({
                   >
                     {ORIENTEERING_AGE_GROUPS.map((ag) => (
                       <option key={ag} value={ag}>
-                        {ag === 'Semua Umur'
-                          ? 'Semua Umur (Tanpa Kelompok Umur)'
-                          : `${ag} Tahun`}
+                        {ag === 'Semua Umur' ? 'Semua Umur' : `${ag} Tahun`}
                       </option>
                     ))}
                   </select>
@@ -3652,8 +3641,7 @@ export default function ParticipantView({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Buat Password Tim (Minimal 6 karakter){' '}
-                  <span className="text-rose-400">*</span>
+                  Password <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
@@ -3661,34 +3649,27 @@ export default function ParticipantView({
                   minLength={6}
                   value={regPin}
                   onChange={(e) => setRegPin(e.target.value)}
-                  placeholder="Contoh: orientra123"
+                  placeholder="Minimal 6 karakter"
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
                 />
-                <p className="text-[10px] text-slate-400 mt-1">
-                  Boleh gabungan huruf, angka, tanda baca, simbol (min. 6 karakter). Boleh sama dengan tim lain.
-                </p>
               </div>
               <button
                 type="submit"
                 className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition cursor-pointer"
               >
-                Daftar &amp; Lanjut Scan Setup QR
+                Daftar &amp; Masuk
               </button>
             </form>
           ) : (
             <form onSubmit={handleLogin} className="space-y-3">
-              <div className="rounded-lg bg-slate-950/90 p-3 text-xs text-slate-300 border border-slate-800">
-                Masuk menggunakan <strong className="text-emerald-400">Nama Tim</strong> dan{' '}
-                <strong className="text-emerald-400">Password</strong> Anda. Jika Anda peserta individu, masukkan nama Anda pada kolom Nama Tim.
-              </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Nama Tim <span className="text-rose-400">*</span>
+                  Nama Tim / Peserta <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="Ketik Nama Tim (atau Nama Anda jika individu)"
+                  placeholder="Masukkan Nama Tim atau Nama Anda"
                   value={loginIdentity}
                   onChange={(e) => setLoginIdentity(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
@@ -3696,7 +3677,7 @@ export default function ParticipantView({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Password Tim <span className="text-rose-400">*</span>
+                  Password <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
@@ -3712,7 +3693,7 @@ export default function ParticipantView({
                 type="submit"
                 className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white hover:bg-emerald-500 transition cursor-pointer"
               >
-                Masuk Peserta
+                Masuk
               </button>
             </form>
           )}
@@ -3721,23 +3702,18 @@ export default function ParticipantView({
         <>
           {/* ==================================================================
               LANGKAH 2: LOAD COURSE (HANYA MUNCUL JIKA BELUM MASUK KE COURSE!)
-              Dilengkapi Tombol Besar Scan Kamera Layar Penuh
              ================================================================== */}
           {!activeCourse || !activeSession ? (
             <div className="rounded-xl border border-emerald-500/40 bg-slate-900/90 p-5 space-y-4">
-              <div className="text-center space-y-1">
+              <div className="text-center">
                 <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                  Langkah 2 — Tim: {participant.teamName}
+                  Tim: {participant.teamName}
                 </span>
-                <h3 className="text-lg font-extrabold text-white">
-                  Scan Setup QR dari Panitia
+                <h3 className="text-base font-extrabold text-white mt-0.5">
+                  Siap Memuat Lintasan Lomba
                 </h3>
-                <p className="text-xs text-slate-400">
-                  Tekan tombol di bawah untuk membuka kamera layar penuh, lalu arahkan ke Setup QR Code.
-                </p>
               </div>
 
-              {/* TOMBOL UTAMA BESAR: BUKA KAMERA LAYAR PENUH */}
               <button
                 type="button"
                 onClick={() => setCameraActiveFor('SETUP')}
@@ -3745,10 +3721,7 @@ export default function ParticipantView({
               >
                 <Camera className="h-10 w-10" />
                 <span className="text-lg font-extrabold tracking-wide uppercase">
-                  SCAN SETUP QR (LAYAR PENUH)
-                </span>
-                <span className="text-xs text-emerald-100 font-medium">
-                  Otomatis memuat Course begitu QR terbaca kamera
+                  SCAN SETUP QR
                 </span>
               </button>
             </div>
@@ -4595,38 +4568,17 @@ export default function ParticipantView({
               </div>
 
               {/* ==============================================================
-                  TOMBOL UNDUH BUKTI CADANGAN (SELALU MUDAH DIAKSES)
-                 ============================================================== */}
-              {!sessionMarkedFinishedLocallyOrServer && (
-                <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-3">
-                  <div className="text-xs text-slate-300">
-                    Butuh simpan bukti cadangan ke galeri HP?
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleDownloadProofCard}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-slate-700"
-                  >
-                    <Download className="h-3.5 w-3.5" /> Unduh PNG
-                  </button>
-                </div>
-              )}
-
-
-
-              {/* ==============================================================
                   MENU LIPAT: RIWAYAT ANTREAN LAPORAN PERANGKAT (INDEXEDDB)
                  ============================================================== */}
               <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setShowHistoryLogs((prev) => !prev)}
-                  className="w-full flex items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
+                  className="w-full flex items-center justify-between px-4 py-2.5 text-left text-xs font-semibold text-slate-400 hover:text-slate-200 transition cursor-pointer"
                 >
                   <span className="flex items-center gap-2">
                     <Zap className="h-3.5 w-3.5 text-emerald-400" />
-                    Riwayat Waktu &amp; Sinkronisasi ({localReports.length}{' '}
-                    Laporan)
+                    Riwayat Scan ({localReports.length})
                   </span>
                   {showHistoryLogs ? (
                     <ChevronUp className="h-4 w-4" />
@@ -4636,10 +4588,10 @@ export default function ParticipantView({
                 </button>
 
                 {showHistoryLogs && (
-                  <div className="border-t border-slate-800 p-4 space-y-2 bg-slate-950/50">
+                  <div className="border-t border-slate-800 p-3.5 space-y-2 bg-slate-950/50">
                     {localReports.length === 0 ? (
                       <div className="text-center text-xs text-slate-500 py-2">
-                        Belum ada laporan pada sesi ini.
+                        Belum ada scan pada sesi ini.
                       </div>
                     ) : (
                       [...localReports].reverse().map((rep) => {
@@ -4651,8 +4603,8 @@ export default function ParticipantView({
                             ? 'START QR'
                             : rep.reportType === 'FINISH'
                             ? 'FINISH QR'
-                            : `${cpObj?.code || rep.checkpointId} — ${
-                                cpObj?.name || ''
+                            : `${cpObj?.code || rep.checkpointId}${
+                                cpObj?.name ? ` — ${cpObj.name}` : ''
                               }`;
 
                         return (
@@ -4667,14 +4619,13 @@ export default function ParticipantView({
                               <SyncBadge status={rep.syncStatus} />
                             </div>
                             <div className="text-[11px] text-slate-400">
-                              Waktu Scan:{' '}
                               {new Date(rep.measuredAt).toLocaleTimeString(
                                 'id-ID'
                               )}
                             </div>
                             {rep.rejectionReason && (
                               <div className="rounded bg-rose-950/60 border border-rose-500/30 px-2 py-1 text-[11px] text-rose-300">
-                                Catatan Server: {rep.rejectionReason}
+                                {rep.rejectionReason}
                               </div>
                             )}
                           </div>
@@ -4685,95 +4636,122 @@ export default function ParticipantView({
                 )}
               </div>
 
-              {/* ==============================================================
-                  TOMBOL "MULAI LAGI DARI AWAL / GANTI COURSE" (DENGAN KONFIRMASI TEGAS)
-                 ============================================================== */}
-              <div className="pt-4 flex flex-col items-center justify-center">
-                {!confirmingLeaveCourse ? (
-                  <button
-                    type="button"
-                    onClick={() => setConfirmingLeaveCourse(true)}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition cursor-pointer"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5 text-emerald-400" />
-                    Mulai Lagi dari Awal / Scan Setup QR Baru
-                  </button>
-                ) : (
-                  <div className={`rounded-xl border p-4 text-center space-y-3 max-w-sm shadow-2xl ${
-                    sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+              {/* KONFIRMASI GANTI COURSE / MULAI ULANG (MUNCUL SAAT TOMBOL GANTI COURSE DIKLIK) */}
+              {confirmingLeaveCourse && (
+                <div
+                  className={`rounded-xl border p-4 text-center space-y-3 shadow-2xl ${
+                    sessionCanRecordCheckpoints &&
+                    !sessionMarkedFinishedLocallyOrServer
                       ? 'border-rose-500/80 bg-slate-900 shadow-rose-950/60'
                       : 'border-slate-700 bg-slate-900/95'
-                  }`}>
-                    <div className="flex items-center justify-center gap-2 text-rose-400 font-extrabold text-xs uppercase tracking-wider">
-                      <AlertTriangle className="h-4 w-4" />
-                      <span>{sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer ? 'PERINGATAN DNF RESMI' : 'KONFIRMASI MULAI AWAL'}</span>
-                    </div>
-                    <p className="text-xs text-slate-200 leading-relaxed">
-                      {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer ? (
-                        <>
-                          Lomba Anda sedang berjalan! Memilih mulai ulang sekarang akan{' '}
-                          <strong className="text-rose-400 underline decoration-rose-500">
-                            LANGSUNG MENCATAT SESI INI SEBAGAI DNF (GUGUR)
-                          </strong>{' '}
-                          di papan skor panitia.
-                        </>
-                      ) : (
-                        <>
-                          Kembali ke menu <strong>Scan Setup QR</strong> untuk memulai dari awal? Data sesi sebelumnya tetap tersimpan di server.
-                        </>
-                      )}
-                    </p>
-                    <div className="flex items-center justify-center gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setConfirmingLeaveCourse(false)}
-                        className="rounded-lg bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
-                      >
-                        Batal / Lanjut Lari
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleConfirmLeaveCourse}
-                        className={`rounded-lg px-3.5 py-2 text-xs font-extrabold text-white cursor-pointer transition ${
-                          sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
-                            ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-950/60'
-                            : 'bg-emerald-600 hover:bg-emerald-500'
-                        }`}
-                      >
-                        {sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
-                          ? 'Ya, Setuju DNF & Mulai Baru'
-                          : 'Ya, Mulai Baru'}
-                      </button>
-                    </div>
+                  }`}
+                >
+                  <div className="flex items-center justify-center gap-2 text-rose-400 font-extrabold text-xs uppercase tracking-wider">
+                    <AlertTriangle className="h-4 w-4" />
+                    <span>
+                      {sessionCanRecordCheckpoints &&
+                      !sessionMarkedFinishedLocallyOrServer
+                        ? 'PERINGATAN DNF RESMI'
+                        : 'GANTI COURSE / MULAI BARU'}
+                    </span>
                   </div>
-                )}
-              </div>
+                  <p className="text-xs text-slate-200 leading-relaxed">
+                    {sessionCanRecordCheckpoints &&
+                    !sessionMarkedFinishedLocallyOrServer ? (
+                      <>
+                        Lomba sedang berjalan! Memilih mulai baru sekarang akan{' '}
+                        <strong className="text-rose-400 underline decoration-rose-500">
+                          MENCATAT SESI INI SEBAGAI DNF (GUGUR)
+                        </strong>
+                        .
+                      </>
+                    ) : (
+                      <>
+                        Kembali ke layar <strong>Scan Setup QR</strong>? Data
+                        sesi sebelumnya tetap tersimpan.
+                      </>
+                    )}
+                  </p>
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingLeaveCourse(false)}
+                      className="rounded-lg bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmLeaveCourse}
+                      className={`rounded-lg px-3.5 py-2 text-xs font-extrabold text-white cursor-pointer transition ${
+                        sessionCanRecordCheckpoints &&
+                        !sessionMarkedFinishedLocallyOrServer
+                          ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-950/60'
+                          : 'bg-emerald-600 hover:bg-emerald-500'
+                      }`}
+                    >
+                      {sessionCanRecordCheckpoints &&
+                      !sessionMarkedFinishedLocallyOrServer
+                        ? 'Setuju DNF & Mulai Baru'
+                        : 'Ya, Ganti Course'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
           {/* ==================================================================
-              FOOTER AKUN TIM, GANTI PASSWORD, KELUAR & SINKRONISASI (PALING BAWAH)
-              Ditempatkan di bagian paling bawah agar tidak memenuhi layar atas
-              dan tidak berisiko terpencet tidak sengaja saat berlari.
+              FOOTER AKUN TIM TERPADU (RINGKAS & BERSIH DI PALING BAWAH)
              ================================================================== */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-3 space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-8 px-2 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[11px] font-bold uppercase">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3.5 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="flex h-7 px-2 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold uppercase shrink-0">
                   TIM
                 </div>
-                <div>
-                  <div className="text-xs sm:text-sm font-bold text-white leading-tight">
+                <div className="min-w-0">
+                  <div className="text-xs sm:text-sm font-bold text-white leading-tight truncate">
                     {participant.teamName}
                   </div>
-                  <div className="text-[11px] text-emerald-400 font-medium">
-                    Pendaftar: {participant.name} • {participant.gender || 'Other'} •{' '}
-                    {participant.ageGroup || 'Semua Umur'}
+                  <div className="text-[11px] text-slate-400 truncate">
+                    {participant.name.trim().toLowerCase() !==
+                      participant.teamName.trim().toLowerCase() && (
+                      <span>{participant.name} • </span>
+                    )}
+                    <span>
+                      {participant.gender || 'Other'} •{' '}
+                      {participant.ageGroup || 'Semua Umur'}
+                    </span>
                   </div>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
+                {activeCourse &&
+                  activeSession &&
+                  !sessionMarkedFinishedLocallyOrServer && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadProofCard}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-700 cursor-pointer"
+                      title="Simpan Bukti Cadangan PNG"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>Bukti PNG</span>
+                    </button>
+                  )}
+                {activeCourse && activeSession && !confirmingLeaveCourse && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingLeaveCourse(true)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 cursor-pointer"
+                    title="Ganti Course / Scan Setup QR Baru"
+                  >
+                    <QrCode className="h-3.5 w-3.5 text-amber-400" />
+                    <span>Ganti Course</span>
+                  </button>
+                )}
                 {activeSession && (
                   <button
                     type="button"
@@ -4797,16 +4775,16 @@ export default function ParticipantView({
                     setPartPassNew('');
                     setPartPassConfirm('');
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition cursor-pointer shrink-0"
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition cursor-pointer shrink-0"
                   title="Ganti Password Tim"
                 >
                   <KeyRound className="h-3.5 w-3.5 text-amber-400" />
-                  <span>Ganti Password</span>
+                  <span>Password</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-rose-300 hover:bg-slate-700 shrink-0 cursor-pointer"
                 >
                   <LogOut className="h-3.5 w-3.5" /> Keluar
                 </button>

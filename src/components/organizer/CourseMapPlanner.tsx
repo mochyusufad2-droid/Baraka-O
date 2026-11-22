@@ -851,68 +851,55 @@ export function CourseMapPlanner({
   };
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-4 space-y-3">
-      {/* Header & Legenda Standar IOF Orienteering */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-bold">
-              Peta Interaktif Perancang Lintasan (Point &amp; Click)
+    <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-3.5 space-y-2.5">
+      {/* Header & Pilihan Layer Peta */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-bold text-white">
+            Peta Lintasan
+          </span>
+          {course.enforceOrder ? (
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+              Wajib Urut
+              {totalRouteMeters > 0
+                ? ` • ${
+                    totalRouteMeters >= 1000
+                      ? `${(totalRouteMeters / 1000).toFixed(2)} km`
+                      : `${totalRouteMeters} m`
+                  }`
+                : ''}
             </span>
-            {course.enforceOrder ? (
-              totalRouteMeters > 0 ? (
-                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
-                  Garis Alur Aktif (Wajib Urut) • Jarak Lurus:{' '}
-                  {totalRouteMeters >= 1000
-                    ? `${(totalRouteMeters / 1000).toFixed(2)} km`
-                    : `${totalRouteMeters} m`}
-                </span>
-              ) : (
-                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
-                  Garis Alur Aktif (Wajib Urut)
-                </span>
-              )
-            ) : (
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                Urutan Bebas (Score-O — Tanpa Garis Alur)
-              </span>
-            )}
-            <span
-              className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
-                usesGpsRadius
-                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                  : 'bg-slate-800 text-slate-400 border-slate-700'
-              }`}
-            >
-              {usesGpsRadius
-                ? `Lingkaran Radius GPS: Aktif (${course.validationMethod})`
-                : 'Mode QR Saja (Tanpa Lingkaran Radius GPS)'}
+          ) : (
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+              Score-O (Bebas)
             </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Klik langsung pada peta untuk menempatkan titik{' '}
-            <strong className="text-emerald-300">Start (🔺)</strong>,{' '}
-            <strong className="text-fuchsia-300">Checkpoint (⭕)</strong>, dan{' '}
-            <strong className="text-sky-300">Finish (◎)</strong> tanpa harus
-            datang ke lokasi.
-          </p>
+          )}
+          <span
+            className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+              usesGpsRadius
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {usesGpsRadius ? 'Radius GPS Aktif' : 'QR Saja'}
+          </span>
         </div>
 
         {/* Pilihan Layer Peta */}
-        <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs">
-          <Layers className="w-3.5 h-3.5 text-amber-400 ml-1.5" />
+        <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs">
+          <Layers className="w-3.5 h-3.5 text-amber-400 ml-1" />
           {(
             [
-              { id: 'STREET', label: 'Peta Jalan' },
+              { id: 'STREET', label: 'Jalan' },
               { id: 'SATELLITE', label: 'Satelit' },
-              { id: 'TOPO', label: 'Topografi' },
+              { id: 'TOPO', label: 'Topo' },
             ] as Array<{ id: MapTileStyle; label: string }>
           ).map((layer) => (
             <button
               key={layer.id}
               type="button"
               onClick={() => setTileStyle(layer.id)}
-              className={`px-2.5 py-1 rounded-md font-medium transition ${
+              className={`px-2 py-1 rounded-md font-medium transition cursor-pointer ${
                 tileStyle === layer.id
                   ? 'bg-amber-500 text-slate-950 font-bold'
                   : 'text-slate-300 hover:bg-slate-800'
@@ -925,24 +912,18 @@ export function CourseMapPlanner({
       </div>
 
       {/* Baris Kontrol: Mode Klik Peta (CP / Start / Finish) + Pencarian Tempat */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-center">
-        {/* 3 Tombol Mode Klik Peta (Atau Indikator Mode Pantau Read-Only) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-center">
         <div className="lg:col-span-7 flex flex-wrap items-center gap-1.5">
           {readOnly ? (
-            <div className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
-              <span className="font-semibold text-sky-300">
-                Mode Pantau Peta (Read-Only):
-              </span>
-              <span className="text-slate-400">
-                Titik Start, Pos CP, dan Finish dikunci agar tidak tergeser tanpa sengaja.
-              </span>
+            <div className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-sky-300 font-medium">
+              🔒 Mode Pantau (Titik Peta Terkunci)
             </div>
           ) : (
             <>
               <button
                 type="button"
                 onClick={() => setClickMode('CP')}
-                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
                   clickMode === 'CP'
                     ? 'bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-400 shadow-sm'
                     : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
@@ -950,36 +931,34 @@ export function CourseMapPlanner({
               >
                 <span>⭕</span>
                 <span>
-                  {editingCheckpointId
-                    ? 'Klik Peta = Geser Pos (Edit)'
-                    : 'Klik Peta = Titik Pos (CP)'}
+                  {editingCheckpointId ? `Geser ${draftCpCode || 'Pos'}` : '+ Pos CP'}
                 </span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setClickMode('START')}
-                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
                   clickMode === 'START'
                     ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400 shadow-sm'
                     : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
                 }`}
               >
                 <span>🔺</span>
-                <span>Klik Peta = Set Start</span>
+                <span>Set Start</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setClickMode('FINISH')}
-                className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
                   clickMode === 'FINISH'
                     ? 'bg-sky-500/20 text-sky-200 border-sky-400 shadow-sm'
                     : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
                 }`}
               >
                 <span>◎</span>
-                <span>Klik Peta = Set Finish</span>
+                <span>Set Finish</span>
               </button>
 
               {course.startLocation && (
@@ -987,8 +966,8 @@ export function CourseMapPlanner({
                   type="button"
                   disabled={isSavingPoint}
                   onClick={handleCopyStartToFinish}
-                  className="px-2.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-sky-300 border border-slate-700 text-[11px] font-semibold transition"
-                  title="Jadikan titik Finish sama dengan titik Start (Basecamp)"
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-sky-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+                  title="Samakan titik Finish dengan Start"
                 >
                   Finish = Start
                 </button>
@@ -1003,19 +982,19 @@ export function CourseMapPlanner({
           className="lg:col-span-5 flex items-center gap-1.5"
         >
           <div className="relative flex-1">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari lokasi (misal: Tahura Bandung, Monas, Bogor)..."
+              placeholder="Cari lokasi / kota..."
               className="w-full pl-8 pr-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-amber-400"
             />
           </div>
           <button
             type="submit"
             disabled={isSearching}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-xs font-semibold transition"
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-xs font-semibold transition cursor-pointer"
           >
             {isSearching ? '...' : 'Cari'}
           </button>
@@ -1023,8 +1002,8 @@ export function CourseMapPlanner({
             <button
               type="button"
               onClick={handleLocateMe}
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition"
-              title="Arahkan ke Lokasi GPS Saya"
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition cursor-pointer"
+              title="Lokasi GPS Saya"
             >
               <Compass className="w-4 h-4" />
             </button>
@@ -1032,8 +1011,8 @@ export function CourseMapPlanner({
           <button
             type="button"
             onClick={fitMapToCourseBounds}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 transition"
-            title="Fokuskan ke Seluruh Titik Course"
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 transition cursor-pointer"
+            title="Fokus Seluruh Pos"
           >
             <Crosshair className="w-4 h-4" />
           </button>
@@ -1062,122 +1041,78 @@ export function CourseMapPlanner({
           }`}
         />
 
-        {/* Banner Mode Klik & Drag Aktif di Sudut Atas Peta */}
-        <div className="pointer-events-none absolute top-3 right-3 left-3 sm:left-auto z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg backdrop-blur-sm">
-          {readOnly ? (
-            <span>
-              Status Peta:{' '}
-              <strong className="text-sky-300">
-                Mode Pantau (Read-Only) • Klik &amp; Geser Titik Pos Dikunci
-              </strong>
-            </span>
-          ) : clickMode === 'CP' ? (
-            <span>
-              Mode Aktif:{' '}
-              <strong className="text-fuchsia-300">
-                ⭕ Klik peta untuk tambah ({draftCpCode || 'CP'}) • Geser (Drag) simbol 🔺/⭕/◎ untuk pindah posisi
-              </strong>
-            </span>
-          ) : clickMode === 'START' ? (
-            <span>
-              Mode Aktif:{' '}
-              <strong className="text-emerald-300">
-                🔺 Klik atau Geser (Drag) untuk menempatkan Segitiga START
-              </strong>
-            </span>
-          ) : (
-            <span>
-              Mode Aktif:{' '}
-              <strong className="text-sky-300">
-                ◎ Klik atau Geser (Drag) untuk menempatkan Lingkaran Ganda FINISH
-              </strong>
-            </span>
-          )}
-        </div>
+        {/* Chip Mode Klik Singkat di Sudut Atas Peta */}
+        {!readOnly && (
+          <div className="pointer-events-none absolute top-2.5 right-2.5 z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-2.5 py-1 text-[11px] font-semibold text-slate-200 shadow-lg backdrop-blur-sm">
+            {clickMode === 'CP' ? (
+              <span className="text-fuchsia-300">
+                ⭕ Klik Peta: {draftCpCode || 'CP'} (Bisa Digeser)
+              </span>
+            ) : clickMode === 'START' ? (
+              <span className="text-emerald-300">🔺 Klik Peta: Set START</span>
+            ) : (
+              <span className="text-sky-300">◎ Klik Peta: Set FINISH</span>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Ringkasan Titik Start, Jumlah CP, dan Titik Finish */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-        <div className="p-2.5 rounded-lg bg-slate-900/90 border border-emerald-500/30 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-base">🔺</span>
-            <div>
-              <div className="font-bold text-emerald-300">
-                Titik START (Segitiga)
-              </div>
-              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
-                {course.startLocation
-                  ? `${course.startLocation.latitude.toFixed(
-                      5
-                    )}, ${course.startLocation.longitude.toFixed(5)}`
-                  : 'Belum ditentukan'}
-              </div>
-            </div>
+      {/* Baris Status Ringkas Start, CP, Finish */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+        <div className="px-3 py-2 rounded-lg bg-slate-900/90 border border-emerald-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <span>🔺</span>
+            <span className="font-bold text-emerald-300">START:</span>
+            <span className="font-mono text-[11px] text-slate-300 truncate">
+              {course.startLocation
+                ? `${course.startLocation.latitude.toFixed(4)}, ${course.startLocation.longitude.toFixed(4)}`
+                : 'Belum diset'}
+            </span>
           </div>
           {!readOnly && course.startLocation && (
             <button
               type="button"
               onClick={() => onUpdateStartLocation(null)}
-              className="text-[11px] text-slate-400 hover:text-rose-400"
-              title="Reset Titik Start"
+              className="text-slate-400 hover:text-rose-400 ml-1 cursor-pointer"
+              title="Reset Start"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
 
-        <div className="p-2.5 rounded-lg bg-slate-900/90 border border-fuchsia-500/30 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-base">⭕</span>
-            <div>
-              <div className="font-bold text-fuchsia-300">
-                Pos Kontrol / Checkpoints
-              </div>
-              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
-                {course.checkpoints.length} Pos Terdaftar
-                {!readOnly && (
-                  <>
-                    {' '}• Calon Pos:{' '}
-                    {draftCpLat && draftCpLng
-                      ? `${Number(draftCpLat).toFixed(4)}, ${Number(
-                          draftCpLng
-                        ).toFixed(4)}`
-                      : '-'}
-                  </>
-                )}
-              </div>
-            </div>
+        <div className="px-3 py-2 rounded-lg bg-slate-900/90 border border-fuchsia-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <span>⭕</span>
+            <span className="font-bold text-fuchsia-300">POS:</span>
+            <span className="font-mono text-[11px] text-slate-300 truncate">
+              {course.checkpoints.length} CP
+              {!readOnly && draftCpLat && draftCpLng
+                ? ` • Draft: ${Number(draftCpLat).toFixed(4)}, ${Number(draftCpLng).toFixed(4)}`
+                : ''}
+            </span>
           </div>
-          <MapPin className="w-4 h-4 text-fuchsia-400 shrink-0" />
         </div>
 
-        <div className="p-2.5 rounded-lg bg-slate-900/90 border border-sky-500/30 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-base">◎</span>
-            <div>
-              <div className="font-bold text-sky-300">
-                Titik FINISH (Lingkaran Ganda)
-              </div>
-              <div className="font-mono text-[11px] text-slate-300 tabular-nums">
-                {course.finishLocation
-                  ? `${course.finishLocation.latitude.toFixed(
-                      5
-                    )}, ${course.finishLocation.longitude.toFixed(5)}`
-                  : 'Belum ditentukan'}
-              </div>
-            </div>
+        <div className="px-3 py-2 rounded-lg bg-slate-900/90 border border-sky-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <span>◎</span>
+            <span className="font-bold text-sky-300">FINISH:</span>
+            <span className="font-mono text-[11px] text-slate-300 truncate">
+              {course.finishLocation
+                ? `${course.finishLocation.latitude.toFixed(4)}, ${course.finishLocation.longitude.toFixed(4)}`
+                : 'Belum diset'}
+            </span>
           </div>
-          {!readOnly && course.finishLocation ? (
+          {!readOnly && course.finishLocation && (
             <button
               type="button"
               onClick={() => onUpdateFinishLocation(null)}
-              className="text-[11px] text-slate-400 hover:text-rose-400"
-              title="Reset Titik Finish"
+              className="text-slate-400 hover:text-rose-400 ml-1 cursor-pointer"
+              title="Reset Finish"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
-          ) : (
-            <Navigation className="w-4 h-4 text-sky-400 shrink-0" />
           )}
         </div>
       </div>
