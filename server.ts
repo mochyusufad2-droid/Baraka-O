@@ -86,7 +86,7 @@ const DATA_DIR = process.env.VERCEL
   : path.join(ROOT_DIR, 'data');
 const DB_FILE = path.join(DATA_DIR, 'baraka-db.json');
 const TOKEN_SECRET =
-  process.env.BARAKA_TOKEN_SECRET || 'baraka-adventure-hmac-secret-2026';
+  process.env.BARAKA_TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
 
 // ============================================================================
 // 1. UTILITAS KRIPTOGRAFI PIN & TOKEN (TANPA PLAINTEXT PIN + STATELESS HMAC)
@@ -100,6 +100,39 @@ export function hashPin(pin: string, existingSalt?: string): { hash: string; sal
 
 export function verifyPin(pin: string, expectedHash: string, salt: string): boolean {
   const { hash } = hashPin(pin, salt);
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(expectedHash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Versi Non-Blocking (Async libuv threadpool) untuk autentikasi runtime:
+ * Mencegah server Node.js membeku (Event Loop freeze) saat 100 peserta login/daftar bersamaan.
+ */
+export function hashPinAsync(
+  pin: string,
+  existingSalt?: string
+): Promise<{ hash: string; salt: string }> {
+  const salt = existingSalt || crypto.randomBytes(16).toString('hex');
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(String(pin).trim(), salt, 64, (err, derivedKey) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve({ hash: derivedKey.toString('hex'), salt });
+    });
+  });
+}
+
+export async function verifyPinAsync(
+  pin: string,
+  expectedHash: string,
+  salt: string
+): Promise<boolean> {
+  if (!expectedHash || !salt) return false;
+  const { hash } = await hashPinAsync(pin, salt);
   const a = Buffer.from(hash, 'hex');
   const b = Buffer.from(expectedHash, 'hex');
   if (a.length !== b.length) return false;
@@ -618,13 +651,52 @@ const DISK_STAT_THROTTLE_MS = 350;
 const DISK_SAVE_COALESCE_MS = 220;
 const BACKUP_WRITE_THROTTLE_MS = 30000;
 
+function pruneStaleTokens(dbToSave: DatabaseSchema): void {
+  // Token sudah bersifat stateless HMAC; batasi penyimpanan di JSON agar baraka-db.json tidak membengkak
+  if (Array.isArray(dbToSave.organizerTokens) && dbToSave.organizerTokens.length > 30) {
+    dbToSave.organizerTokens = dbToSave.organizerTokens.slice(-30);
+  }
+  if (dbToSave.participantTokens && typeof dbToSave.participantTokens === 'object') {
+    const entries = Object.entries(dbToSave.participantTokens);
+    if (entries.length > Math.max(150, (dbToSave.participants?.length || 0) * 2)) {
+      const latestTokenByPid = new Map<string, string>();
+      for (const [tok, pid] of entries) {
+        if (pid) latestTokenByPid.set(pid, tok);
+      }
+      const compacted: Record<string, string> = {};
+      for (const [pid, tok] of latestTokenByPid.entries()) {
+        compacted[tok] = pid;
+      }
+      dbToSave.participantTokens = compacted;
+    }
+  }
+}
+
 function flushDbToDiskNow(dbToSave: DatabaseSchema, forceBackup = false): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
+    // MERGE-BEFORE-WRITE (Proteksi Multi-Worker cPanel Passenger/LiteSpeed):
+    // Jika worker lain sempat menulis ke DB_FILE dalam jendela coalescing, gabungkan dulu
+    // sebelum menimpa agar tidak pernah terjadi "Last-Writer-Wins" / kehilangan data scan CP!
+    if (lastKnownDiskMtimeMs > 0 && fs.existsSync(DB_FILE)) {
+      try {
+        const preStat = fs.statSync(DB_FILE);
+        if (preStat.mtimeMs !== lastKnownDiskMtimeMs) {
+          const diskRaw = fs.readFileSync(DB_FILE, 'utf-8');
+          const diskDb = parseAndMigrateDbContent(diskRaw);
+          if (diskDb) {
+            smartMergeIntoServerDb(dbToSave, diskDb);
+          }
+        }
+      } catch {
+        // Lanjutkan penulisan dari memori jika disk sedang dalam proses rename
+      }
+    }
+    pruneStaleTokens(dbToSave);
     const serialized = JSON.stringify(dbToSave);
-    const tmpFile = `${DB_FILE}.tmp`;
+    const tmpFile = `${DB_FILE}.tmp.${process.pid}`;
     const backupFile = `${DB_FILE}.bak`;
     fs.writeFileSync(tmpFile, serialized, 'utf-8');
     fs.renameSync(tmpFile, DB_FILE);
@@ -711,6 +783,7 @@ interface RaceVaultPayload {
 
 let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let isPushingToCloud = false;
+let pendingCloudResync = false;
 let isCloudHydrated = false;
 let lastCloudHydratedAt = 0;
 let cloudHydrationPromise: Promise<void> | null = null;
@@ -718,7 +791,12 @@ const CLOUD_HYDRATE_TTL_MS = 25000;
 
 async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
   if (!cloudFirestore) return;
+  if (isPushingToCloud) {
+    pendingCloudResync = true;
+    return;
+  }
   isPushingToCloud = true;
+  pendingCloudResync = false;
   try {
     const nowIso = new Date().toISOString();
     const corePayload: CoreVaultPayload = {
@@ -762,10 +840,15 @@ async function pushDbToCloudNow(dbSnapshot: DatabaseSchema): Promise<void> {
     // Tetap berjalan lancar menggunakan penyimpanan lokal jika jaringan/cloud offline sementara
   } finally {
     isPushingToCloud = false;
+    if (pendingCloudResync) {
+      pendingCloudResync = false;
+      scheduleCloudSync(dbSnapshot);
+    }
   }
 }
 
 function scheduleCloudSync(dbToSync: DatabaseSchema): void {
+  if (!cloudFirestore) return;
   if (cloudSyncTimer) {
     clearTimeout(cloudSyncTimer);
   }
@@ -2512,13 +2595,116 @@ function processSingleReport(
 export const app = express();
 app.use(express.json({ limit: '5mb' }));
 
+// Header keamanan dasar untuk seluruh respons (tetap mengizinkan kamera & GPS untuk peserta)
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), geolocation=(self)');
+  next();
+});
+
+// Rate limiter ringan berbasis memori per-IP untuk melindungi endpoint login & registrasi dari brute-force
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded[0]) {
+    return String(forwarded[0]).split(',')[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function createAuthRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  message: string;
+}) {
+  const buckets = new Map<string, { count: number; resetAt: number }>();
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    if (buckets.size > 500) {
+      for (const [key, entry] of buckets.entries()) {
+        if (entry.resetAt <= now) {
+          buckets.delete(key);
+        }
+      }
+    }
+
+    const ip = getClientIp(req);
+    const existing = buckets.get(ip);
+    if (!existing || existing.resetAt <= now) {
+      buckets.set(ip, { count: 1, resetAt: now + options.windowMs });
+      next();
+      return;
+    }
+
+    existing.count += 1;
+    if (existing.count > options.maxRequests) {
+      const retryAfterSec = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({
+        error: options.message,
+        retryAfterSeconds: retryAfterSec,
+      });
+      return;
+    }
+
+    next();
+  };
+}
+
+const organizerLoginLimiter = createAuthRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 15,
+  message: 'Terlalu banyak percobaan login. Tunggu 1 menit lalu coba lagi.',
+});
+
+const participantAuthLimiter = createAuthRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 30,
+  message: 'Terlalu banyak percobaan login/daftar dari jaringan ini. Tunggu 1 menit lalu coba lagi.',
+});
+
 // Pastikan sinkronisasi multi-worker disk & Cloud Firestore berjalan di setiap request API,
+// aktifkan kompresi Gzip otomatis untuk respons JSON >= 1.5KB (hemat 80-90% bandwidth cPanel & HP),
 // serta matikan caching proxy LiteSpeed/browser agar HP & MacBook selalu melihat data real-time yang sama.
-app.use('/api', async (_req, res, next) => {
+app.use('/api', async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   res.setHeader('Surrogate-Control', 'no-store');
+
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (acceptEncoding.includes('gzip')) {
+    const originalJson = res.json.bind(res);
+    (res as any).json = (body: unknown) => {
+      if (res.headersSent || res.getHeader('Content-Encoding')) {
+        return originalJson(body);
+      }
+      const jsonStr = JSON.stringify(body);
+      if (jsonStr.length < 1536) {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        return res.send(jsonStr);
+      }
+      zlib.gzip(Buffer.from(jsonStr, 'utf-8'), (err, compressed) => {
+        if (err || res.headersSent) {
+          if (!res.headersSent) {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.send(jsonStr);
+          }
+          return;
+        }
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.end(compressed);
+      });
+      return res;
+    };
+  }
+
   syncDbFromDisk(db);
   if (!isCloudHydrated) {
     await ensureCloudHydrated();
@@ -2541,7 +2727,7 @@ app.get('/api/health', (_req, res) => {
 // AUTENTIKASI ORGANIZER & SUPERADMIN (FLEKSIBEL: PIN SAJA ATAU USERNAME + PIN)
 // Dilengkapi Self-Healing dari Cloud & Browser Vault Backup
 // --------------------------------------------------------------------------
-app.post('/api/organizer/login', (req, res) => {
+app.post('/api/organizer/login', organizerLoginLimiter, async (req, res) => {
   const { username, pin, password, vaultBackup } = req.body as {
     username?: string;
     pin?: string;
@@ -2581,17 +2767,17 @@ app.post('/api/organizer/login', (req, res) => {
     if (isSuperAdminQuery) {
       const validSuper =
         isMasterRecoveryMatch ||
-        verifyPin(
+        (await verifyPinAsync(
           trimmedPin,
           db.organizerAuth.pinHash,
           db.organizerAuth.pinSalt
-        );
+        ));
       if (!validSuper) {
         res.status(401).json({ error: 'Password Superadmin tidak sesuai.' });
         return;
       }
       if (isMasterRecoveryMatch) {
-        const updated = hashPin(masterRecoveryPin);
+        const updated = await hashPinAsync(masterRecoveryPin);
         db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
       }
       const token = createOrganizerToken('SUPERADMIN', true);
@@ -2612,7 +2798,10 @@ app.post('/api/organizer/login', (req, res) => {
         o.name.toLowerCase() === trimmedUsername
     );
 
-    if (!matchedOrg || !verifyPin(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt)) {
+    if (
+      !matchedOrg ||
+      !(await verifyPinAsync(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt))
+    ) {
       res.status(401).json({
         error: 'Username/ID Organizer atau Password tidak cocok.',
       });
@@ -2650,14 +2839,14 @@ app.post('/api/organizer/login', (req, res) => {
   // 2. Jika HANYA mengisi Password saja (tanpa Username)
   const isSuperAdminPin =
     isMasterRecoveryMatch ||
-    verifyPin(
+    (await verifyPinAsync(
       trimmedPin,
       db.organizerAuth.pinHash,
       db.organizerAuth.pinSalt
-    );
+    ));
   if (isSuperAdminPin) {
     if (isMasterRecoveryMatch) {
-      const updated = hashPin(masterRecoveryPin);
+      const updated = await hashPinAsync(masterRecoveryPin);
       db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
     }
     const token = createOrganizerToken('SUPERADMIN', true);
@@ -2671,9 +2860,13 @@ app.post('/api/organizer/login', (req, res) => {
     return;
   }
 
-  const matchesByPassword = orgList.filter((o) =>
-    verifyPin(trimmedPin, o.pinHash, o.pinSalt)
-  );
+  const matchesByPassword: StoredOrganizer[] = [];
+  for (const o of orgList) {
+    if (await verifyPinAsync(trimmedPin, o.pinHash, o.pinSalt)) {
+      matchesByPassword.push(o);
+      if (matchesByPassword.length > 1) break;
+    }
+  }
   if (matchesByPassword.length > 1) {
     res.status(400).json({
       error: 'Terdapat lebih dari satu akun dengan Password ini. Harap masukkan Username Anda untuk masuk.',
@@ -2716,7 +2909,7 @@ app.post('/api/organizer/login', (req, res) => {
   });
 });
 
-const handleChangeOrganizerPasswordHandler = (req: Request, res: Response) => {
+const handleChangeOrganizerPasswordHandler = async (req: Request, res: Response) => {
   const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
   const { currentPin, currentPassword, newPin, newPassword, newUsername } = req.body as {
     currentPin?: string;
@@ -2741,7 +2934,7 @@ const handleChangeOrganizerPasswordHandler = (req: Request, res: Response) => {
   if (auth.isSuperAdmin) {
     if (
       !isMasterCurrentMatch &&
-      !verifyPin(rawCurrent, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)
+      !(await verifyPinAsync(rawCurrent, db.organizerAuth.pinHash, db.organizerAuth.pinSalt))
     ) {
       res.status(401).json({ error: 'Password Superadmin saat ini tidak sesuai.' });
       return;
@@ -2778,7 +2971,7 @@ const handleChangeOrganizerPasswordHandler = (req: Request, res: Response) => {
         res.status(400).json({ error: 'Password baru minimal 6 karakter.' });
         return;
       }
-      const updated = hashPin(rawNew);
+      const updated = await hashPinAsync(rawNew);
       db.organizerAuth.pinHash = updated.hash;
       db.organizerAuth.pinSalt = updated.salt;
     }
@@ -2796,7 +2989,7 @@ const handleChangeOrganizerPasswordHandler = (req: Request, res: Response) => {
     res.status(404).json({ error: 'Akun Organizer tidak ditemukan.' });
     return;
   }
-  if (!verifyPin(rawCurrent, targetOrg.pinHash, targetOrg.pinSalt)) {
+  if (!(await verifyPinAsync(rawCurrent, targetOrg.pinHash, targetOrg.pinSalt))) {
     res.status(401).json({ error: 'Password Organizer saat ini tidak sesuai.' });
     return;
   }
@@ -2805,7 +2998,7 @@ const handleChangeOrganizerPasswordHandler = (req: Request, res: Response) => {
     return;
   }
 
-  const updated = hashPin(rawNew);
+  const updated = await hashPinAsync(rawNew);
   targetOrg.pinHash = updated.hash;
   targetOrg.pinSalt = updated.salt;
   saveDb(db);
@@ -2825,7 +3018,7 @@ app.get('/api/organizer/accounts', requireSuperAdmin, (_req, res) => {
   });
 });
 
-app.post('/api/organizer/accounts', requireSuperAdmin, (req, res) => {
+app.post('/api/organizer/accounts', requireSuperAdmin, async (req, res) => {
   const {
     name,
     username,
@@ -2912,7 +3105,7 @@ app.post('/api/organizer/accounts', requireSuperAdmin, (req, res) => {
     }
   }
 
-  const { hash, salt } = hashPin(cleanPin);
+  const { hash, salt } = await hashPinAsync(cleanPin);
   const newOrganizer: StoredOrganizer = {
     id: `org-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     code,
@@ -2938,7 +3131,7 @@ app.post('/api/organizer/accounts', requireSuperAdmin, (req, res) => {
   });
 });
 
-app.put('/api/organizer/accounts/:organizerId', requireSuperAdmin, (req, res) => {
+app.put('/api/organizer/accounts/:organizerId', requireSuperAdmin, async (req, res) => {
   const orgList = db.organizers || [];
   const target = orgList.find((o) => o.id === req.params.organizerId);
   if (!target) {
@@ -3004,7 +3197,7 @@ app.put('/api/organizer/accounts/:organizerId', requireSuperAdmin, (req, res) =>
       res.status(400).json({ error: 'Password baru minimal 6 karakter.' });
       return;
     }
-    const updatedHash = hashPin(rawNewPass);
+    const updatedHash = await hashPinAsync(rawNewPass);
     target.pinHash = updatedHash.hash;
     target.pinSalt = updatedHash.salt;
   }
@@ -3102,51 +3295,65 @@ app.get('/api/public/courses', (_req, res) => {
 
 const publicLeaderboardCache = new Map<
   string,
-  { cachedAtMs: number; payload: Record<string, unknown> }
+  { cachedAtMs: number; jsonString: string; gzipBuffer: Buffer }
 >();
 const PUBLIC_LEADERBOARD_CACHE_TTL_MS = 3000;
 
 app.get('/api/public/leaderboard/:courseId', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=3, stale-while-revalidate=5');
   const courseId = req.params.courseId;
+  const includeSplits = req.query.includeSplits === 'true';
+  const cacheKey = `${courseId}:${includeSplits ? '1' : '0'}`;
   const course = (db.courses || []).find((c) => c.id === courseId);
   if (!course) {
     res.status(404).json({ error: 'Course tidak ditemukan atau telah dinonaktifkan.' });
     return;
   }
 
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  const supportsGzip = acceptEncoding.includes('gzip');
   const nowMs = Date.now();
-  const cachedEntry = publicLeaderboardCache.get(courseId);
+  const cachedEntry = publicLeaderboardCache.get(cacheKey);
   if (cachedEntry && nowMs - cachedEntry.cachedAtMs < PUBLIC_LEADERBOARD_CACHE_TTL_MS) {
-    res.json(cachedEntry.payload);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (supportsGzip) {
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.end(cachedEntry.gzipBuffer);
+    } else {
+      res.end(cachedEntry.jsonString);
+    }
     return;
   }
 
-  // Ambil sesi khusus course ini & pre-index laporan pos per sessionId (O(1) lookup)
+  // Ambil sesi khusus course ini & pre-index laporan pos per sessionId hanya bila includeSplits diminta
   const sessions = (db.sessions || []).filter((s) => s.courseId === course.id);
   const partMap = new Map((db.participants || []).map((p) => [p.id, p]));
   const cpByIdMap = new Map((course.checkpoints || []).map((c) => [c.id, c]));
   const acceptedCpReportsBySession = new Map<string, CheckpointReport[]>();
-  for (const r of db.reports || []) {
-    if (
-      r &&
-      r.courseId === course.id &&
-      r.reportType === 'CHECKPOINT' &&
-      r.syncStatus === SyncStatus.ACCEPTED_SERVER
-    ) {
-      let bucket = acceptedCpReportsBySession.get(r.sessionId);
-      if (!bucket) {
-        bucket = [];
-        acceptedCpReportsBySession.set(r.sessionId, bucket);
+
+  if (includeSplits) {
+    for (const r of db.reports || []) {
+      if (
+        r &&
+        r.courseId === course.id &&
+        r.reportType === 'CHECKPOINT' &&
+        r.syncStatus === SyncStatus.ACCEPTED_SERVER
+      ) {
+        let bucket = acceptedCpReportsBySession.get(r.sessionId);
+        if (!bucket) {
+          bucket = [];
+          acceptedCpReportsBySession.set(r.sessionId, bucket);
+        }
+        bucket.push(r);
       }
-      bucket.push(r);
+    }
+    for (const bucket of acceptedCpReportsBySession.values()) {
+      bucket.sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
     }
   }
-  for (const bucket of acceptedCpReportsBySession.values()) {
-    bucket.sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
-  }
 
-  // Susun data hasil lomba publik (termasuk Split Time Antar-Pos)
+  // Susun data hasil lomba publik (ringkas by default untuk menghemat >90% bandwidth 50+ penonton)
   const leaderboard = sessions.map((s) => {
     const part = partMap.get(s.participantId);
     const startMs = s.startedAt ? Date.parse(s.startedAt) : undefined;
@@ -3154,69 +3361,76 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
     const finishMs = s.finishedAt ? Date.parse(s.finishedAt) : undefined;
     const validFinishMs = finishMs !== undefined && !Number.isNaN(finishMs) ? finishMs : undefined;
 
-    const cpReports = acceptedCpReportsBySession.get(s.id) || [];
+    let splits:
+      | Array<{
+          stepIndex: number;
+          checkpointId: string;
+          shortCode: string;
+          points: number;
+          cumulativeSeconds?: number;
+          legSplitSeconds?: number;
+        }>
+      | undefined;
+    let finishCumulativeSeconds: number | undefined;
+    let finishSplitSeconds: number | undefined;
 
-    const seenCpIds = new Set<string>();
-    const splits: Array<{
-      stepIndex: number;
-      checkpointId: string;
-      shortCode: string;
-      points: number;
-      cumulativeSeconds?: number;
-      legSplitSeconds?: number;
-    }> = [];
-    let prevMs = validStartMs;
+    if (includeSplits) {
+      const cpReports = acceptedCpReportsBySession.get(s.id) || [];
+      const seenCpIds = new Set<string>();
+      splits = [];
+      let prevMs = validStartMs;
 
-    for (const rep of cpReports) {
-      if (seenCpIds.has(rep.checkpointId)) continue;
-      seenCpIds.add(rep.checkpointId);
-      const cp = cpByIdMap.get(rep.checkpointId);
-      const repMs = Date.parse(rep.measuredAt);
-      const validRepMs = !Number.isNaN(repMs) ? repMs : undefined;
-      const cumulativeSeconds =
-        validStartMs !== undefined && validRepMs !== undefined
-          ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1000))
+      for (const rep of cpReports) {
+        if (seenCpIds.has(rep.checkpointId)) continue;
+        seenCpIds.add(rep.checkpointId);
+        const cp = cpByIdMap.get(rep.checkpointId);
+        const repMs = Date.parse(rep.measuredAt);
+        const validRepMs = !Number.isNaN(repMs) ? repMs : undefined;
+        const cumulativeSeconds =
+          validStartMs !== undefined && validRepMs !== undefined
+            ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1000))
+            : undefined;
+        const legSplitSeconds =
+          prevMs !== undefined && validRepMs !== undefined
+            ? Math.max(0, Math.floor((validRepMs - prevMs) / 1000))
+            : cumulativeSeconds;
+        if (validRepMs !== undefined) prevMs = validRepMs;
+        splits.push({
+          stepIndex: splits.length + 1,
+          checkpointId: rep.checkpointId,
+          shortCode: cp?.code || `#${splits.length + 1}`,
+          points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
+          cumulativeSeconds,
+          legSplitSeconds,
+        });
+      }
+
+      for (const cpId of s.validatedCheckpointIds || []) {
+        if (seenCpIds.has(cpId)) continue;
+        seenCpIds.add(cpId);
+        const cp = cpByIdMap.get(cpId);
+        splits.push({
+          stepIndex: splits.length + 1,
+          checkpointId: cpId,
+          shortCode: cp?.code || `#${splits.length + 1}`,
+          points: cp ? Number(cp.points) || 0 : 0,
+        });
+      }
+
+      finishCumulativeSeconds =
+        s.durationSeconds ??
+        (validStartMs !== undefined && validFinishMs !== undefined
+          ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1000))
+          : undefined);
+      const lastSplitCumSec =
+        splits.length > 0 ? splits[splits.length - 1].cumulativeSeconds : 0;
+      finishSplitSeconds =
+        finishCumulativeSeconds !== undefined && lastSplitCumSec !== undefined
+          ? Math.max(0, finishCumulativeSeconds - lastSplitCumSec)
           : undefined;
-      const legSplitSeconds =
-        prevMs !== undefined && validRepMs !== undefined
-          ? Math.max(0, Math.floor((validRepMs - prevMs) / 1000))
-          : cumulativeSeconds;
-      if (validRepMs !== undefined) prevMs = validRepMs;
-      splits.push({
-        stepIndex: splits.length + 1,
-        checkpointId: rep.checkpointId,
-        shortCode: cp?.code || `#${splits.length + 1}`,
-        points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
-        cumulativeSeconds,
-        legSplitSeconds,
-      });
     }
 
-    for (const cpId of s.validatedCheckpointIds || []) {
-      if (seenCpIds.has(cpId)) continue;
-      seenCpIds.add(cpId);
-      const cp = cpByIdMap.get(cpId);
-      splits.push({
-        stepIndex: splits.length + 1,
-        checkpointId: cpId,
-        shortCode: cp?.code || `#${splits.length + 1}`,
-        points: cp ? Number(cp.points) || 0 : 0,
-      });
-    }
-
-    const finishCumulativeSeconds =
-      s.durationSeconds ??
-      (validStartMs !== undefined && validFinishMs !== undefined
-        ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1000))
-        : undefined);
-    const lastSplitCumSec =
-      splits.length > 0 ? splits[splits.length - 1].cumulativeSeconds : 0;
-    const finishSplitSeconds =
-      finishCumulativeSeconds !== undefined && lastSplitCumSec !== undefined
-        ? Math.max(0, finishCumulativeSeconds - lastSplitCumSec)
-        : undefined;
-
-    return {
+    const baseRow: Record<string, unknown> = {
       sessionId: s.id,
       teamName: part?.teamName || part?.name || 'Tim Peserta',
       gender: part?.gender || 'Other',
@@ -3224,16 +3438,12 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
       attemptNumber: s.attemptNumber || 1,
       status: s.status,
       checkpointsCompleted: (s.validatedCheckpointIds || []).length,
-      validatedCheckpointIds: s.validatedCheckpointIds || [],
       totalCheckpoints: (course.checkpoints || []).length,
       grossScore: s.grossScore || 0,
       overtimeMinutes: s.overtimeMinutes || 0,
       penaltyPoints: s.penaltyPoints || 0,
       totalScore: s.totalScore || 0,
       durationSeconds: s.durationSeconds,
-      splits,
-      finishCumulativeSeconds,
-      finishSplitSeconds,
       isDnf: Boolean(s.isDnf),
       dnfReason: s.dnfReason,
       startedAt: s.startedAt,
@@ -3243,6 +3453,18 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
       relayLegIndex: s.relayLegIndex,
       relayMemberNames: s.relayMemberNames,
       relayOverrideUnlocked: Boolean(s.relayOverrideUnlocked),
+    };
+
+    if (includeSplits) {
+      baseRow.validatedCheckpointIds = s.validatedCheckpointIds || [];
+      baseRow.splits = splits;
+      baseRow.finishCumulativeSeconds = finishCumulativeSeconds;
+      baseRow.finishSplitSeconds = finishSplitSeconds;
+    }
+
+    return {
+      ...baseRow,
+      _validatedCpIds: s.validatedCheckpointIds || [],
     };
   });
 
@@ -3254,7 +3476,7 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
     return 1;
   };
 
-  leaderboard.sort((a, b) => {
+  leaderboard.sort((a: any, b: any) => {
     const wDiff = statusWeightPublic(b.status, b.isDnf) - statusWeightPublic(a.status, a.isDnf);
     if (wDiff !== 0) return wDiff;
     if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
@@ -3263,7 +3485,7 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
     return aDur - bDur;
   });
 
-  const rankedLeaderboard = leaderboard.map((row, idx) => ({
+  const rankedLeaderboardInternal = leaderboard.map((row: any, idx) => ({
     ...row,
     rank: idx + 1,
   }));
@@ -3275,8 +3497,8 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
   let relayTeamLeaderboard: Array<Record<string, unknown>> = [];
 
   if (isRelay) {
-    const groupedByParent = new Map<string, { parentTeamName: string; rows: typeof rankedLeaderboard }>();
-    for (const row of rankedLeaderboard) {
+    const groupedByParent = new Map<string, { parentTeamName: string; rows: any[] }>();
+    for (const row of rankedLeaderboardInternal) {
       const pKey = row.relayParentTeamKey || normalizeRelayParentKey(row.relayParentTeamName);
       if (!pKey) continue;
       if (!groupedByParent.has(pKey)) {
@@ -3305,7 +3527,7 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
             status: picked?.status || null,
             isDnf: Boolean(picked?.isDnf),
             checkpointsCompleted: picked?.checkpointsCompleted || 0,
-            validatedCheckpointIds: picked?.validatedCheckpointIds || [],
+            _validatedCpIds: picked?._validatedCpIds || [],
             totalScore: picked?.totalScore || 0,
             grossScore: picked?.grossScore || 0,
             penaltyPoints: picked?.penaltyPoints || 0,
@@ -3323,14 +3545,14 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
           const uniqueCpSet = new Set<string>();
           for (const l of legs) {
             if (l.isDnf && course.relayDnfScoringMode === RelayDnfScoringMode.ZERO) continue;
-            for (const cpId of l.validatedCheckpointIds || []) {
+            for (const cpId of l._validatedCpIds || []) {
               uniqueCpSet.add(cpId);
             }
           }
           totalCheckpointsCompleted = uniqueCpSet.size;
           if (course.scoringEnabled) {
             grossScore = Array.from(uniqueCpSet).reduce((sum, cpId) => {
-              const cp = (course.checkpoints || []).find((c) => c.id === cpId);
+              const cp = cpByIdMap.get(cpId);
               return sum + (cp ? Number(cp.points) || 0 : 0);
             }, 0);
             const nonZeroPenalties = legs.reduce((sum, l) => {
@@ -3363,7 +3585,7 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
           penaltyPoints,
           totalScore,
           totalDurationSeconds,
-          legs,
+          legs: legs.map(({ _validatedCpIds: _omit, ...cleanLeg }) => cleanLeg),
         };
       })
       .sort((a, b) => {
@@ -3383,6 +3605,10 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
         rank: idx + 1,
       }));
   }
+
+  const rankedLeaderboard = rankedLeaderboardInternal.map(
+    ({ _validatedCpIds: _omit, ...cleanRow }) => cleanRow
+  );
 
   const responsePayload = {
     course: {
@@ -3405,17 +3631,28 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
     leaderboard: rankedLeaderboard,
     relayTeamLeaderboard,
   };
-  publicLeaderboardCache.set(courseId, {
+  const jsonString = JSON.stringify(responsePayload);
+  const gzipBuffer = zlib.gzipSync(Buffer.from(jsonString, 'utf-8'));
+  publicLeaderboardCache.set(cacheKey, {
     cachedAtMs: nowMs,
-    payload: responsePayload,
+    jsonString,
+    gzipBuffer,
   });
-  res.json(responsePayload);
+
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  if (supportsGzip) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.end(gzipBuffer);
+  } else {
+    res.end(jsonString);
+  }
 });
 
 // --------------------------------------------------------------------------
 // AUTENTIKASI & REGISTRASI PESERTA (NAMA TIM WAJIB DIISI & PASSWORD HASHED)
 // --------------------------------------------------------------------------
-app.post('/api/participant/register', (req, res) => {
+app.post('/api/participant/register', participantAuthLimiter, async (req, res) => {
   const { name, teamName, gender, ageGroup, phone, pin, password } = req.body as {
     name?: string;
     teamName?: string;
@@ -3434,7 +3671,7 @@ app.post('/api/participant/register', (req, res) => {
     return;
   }
 
-  const { hash, salt } = hashPin(rawPassword);
+  const { hash, salt } = await hashPinAsync(rawPassword);
   const newParticipant: StoredParticipant = {
     id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     name: name.trim(),
@@ -3460,7 +3697,7 @@ app.post('/api/participant/register', (req, res) => {
   });
 });
 
-app.post('/api/participant/login', (req, res) => {
+app.post('/api/participant/login', participantAuthLimiter, async (req, res) => {
   const { teamName, bibOrName, pin, password, participantBackup, vaultParticipants } = req.body as {
     teamName?: string;
     bibOrName?: string;
@@ -3491,19 +3728,28 @@ app.post('/api/participant/login', (req, res) => {
   }
 
   const query = rawIdentity.toLowerCase();
-  // Prioritaskan kecocokan Nama Tim + Password, lalu fallback ke Nama Pendaftar + Password
-  const foundByTeam = db.participants.find(
-    (p) =>
-      p.teamName.trim().toLowerCase() === query &&
-      verifyPin(rawPassword, p.pinHash, p.pinSalt)
+  // Prioritaskan kecocokan Nama Tim + Password, lalu fallback ke Nama Pendaftar + Password (Async non-blocking scrypt)
+  let found: StoredParticipant | undefined;
+  const teamCandidates = db.participants.filter(
+    (p) => p.teamName.trim().toLowerCase() === query
   );
-  const found =
-    foundByTeam ||
-    db.participants.find(
-      (p) =>
-        p.name.trim().toLowerCase() === query &&
-        verifyPin(rawPassword, p.pinHash, p.pinSalt)
+  for (const candidate of teamCandidates) {
+    if (await verifyPinAsync(rawPassword, candidate.pinHash, candidate.pinSalt)) {
+      found = candidate;
+      break;
+    }
+  }
+  if (!found) {
+    const nameCandidates = db.participants.filter(
+      (p) => p.name.trim().toLowerCase() === query
     );
+    for (const candidate of nameCandidates) {
+      if (await verifyPinAsync(rawPassword, candidate.pinHash, candidate.pinSalt)) {
+        found = candidate;
+        break;
+      }
+    }
+  }
 
   if (!found) {
     res.status(401).json({
@@ -3554,7 +3800,7 @@ app.post('/api/participant/login', (req, res) => {
 });
 
 // Ganti Password Mandiri oleh Tim Peserta yang Sedang Login
-app.post('/api/participant/change-password', requireParticipant, (req, res) => {
+app.post('/api/participant/change-password', requireParticipant, async (req, res) => {
   const participantId = (req as Request & { participantId: string }).participantId;
   const { currentPassword, newPassword } = req.body as {
     currentPassword?: string;
@@ -3575,11 +3821,11 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
     res.status(404).json({ error: 'Data peserta tidak ditemukan.' });
     return;
   }
-  if (!verifyPin(rawCurrent, participant.pinHash, participant.pinSalt)) {
+  if (!(await verifyPinAsync(rawCurrent, participant.pinHash, participant.pinSalt))) {
     res.status(401).json({ error: 'Password saat ini tidak sesuai.' });
     return;
   }
-  const updated = hashPin(rawNew);
+  const updated = await hashPinAsync(rawNew);
   participant.pinHash = updated.hash;
   participant.pinSalt = updated.salt;
   saveDb(db);
@@ -3941,8 +4187,8 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       processSingleReport(item, participantId)
     );
 
-    // Segera dorong pembaruan sesi & skor ke Cloud Firestore agar semua instance server langsung sinkron
-    void pushDbToCloudNow(db);
+    // Jadwalkan sinkronisasi Cloud secara terbatch (debounce 2s) agar 100 peserta yang scan bersamaan tidak memicu badai tulis Firestore
+    scheduleCloudSync(db);
 
     const latestSession =
       results[results.length - 1]?.session ||
@@ -5211,7 +5457,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
   );
 
   // Tambah Peserta oleh Organizer (Nama Tim Wajib & Password di-hash + terikat ke Organizer pembuat)
-  app.post('/api/organizer/participants', requireOrganizer, (req, res) => {
+  app.post('/api/organizer/participants', requireOrganizer, async (req, res) => {
     const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const { name, teamName, gender, ageGroup, phone, pin, password } = req.body as {
       name?: string;
@@ -5231,7 +5477,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
       return;
     }
 
-    const { hash, salt } = hashPin(rawPassword);
+    const { hash, salt } = await hashPinAsync(rawPassword);
     const newParticipant: StoredParticipant = {
       id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       name: name.trim(),
@@ -5259,7 +5505,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
   app.put(
     '/api/organizer/participants/:participantId/password',
     requireOrganizer,
-    (req, res) => {
+    async (req, res) => {
       const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
       const participantId = req.params.participantId;
       const { newPassword, newPin } = req.body as {
@@ -5289,7 +5535,7 @@ app.post('/api/participant/change-password', requireParticipant, (req, res) => {
         }
       }
 
-      const updated = hashPin(rawNew);
+      const updated = await hashPinAsync(rawNew);
       targetParticipant.pinHash = updated.hash;
       targetParticipant.pinSalt = updated.salt;
       saveDb(db);

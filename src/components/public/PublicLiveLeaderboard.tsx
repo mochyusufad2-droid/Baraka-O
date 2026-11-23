@@ -166,7 +166,7 @@ export default function PublicLiveLeaderboard({
     loadCourses();
   }, [selectedCourseId]);
 
-  // Ambil data leaderboard khusus course terpilih secara berkala (Auto Poll 5 detik)
+  // Ambil data leaderboard khusus course terpilih secara berkala (Auto Poll 6 detik, otomatis jeda saat layar HP/tab ditutup)
   useEffect(() => {
     if (!selectedCourseId) {
       setIsLoading(false);
@@ -174,8 +174,14 @@ export default function PublicLiveLeaderboard({
     }
 
     let isMounted = true;
+    let isFetching = false;
 
     async function fetchLeaderboard(isSilent = false) {
+      if (isFetching) return;
+      if (isSilent && typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      isFetching = true;
       if (!isSilent) setIsLoading(true);
       else setIsRefreshing(true);
 
@@ -186,7 +192,13 @@ export default function PublicLiveLeaderboard({
         }
         const json: PublicLeaderboardData = await res.json();
         if (isMounted) {
-          setData(json);
+          setData((prev) =>
+            prev &&
+            prev.updatedAt === json.updatedAt &&
+            prev.totalParticipants === json.totalParticipants
+              ? prev
+              : json
+          );
           setErrorMsg(null);
         }
       } catch (err: any) {
@@ -194,6 +206,7 @@ export default function PublicLiveLeaderboard({
           setErrorMsg(err.message || 'Gagal memuat papan skor.');
         }
       } finally {
+        isFetching = false;
         if (isMounted) {
           setIsLoading(false);
           setIsRefreshing(false);
@@ -202,11 +215,19 @@ export default function PublicLiveLeaderboard({
     }
 
     fetchLeaderboard(false);
-    const interval = setInterval(() => fetchLeaderboard(true), 5000);
+    const interval = setInterval(() => fetchLeaderboard(true), 6000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchLeaderboard(true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [selectedCourseId]);
 

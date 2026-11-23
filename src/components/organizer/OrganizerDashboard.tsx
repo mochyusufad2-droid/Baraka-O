@@ -211,6 +211,51 @@ function formatEntryDateTimeParts(isoString?: string): {
   };
 }
 
+const MONTH_NAMES_ID_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'Mei',
+  'Jun',
+  'Jul',
+  'Agu',
+  'Sep',
+  'Okt',
+  'Nov',
+  'Des',
+];
+
+function formatStartDateTimeParts(isoString?: string): {
+  dateLabel: string;
+  timeLabel: string;
+  fullLabel: string;
+  csvLabel: string;
+} {
+  if (!isoString) {
+    return { dateLabel: '-', timeLabel: '-', fullLabel: '-', csvLabel: '-' };
+  }
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) {
+    return { dateLabel: '-', timeLabel: '-', fullLabel: '-', csvLabel: '-' };
+  }
+  const day = String(d.getDate()).padStart(2, '0');
+  const monthNum = String(d.getMonth() + 1).padStart(2, '0');
+  const monthShort = MONTH_NAMES_ID_SHORT[d.getMonth()] || monthNum;
+  const year = d.getFullYear();
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  const dateLabel = `${day} ${monthShort} ${year}`;
+  const timeLabel = `${hours}:${minutes}:${seconds}`;
+  return {
+    dateLabel,
+    timeLabel,
+    fullLabel: `${dateLabel}, ${timeLabel}`,
+    csvLabel: `${day}/${monthNum}/${year} ${timeLabel}`,
+  };
+}
+
 function formatShortCheckpointCode(code?: string, fallbackIndex?: number): string {
   if (!code) return fallbackIndex ? String(fallbackIndex) : '-';
   const trimmed = code.trim();
@@ -261,6 +306,14 @@ export default function OrganizerDashboard({
   const [isSuperAdminEmergencyMode, setIsSuperAdminEmergencyMode] =
     useState<boolean>(false);
   const [isConfirmEmergencyOpen, setIsConfirmEmergencyOpen] =
+    useState<boolean>(false);
+
+  // Panel lipat untuk form yang jarang dipakai agar Peta, Daftar Course & Daftar Peserta langsung tampil lega
+  const [showAddParticipantForm, setShowAddParticipantForm] =
+    useState<boolean>(false);
+  const [showCreateCourseForm, setShowCreateCourseForm] =
+    useState<boolean>(false);
+  const [showSuperAdminCredForm, setShowSuperAdminCredForm] =
     useState<boolean>(false);
 
   // State Filter Organizer di Bar Atas (Khusus Superadmin) & Pop-Up Detail Peserta
@@ -1898,6 +1951,15 @@ export default function OrganizerDashboard({
           (l) => l.row?.status === SessionStatus.ACTIVE
         ).length;
 
+        const startedAtCandidates = legs
+          .map((l) => l.row?.startedAt)
+          .filter(
+            (v): v is string =>
+              typeof v === 'string' && v.length > 0 && !Number.isNaN(Date.parse(v))
+          )
+          .sort((a, b) => Date.parse(a) - Date.parse(b));
+        const firstStartedAt = startedAtCandidates[0];
+
         return {
           parentTeamKey,
           parentTeamName: group.parentTeamName,
@@ -1907,6 +1969,7 @@ export default function OrganizerDashboard({
           grossScore,
           penaltyPoints,
           totalDurationSeconds,
+          startedAt: firstStartedAt,
           totalCheckpointsCompleted,
           finishedLegsCount,
           cleanFinishedLegsCount,
@@ -2027,6 +2090,7 @@ export default function OrganizerDashboard({
       if (created?.id) {
         setSelectedCourseId(created.id);
         setIsEditingCourse(false);
+        setShowCreateCourseForm(false);
         showTemporarySuccess(`Course "${created.name}" berhasil dibuat!`);
         syncCourseToFirestore(created).catch(() => {});
       }
@@ -2717,7 +2781,13 @@ export default function OrganizerDashboard({
       const subTeamCount = Math.max(2, Number(selectedCourse?.relaySubTeamCount) || 3);
       const legHeaders: string[] = [];
       for (let i = 1; i <= subTeamCount; i++) {
-        legHeaders.push(`Sub-Team #${i} (Akun / Anggota)`, `Sub-Team #${i} Skor`, `Sub-Team #${i} Waktu`, `Sub-Team #${i} Status`);
+        legHeaders.push(
+          `Sub-Team #${i} (Akun / Anggota)`,
+          `Sub-Team #${i} Skor`,
+          `Sub-Team #${i} Waktu Start`,
+          `Sub-Team #${i} Waktu`,
+          `Sub-Team #${i} Status`
+        );
       }
       const headers = [
         'Rank',
@@ -2729,6 +2799,7 @@ export default function OrganizerDashboard({
         'Total Poin Pos',
         'Total Penalti',
         'Total Skor Akumulasi',
+        'Waktu Start',
         'Total Waktu Gabungan',
         ...legHeaders,
       ];
@@ -2745,11 +2816,12 @@ export default function OrganizerDashboard({
               legCells.push(
                 `"${label}"`,
                 String(leg.row.totalScore),
+                `"${formatStartDateTimeParts(leg.row.startedAt).csvLabel}"`,
                 `"${formatElapsedSeconds(leg.row.durationSeconds)}"`,
                 `"${stLabel}"`
               );
             } else {
-              legCells.push('"-"', '0', '"-"', '"BELUM TERDAFTAR"');
+              legCells.push('"-"', '0', '"-"', '"-"', '"BELUM TERDAFTAR"');
             }
           }
           return [
@@ -2762,6 +2834,7 @@ export default function OrganizerDashboard({
             team.grossScore,
             `-${team.penaltyPoints}`,
             team.totalScore,
+            `"${formatStartDateTimeParts(team.startedAt).csvLabel}"`,
             `"${formatElapsedSeconds(team.totalDurationSeconds)}"`,
             ...legCells,
           ].join(',');
@@ -2806,6 +2879,7 @@ export default function OrganizerDashboard({
       'Menit Terlambat',
       'Penalti Waktu',
       'Total Skor Akhir',
+      'Waktu Start',
       'Waktu Tempuh',
       ...splitHeaders,
     ];
@@ -2850,6 +2924,7 @@ export default function OrganizerDashboard({
           r.overtimeMinutes,
           `-${r.penaltyPoints}`,
           r.totalScore,
+          `"${formatStartDateTimeParts(r.startedAt).csvLabel}"`,
           `"${formatElapsedSeconds(r.durationSeconds)}"`,
           ...splitCells,
         ].join(',');
@@ -2883,40 +2958,32 @@ export default function OrganizerDashboard({
             </div>
             <div>
               <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
-                ORIENTRA • Otorisasi Panitia &amp; Superadmin
+                ORIENTRA
               </span>
               <h2 className="text-lg font-bold text-white">
-                Login Dashboard Organizer
+                Login Organizer
               </h2>
             </div>
           </div>
 
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Organizer &amp; Superadmin login menggunakan{' '}
-            <strong className="text-slate-200">Username + Password</strong> (minimal 6 karakter). Superadmin memiliki akses penuh ke seluruh Course &amp; akun panitia, sedangkan Organizer mengelola Course buatannya sendiri.
-          </p>
-
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                Username Organizer / Superadmin{' '}
-                <span className="text-slate-500 font-normal">
-                  (Boleh dikosongkan jika Password unik)
-                </span>
+                Username{' '}
+                <span className="text-slate-500 font-normal">(opsional)</span>
               </label>
               <input
                 type="text"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
-                placeholder="Contoh: superadmin atau namaorganizer"
+                placeholder="superadmin / nama organizer"
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-amber-400"
               />
             </div>
 
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                Password Keamanan Organizer / Superadmin{' '}
-                <span className="text-rose-400">*</span>
+                Password <span className="text-rose-400">*</span>
               </label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -2926,13 +2993,10 @@ export default function OrganizerDashboard({
                   minLength={6}
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
-                  placeholder="Masukkan Password (minimal 6 karakter)"
+                  placeholder="Min. 6 karakter"
                   className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-sm font-mono focus:outline-none focus:border-amber-400"
                 />
               </div>
-              <p className="text-[11px] text-slate-500 mt-1">
-                Password minimal 6 karakter (bebas kombinasi huruf, angka, atau simbol).
-              </p>
             </div>
 
             {loginError && (
@@ -2946,7 +3010,7 @@ export default function OrganizerDashboard({
               disabled={isLoggingIn}
               className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer"
             >
-              {isLoggingIn ? 'Memverifikasi Akses...' : 'Masuk ke Dashboard Organizer'}
+              {isLoggingIn ? 'Memverifikasi...' : 'Masuk'}
             </button>
           </form>
         </div>
@@ -3157,10 +3221,10 @@ export default function OrganizerDashboard({
         </div>
       </div>
 
-      {/* Bar Status Mode Pantau (Read-Only) & Tombol Intervensi Darurat Khusus Superadmin */}
+      {/* Bar Status Mode Pantau & Akses Edit Khusus Superadmin */}
       {isSuperAdminUser && (
         <div
-          className={`rounded-xl border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 transition ${
+          className={`rounded-xl border px-3.5 py-2 flex flex-wrap items-center justify-between gap-2.5 transition ${
             isSuperAdminEmergencyMode
               ? 'bg-rose-950/30 border-rose-500/50 text-rose-200'
               : 'bg-sky-950/25 border-sky-500/30 text-sky-200'
@@ -3174,23 +3238,12 @@ export default function OrganizerDashboard({
             )}
             <span className="font-semibold">
               {isSuperAdminEmergencyMode
-                ? 'Intervensi Darurat Aktif — Akses Edit & Hapus Terbuka'
-                : 'Mode Pantau (Read-Only) — Data Course & Peserta Terkunci'}
+                ? 'Akses Edit Aktif'
+                : 'Mode Pantau (Read-Only)'}
             </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {activeTab !== 'ORGANIZERS' && (
-              <button
-                type="button"
-                onClick={() => setActiveTab('ORGANIZERS')}
-                className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
-              >
-                <Shield className="w-3.5 h-3.5" />
-                Kelola Admin
-              </button>
-            )}
-
+          <div className="flex items-center gap-2 shrink-0">
             {isSuperAdminEmergencyMode ? (
               <button
                 type="button"
@@ -3198,9 +3251,7 @@ export default function OrganizerDashboard({
                   setIsSuperAdminEmergencyMode(false);
                   setIsEditingCourse(false);
                   setEditingCheckpointId(null);
-                  showTemporarySuccess(
-                    'Mode Pantau (Read-Only) diaktifkan kembali.'
-                  );
+                  showTemporarySuccess('Mode Pantau diaktifkan kembali.');
                 }}
                 className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm whitespace-nowrap shrink-0"
               >
@@ -3213,8 +3264,8 @@ export default function OrganizerDashboard({
                 onClick={() => setIsConfirmEmergencyOpen(true)}
                 className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
               >
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                Intervensi Darurat
+                <Unlock className="w-3.5 h-3.5 text-rose-400" />
+                Buka Akses Edit
               </button>
             )}
           </div>
@@ -3323,17 +3374,19 @@ export default function OrganizerDashboard({
             />
           )}
 
+          {/* Kartu KPI Standar (Hanya untuk Organizer — Superadmin sudah punya Blok A & B di atas tanpa duplikasi) */}
+          {!isSuperAdminUser && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Peserta Terdaftar</span>
+                <span>Peserta</span>
                 <Users className="w-4 h-4 text-sky-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-white">
                 {dashboard.participants.length}
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Tim / Peserta
+                Tim terdaftar
               </div>
             </div>
 
@@ -3356,14 +3409,13 @@ export default function OrganizerDashboard({
                     (s: ParticipantSession) =>
                       s.status === SessionStatus.NOT_STARTED
                   ).length
-                }{' '}
-                tim
+                }
               </div>
             </div>
 
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Sudah Finish</span>
+                <span>Finish</span>
                 <CheckCircle2 className="w-4 h-4 text-amber-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-amber-400">
@@ -3374,28 +3426,28 @@ export default function OrganizerDashboard({
                 }
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Total Sesi: {dashboard.sessions.length}
+                {dashboard.sessions.length} sesi
               </div>
             </div>
 
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
-                <span>Course &amp; Pos CP</span>
+                <span>Course</span>
                 <MapIcon className="w-4 h-4 text-purple-400" />
               </div>
               <div className="text-2xl font-bold font-mono text-white">
-                {dashboard.courses.length} Course
+                {dashboard.courses.length}
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Total Checkpoint:{' '}
                 {dashboard.courses.reduce(
                   (acc: number, c: Course) => acc + c.checkpoints.length,
                   0
                 )}{' '}
-                titik
+                pos CP
               </div>
             </div>
           </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Selected Course Summary Card (Tanpa kotak QR individual — terpusat di Print QR Massal) */}
@@ -3454,96 +3506,110 @@ export default function OrganizerDashboard({
                   )}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                      <div className="text-slate-400">Lokasi Course</div>
-                      <div className="font-semibold text-white mt-0.5">
-                        {selectedCourse.locationName || '-(Opsional)-'}
+                      <div className="text-slate-400">Lokasi</div>
+                      <div className="font-semibold text-white mt-0.5 truncate">
+                        {selectedCourse.locationName || '-'}
                       </div>
                     </div>
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                      <div className="text-slate-400">Metode Validasi</div>
+                      <div className="text-slate-400">Validasi</div>
                       <div className="font-mono font-semibold text-amber-300 mt-0.5">
                         {selectedCourse.validationMethod}
                       </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5">
-                        Radius Default: {selectedCourse.defaultGpsRadiusMeters}m
-                      </div>
+                      {selectedCourse.validationMethod !== ValidationMethod.QR_ONLY && (
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          Radius {selectedCourse.defaultGpsRadiusMeters}m
+                        </div>
+                      )}
                     </div>
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                      <div className="text-slate-400">Aturan Urutan Pos</div>
+                      <div className="text-slate-400">Urutan Pos</div>
                       <div className="font-semibold text-white mt-0.5">
-                        {selectedCourse.enforceOrder
-                          ? 'Wajib Berurutan'
-                          : 'Bebas (Score-O)'}
+                        {selectedCourse.enforceOrder ? 'Berurutan' : 'Bebas'}
                       </div>
                       <div className="text-[11px] text-emerald-400 mt-0.5">
-                        Total Pos: {selectedCourse.checkpoints.length} CP
+                        {selectedCourse.checkpoints.length} CP
                       </div>
                     </div>
                     <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800">
-                      <div className="text-slate-400">Durasi &amp; Penalti</div>
+                      <div className="text-slate-400">Batas Waktu</div>
                       <div className="font-mono font-semibold text-sky-300 mt-0.5">
                         {selectedCourse.durationMinutes &&
                         selectedCourse.durationMinutes > 0
-                          ? `${selectedCourse.durationMinutes} Menit`
-                          : 'Tanpa Batas Waktu'}
+                          ? `${selectedCourse.durationMinutes} mnt`
+                          : 'Bebas'}
                       </div>
-                      <div className="text-[11px] text-rose-300 mt-0.5">
-                        {selectedCourse.durationMinutes &&
+                      {selectedCourse.durationMinutes &&
                         selectedCourse.durationMinutes > 0 &&
-                        selectedCourse.overtimePenaltyEnabled
-                          ? `Penalti: -${
-                              selectedCourse.overtimePenaltyPointsPerMinute || 0
-                            } poin/mnt`
-                          : 'Tanpa Penalti Waktu'}
-                      </div>
+                        selectedCourse.overtimePenaltyEnabled && (
+                          <div className="text-[11px] text-rose-300 mt-0.5">
+                            -{selectedCourse.overtimePenaltyPointsPerMinute || 0} pts/mnt
+                          </div>
+                        )}
                     </div>
                   </div>
 
-                  {/* Info Pemusatan QR Code Massal */}
+                  {/* Shortcut Cetak QR */}
                   <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
                     <div className="text-slate-300 font-medium">
-                      QR Code Course (Setup, Start, {selectedCourse.checkpoints.length} CP, Finish)
+                      QR Lintasan (Setup, Start, {selectedCourse.checkpoints.length} CP, Finish)
                     </div>
                     <button
                       type="button"
                       onClick={() => setBulkPrintCourse(selectedCourse)}
-                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1.5 transition"
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1.5 transition cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5" />
-                      Cetak Semua QR Course
+                      Cetak QR
                     </button>
                   </div>
                 </div>
               ) : (
                 <p className="text-xs text-slate-400">
-                  Silakan buat Course di tab Course &amp; Peta.
+                  Belum ada Course. Buat di tab Course &amp; Peta.
                 </p>
               )}
             </div>
 
-            {/* Register Participant Form / Read-Only Participant Monitor */}
+            {/* Daftar Peserta + Form Tambah Peserta Terlipat */}
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="border-b border-slate-800 pb-3">
+              <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <h3 className="text-base font-bold text-white">
-                  {isSuperAdminReadOnly
-                    ? 'Daftar Peserta'
-                    : 'Tambah Peserta / Tim'}
+                  Peserta ({dashboard.participants.length})
                 </h3>
+                {!isSuperAdminReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddParticipantForm((prev) => !prev)}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition cursor-pointer ${
+                      showAddParticipantForm
+                        ? 'bg-slate-800 text-slate-200 border border-slate-700'
+                        : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                    }`}
+                  >
+                    {showAddParticipantForm ? (
+                      <>
+                        <X className="w-3.5 h-3.5" />
+                        Tutup
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-3.5 h-3.5" />
+                        Tambah
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
 
-              {isSuperAdminReadOnly ? (
-                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-400 flex items-center gap-2">
-                  <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                  <span>Mode Pantau aktif. Tambah/edit peserta dikunci.</span>
-                </div>
-              ) : (
+              {!isSuperAdminReadOnly && showAddParticipantForm && (
                 <form
                   onSubmit={handleCreateParticipant}
-                  className="space-y-3 text-xs"
+                  className="space-y-3 text-xs p-3.5 rounded-xl bg-slate-950/70 border border-slate-800"
                 >
                   <div>
                     <label className="block text-slate-300 mb-1">
-                      Nama Peserta Pendaftar *
+                      Nama *
                     </label>
                     <input
                       type="text"
@@ -3557,7 +3623,7 @@ export default function OrganizerDashboard({
                   <div>
                     <div className="flex items-center justify-between gap-2 mb-1">
                       <label className="block text-slate-300">
-                        Nama Tim (Wajib) *
+                        Nama Tim *
                       </label>
                       {partName.trim() && partTeam.trim() !== partName.trim() && (
                         <button
@@ -3565,7 +3631,7 @@ export default function OrganizerDashboard({
                           onClick={() => setPartTeam(partName.trim())}
                           className="text-[10px] font-semibold text-amber-400 hover:text-amber-300 underline cursor-pointer"
                         >
-                          Individu? Pakai Nama Pendaftar
+                          Samakan Nama
                         </button>
                       )}
                     </div>
@@ -3581,7 +3647,7 @@ export default function OrganizerDashboard({
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="block text-slate-300 mb-1">
-                        Gender (Opsional)
+                        Gender
                       </label>
                       <select
                         value={partGender}
@@ -3597,7 +3663,7 @@ export default function OrganizerDashboard({
                     </div>
                     <div>
                       <label className="block text-slate-300 mb-1">
-                        Kelompok Umur
+                        Umur
                       </label>
                       <select
                         value={partAgeGroup}
@@ -3606,9 +3672,7 @@ export default function OrganizerDashboard({
                       >
                         {ORIENTEERING_AGE_GROUPS.map((ag) => (
                           <option key={ag} value={ag}>
-                            {ag === 'Semua Umur'
-                              ? 'Semua Umur (Tanpa Kelompok)'
-                              : ag}
+                            {ag}
                           </option>
                         ))}
                       </select>
@@ -3616,11 +3680,11 @@ export default function OrganizerDashboard({
                   </div>
                   <div>
                     <label className="block text-slate-300 mb-1">
-                      No. WhatsApp / Telepon (Opsional)
+                      No. WhatsApp
                     </label>
                     <input
                       type="text"
-                      placeholder="0812..."
+                      placeholder="0812... (opsional)"
                       value={partPhone}
                       onChange={(e) => setPartPhone(e.target.value)}
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
@@ -3628,7 +3692,7 @@ export default function OrganizerDashboard({
                   </div>
                   <div>
                     <label className="block text-slate-300 mb-1">
-                      Password Tim (Min. 6 Karakter) *
+                      Password *
                     </label>
                     <div className="relative">
                       <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
@@ -3636,7 +3700,7 @@ export default function OrganizerDashboard({
                         type="password"
                         required
                         minLength={6}
-                        placeholder="Minimal 6 karakter (bebas kombinasi)"
+                        placeholder="Min. 6 karakter"
                         value={partPin}
                         onChange={(e) => setPartPin(e.target.value)}
                         className="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-amber-400 font-mono text-xs"
@@ -3650,18 +3714,18 @@ export default function OrganizerDashboard({
                   )}
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold transition flex items-center justify-center gap-1.5"
+                    className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
-                    Simpan Akun Peserta
+                    Simpan Peserta
                   </button>
                 </form>
               )}
 
-              <div className="pt-2 border-t border-slate-800 space-y-2">
+              <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-xs font-semibold text-slate-300">
-                    Daftar Peserta Terdaftar ({dashboard.participants.length})
+                  <div className="text-xs font-semibold text-slate-400">
+                    Daftar Terdaftar
                   </div>
                   {!isSuperAdminReadOnly && (
                     dashboard.currentOrganizer?.isSuperAdmin ? (
@@ -3872,612 +3936,477 @@ export default function OrganizerDashboard({
 
       {/* TAB 2: UNIFIED COURSE MANAGEMENT + INTERACTIVE MAP */}
       {activeTab === 'COURSES' && dashboard && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left 5 cols: Create Unified Course Form (or Read-Only Superadmin Monitor Panel) */}
-              <div className="lg:col-span-5 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="border-b border-slate-800 pb-3">
+        <div className="space-y-5">
+          {/* Baris Atas Ringkas: Daftar Course + Tombol Buat Course (Form Terlipat agar Peta Langsung Tampil) */}
+          <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-4 sm:p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <h3 className="text-sm font-bold text-white">
-                  {isSuperAdminReadOnly
-                    ? 'Mode Pantau Course'
-                    : 'Buat Course Baru'}
+                  Daftar Course ({filteredCoursesByOrganizer.length})
                 </h3>
+                {!isSuperAdminUser && (
+                  <span className="text-[11px] font-mono text-slate-400">
+                    · Kuota:{' '}
+                    <strong className={isOrgQuotaReached ? 'text-rose-400' : 'text-amber-300'}>
+                      {isOrgQuotaUnlimited
+                        ? 'Tak Terbatas'
+                        : `${currentOrgCoursesCount}/${currentOrgMaxCourses}`}
+                    </strong>
+                  </span>
+                )}
               </div>
 
-              {isSuperAdminReadOnly ? (
-                <div className="space-y-3 text-xs">
-                  <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300 flex items-start gap-2.5">
-                    <Lock className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
-                    <span>
-                      Mode Pantau aktif. Pilih Course di sebelah kanan untuk melihat peta pos, lembar info, dan cetak QR.
-                    </span>
+              {!isSuperAdminReadOnly && (
+                <button
+                  type="button"
+                  disabled={isCourseCreationDisabled && !showCreateCourseForm}
+                  onClick={() => setShowCreateCourseForm((prev) => !prev)}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                    showCreateCourseForm
+                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                      : isCourseCreationDisabled
+                        ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                        : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm'
+                  }`}
+                >
+                  {showCreateCourseForm ? (
+                    <>
+                      <X className="w-3.5 h-3.5" />
+                      Tutup Form
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-3.5 h-3.5" />
+                      {isOrgQuotaReached
+                        ? 'Kuota Penuh'
+                        : isOrgExpired
+                          ? 'Akun Kedaluwarsa'
+                          : 'Buat Course'}
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {!isSuperAdminReadOnly && showCreateCourseForm && (
+              <form
+                onSubmit={handleCreateCourse}
+                className="p-4 rounded-xl bg-slate-950/75 border border-amber-500/30 space-y-3.5 text-xs"
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Nama Course *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Contoh: Sprint Orienteering Umum"
+                      value={newCourseName}
+                      onChange={(e) => setNewCourseName(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Lokasi
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Opsional"
+                      value={newCourseLocation}
+                      onChange={(e) => setNewCourseLocation(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Tanggal *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={newCourseDate}
+                      onChange={(e) => setNewCourseDate(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                    />
                   </div>
                 </div>
-              ) : (
-                <>
-                  {/* Status Kuota & Masa Aktif untuk Organizer */}
-                  {!isSuperAdminUser && (
-                    <div className="p-3 rounded-lg bg-slate-900 border border-slate-700 space-y-2">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="flex items-center gap-1.5 text-slate-300 font-medium">
-                          <Layers className="w-3.5 h-3.5 text-amber-400" />
-                          Kuota Course:
-                        </span>
-                        <span
-                          className={`font-mono font-bold px-2 py-0.5 rounded text-[11px] ${
-                            isOrgQuotaReached
-                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                              : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                          }`}
-                        >
-                          {isOrgQuotaUnlimited
-                            ? '∞ Tak Terbatas'
-                            : `${currentOrgCoursesCount} / ${currentOrgMaxCourses} Course`}
-                        </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Deskripsi
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Opsional"
+                      value={newCourseDescription}
+                      onChange={(e) => setNewCourseDescription(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Validasi Pos
+                    </label>
+                    <select
+                      value={newCourseValidation}
+                      onChange={(e) =>
+                        setNewCourseValidation(e.target.value as ValidationMethod)
+                      }
+                      className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                    >
+                      <option value={ValidationMethod.QR_AND_GPS}>QR + GPS</option>
+                      <option value={ValidationMethod.QR_ONLY}>QR Saja</option>
+                      <option value={ValidationMethod.GPS_AUTO}>GPS Otomatis</option>
+                      <option value={ValidationMethod.QR_OR_GPS}>QR atau GPS</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Radius GPS (m)
+                    </label>
+                    {newCourseValidation === ValidationMethod.QR_ONLY ? (
+                      <div className="w-full px-3 py-2 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-500 font-mono text-[11px]">
+                        Nonaktif (QR Saja)
                       </div>
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="flex items-center gap-1.5 text-slate-300 font-medium">
-                          <Clock className="w-3.5 h-3.5 text-sky-400" />
-                          Masa Aktif Akun:
-                        </span>
-                        <span
-                          className={`font-mono text-[10px] px-2 py-0.5 rounded border ${
-                            formatExpirationStatus(currentOrgExpiresAt).colorClass
-                          }`}
-                        >
-                          {formatExpirationStatus(currentOrgExpiresAt).label}
-                        </span>
-                      </div>
-
-                      {isOrgQuotaReached && (
-                        <div className="p-2 rounded bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-1.5">
-                          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                          <div>
-                            <strong>Batas Kuota Tercapai!</strong>
-                            <p className="text-[11px] text-rose-300 mt-0.5">
-                              Anda telah menggunakan seluruh jatah kuota ({currentOrgCoursesCount} dari {currentOrgMaxCourses} Course). Silakan hubungi Superadmin untuk menambah jatah course.
-                            </p>
-                          </div>
-                        </div>
-                      )}
-
-                      {isOrgExpired && (
-                        <div className="p-2 rounded bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-1.5">
-                          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                          <div>
-                            <strong>Akun Kedaluwarsa!</strong>
-                            <p className="text-[11px] text-rose-300 mt-0.5">
-                              Masa aktif akun Organizer Anda telah habis. Anda tidak dapat membuat course baru. Silakan hubungi Superadmin untuk memperpanjang masa aktif.
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <form onSubmit={handleCreateCourse} className="space-y-3 text-xs">
-                    <div>
-                      <label className="block text-slate-300 mb-1">
-                        Nama Course *
-                      </label>
+                    ) : (
                       <input
                         type="text"
-                        required
-                        placeholder="Contoh: ORIENTRA SPRINT ORIENTEERING — KATEGORI UMUM"
-                        value={newCourseName}
-                        onChange={(e) => setNewCourseName(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                        inputMode="numeric"
+                        placeholder="35"
+                        value={newCourseRadiusInput}
+                        onChange={(e) =>
+                          setNewCourseRadiusInput(sanitizeDigitsOnly(e.target.value))
+                        }
+                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
                       />
-                    </div>
+                    )}
+                  </div>
+                </div>
 
-                    <div className="grid grid-cols-2 gap-2">
+                {/* Batas Waktu & Penalti */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Batas Waktu (mnt)
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="Kosong = bebas"
+                      value={newCourseDurationInput}
+                      onChange={(e) =>
+                        setNewCourseDurationInput(sanitizeDigitsOnly(e.target.value))
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
+                    />
+                  </div>
+                  <div className="flex flex-col justify-end">
+                    <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-900 border border-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={newCoursePenaltyEnabled}
+                        onChange={(e) =>
+                          setNewCoursePenaltyEnabled(e.target.checked)
+                        }
+                        className="rounded border-slate-700"
+                      />
+                      <span>Penalti Terlambat</span>
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-rose-300 mb-1">
+                      Penalti / Menit
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      disabled={!newCoursePenaltyEnabled}
+                      placeholder="10"
+                      value={newCoursePenaltyInput}
+                      onChange={(e) =>
+                        setNewCoursePenaltyInput(sanitizeDigitsOnly(e.target.value))
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-rose-200 font-mono disabled:opacity-40"
+                    />
+                  </div>
+                </div>
+
+                {/* Mode Lomba */}
+                <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-amber-300">Mode Lomba</span>
+                    <div className="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => setNewCourseRaceMode(CourseRaceMode.REGULAR)}
+                        className={`px-3 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                          newCourseRaceMode === CourseRaceMode.REGULAR
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Reguler
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewCourseRaceMode(CourseRaceMode.RELAY)}
+                        className={`px-3 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                          newCourseRaceMode === CourseRaceMode.RELAY
+                            ? 'bg-purple-500 text-white'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Relay Estafet
+                      </button>
+                    </div>
+                  </div>
+
+                  {newCourseRaceMode === CourseRaceMode.RELAY && (
+                    <div className="pt-2 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-4 gap-2.5 text-[11px]">
                       <div>
-                        <label className="block text-slate-300 mb-1">
-                          Lokasi Lomba (Opsional)
+                        <label className="block text-purple-200 mb-1">
+                          Jumlah Sub-Team
                         </label>
                         <input
                           type="text"
-                          placeholder="Boleh dikosongkan"
-                          value={newCourseLocation}
-                          onChange={(e) => setNewCourseLocation(e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-300 mb-1">
-                          Tanggal Lomba *
-                        </label>
-                        <input
-                          type="date"
-                          required
-                          value={newCourseDate}
-                          onChange={(e) => setNewCourseDate(e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-slate-300 mb-1">
-                        Deskripsi / Instruksi Course (Opsional)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Lintasan cepat kontrol wajib / bebas"
-                        value={newCourseDescription}
-                        onChange={(e) => setNewCourseDescription(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-slate-300 mb-1">
-                          Metode Validasi Pos
-                        </label>
-                        <select
-                          value={newCourseValidation}
+                          inputMode="numeric"
+                          placeholder="3"
+                          value={newCourseRelaySubTeamCount}
                           onChange={(e) =>
-                            setNewCourseValidation(
-                              e.target.value as ValidationMethod
+                            setNewCourseRelaySubTeamCount(
+                              sanitizeDigitsOnly(e.target.value)
                             )
                           }
-                          className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white font-mono"
+                        />
+                      </div>
+                      <div className="flex flex-col justify-end">
+                        <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
+                          <input
+                            type="checkbox"
+                            checked={newCourseRelayEnforceSeq}
+                            onChange={(e) =>
+                              setNewCourseRelayEnforceSeq(e.target.checked)
+                            }
+                            className="rounded border-slate-700"
+                          />
+                          <span>Kunci Giliran</span>
+                        </label>
+                      </div>
+                      <div>
+                        <label className="block text-purple-200 mb-1">
+                          Skor DNF
+                        </label>
+                        <select
+                          value={newCourseRelayDnfMode}
+                          onChange={(e) =>
+                            setNewCourseRelayDnfMode(
+                              e.target.value as RelayDnfScoringMode
+                            )
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white"
                         >
-                          <option value={ValidationMethod.QR_AND_GPS}>
-                            QR + GPS
+                          <option value={RelayDnfScoringMode.PARTIAL_WITH_PENALTY}>
+                            Skor CP - Penalti
                           </option>
-                          <option value={ValidationMethod.QR_ONLY}>
-                            QR Saja
-                          </option>
-                          <option value={ValidationMethod.GPS_AUTO}>
-                            GPS Otomatis
-                          </option>
-                          <option value={ValidationMethod.QR_OR_GPS}>
-                            QR atau GPS
+                          <option value={RelayDnfScoringMode.ZERO}>
+                            0 Poin (Hangus)
                           </option>
                         </select>
                       </div>
                       <div>
-                        <label className="block text-slate-300 mb-1">
-                          Radius GPS Default (m)
+                        <label className="block text-rose-300 mb-1">
+                          Penalti DNF
                         </label>
-                        {newCourseValidation === ValidationMethod.QR_ONLY ? (
-                          <div className="w-full px-3 py-2 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-500 font-mono text-[11px]">
-                            Nonaktif (Mode QR Saja)
-                          </div>
-                        ) : (
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            placeholder="35"
-                            value={newCourseRadiusInput}
-                            onChange={(e) =>
-                              setNewCourseRadiusInput(
-                                sanitizeDigitsOnly(e.target.value)
-                              )
-                            }
-                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono"
-                          />
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Durasi Course & Opsi Penalti Keterlambatan */}
-                    <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2.5">
-                      <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
-                        <Timer className="w-3.5 h-3.5" />
-                        <span>Pengaturan Durasi &amp; Penalti Keterlambatan</span>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-slate-400 text-[11px] mb-1">
-                            Durasi Course / Batas Waktu (Menit)
-                          </label>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            placeholder="Kosongkan jika tanpa batas"
-                            value={newCourseDurationInput}
-                            onChange={(e) =>
-                              setNewCourseDurationInput(
-                                sanitizeDigitsOnly(e.target.value)
-                              )
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
-                          />
-                        </div>
-                        <div className="flex flex-col justify-end">
-                          <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
-                            <input
-                              type="checkbox"
-                              checked={newCoursePenaltyEnabled}
-                              onChange={(e) =>
-                                setNewCoursePenaltyEnabled(e.target.checked)
-                              }
-                              className="rounded border-slate-700"
-                            />
-                            <span>Aktifkan Penalti Terlambat</span>
-                          </label>
-                        </div>
-                      </div>
-
-                      {newCoursePenaltyEnabled && (
-                        <div>
-                          <label className="block text-rose-300 text-[11px] mb-1">
-                            Pengurangan Poin tiap Menit Keterlambatan (Poin / Menit)
-                          </label>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            placeholder="Contoh: 10"
-                            value={newCoursePenaltyInput}
-                            onChange={(e) =>
-                              setNewCoursePenaltyInput(
-                                sanitizeDigitsOnly(e.target.value)
-                              )
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-rose-500/40 text-rose-200 font-mono"
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Pilihan Konsep / Mode Lomba: Lomba Biasa vs Estafet Relay Sub-Team */}
-                    <div className="p-3 rounded-lg bg-slate-900/90 border border-amber-500/30 space-y-2.5">
-                      <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wide flex items-center justify-between">
-                        <span>Konsep / Mode Lomba</span>
-                        <span className="text-[10px] font-mono text-slate-400">
-                          Reguler vs Relay Estafet
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setNewCourseRaceMode(CourseRaceMode.REGULAR)}
-                          className={`p-2 rounded-lg border text-left transition cursor-pointer ${
-                            newCourseRaceMode === CourseRaceMode.REGULAR
-                              ? 'bg-amber-500/15 border-amber-400 text-amber-200'
-                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          <div className="font-bold text-[11px]">Lomba Biasa</div>
-                          <div className="text-[10px] opacity-80">Individu / Tim Tunggal</div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setNewCourseRaceMode(CourseRaceMode.RELAY)}
-                          className={`p-2 rounded-lg border text-left transition cursor-pointer ${
-                            newCourseRaceMode === CourseRaceMode.RELAY
-                              ? 'bg-purple-500/20 border-purple-400 text-purple-200'
-                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          <div className="font-bold text-[11px]">Mode Relay (Estafet)</div>
-                          <div className="text-[10px] opacity-80">Akumulasi Sub-Team</div>
-                        </button>
-                      </div>
-
-                      {newCourseRaceMode === CourseRaceMode.RELAY && (
-                        <div className="pt-2 border-t border-slate-800 space-y-2.5 text-[11px]">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-purple-200 mb-1">
-                                Jumlah Sub-Team / Tim Induk
-                              </label>
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                placeholder="3"
-                                value={newCourseRelaySubTeamCount}
-                                onChange={(e) =>
-                                  setNewCourseRelaySubTeamCount(
-                                    sanitizeDigitsOnly(e.target.value)
-                                  )
-                                }
-                                className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white font-mono"
-                              />
-                            </div>
-                            <div className="flex flex-col justify-end">
-                              <label className="flex items-center gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
-                                <input
-                                  type="checkbox"
-                                  checked={newCourseRelayEnforceSeq}
-                                  onChange={(e) =>
-                                    setNewCourseRelayEnforceSeq(e.target.checked)
-                                  }
-                                  className="rounded border-slate-700"
-                                />
-                                <span>Kunci Giliran (Relay Lock)</span>
-                              </label>
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="block text-purple-200 mb-1">
-                              Aturan Skor Sub-Team yang DNF
-                            </label>
-                            <select
-                              value={newCourseRelayDnfMode}
-                              onChange={(e) =>
-                                setNewCourseRelayDnfMode(
-                                  e.target.value as RelayDnfScoringMode
-                                )
-                              }
-                              className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-purple-500/40 text-white"
-                            >
-                              <option value={RelayDnfScoringMode.PARTIAL_WITH_PENALTY}>
-                                Poin CP Tervalidasi Tetap Dihitung + Penalti DNF
-                              </option>
-                              <option value={RelayDnfScoringMode.ZERO}>
-                                0 Poin (Hangus jika DNF)
-                              </option>
-                            </select>
-                          </div>
-
-                          {newCourseRelayDnfMode ===
-                            RelayDnfScoringMode.PARTIAL_WITH_PENALTY && (
-                            <div>
-                              <label className="block text-rose-300 mb-1">
-                                Penalti Tambahan Sub-Team DNF (Poin)
-                              </label>
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                placeholder="100"
-                                value={newCourseRelayDnfPenalty}
-                                onChange={(e) =>
-                                  setNewCourseRelayDnfPenalty(
-                                    sanitizeDigitsOnly(e.target.value)
-                                  )
-                                }
-                                className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-rose-500/40 text-rose-200 font-mono"
-                              />
-                            </div>
-                          )}
-
-                          <label className="flex items-start gap-2 text-slate-200 cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-800">
-                            <input
-                              type="checkbox"
-                              checked={newCourseRelayAllowDuplicateCps}
-                              onChange={(e) =>
-                                setNewCourseRelayAllowDuplicateCps(e.target.checked)
-                              }
-                              className="rounded border-slate-700 mt-0.5"
-                            />
-                            <span className="leading-snug">
-                              Izinkan CP yang Sama Dihitung Berulang Antar Sub-Team{' '}
-                              <span className="text-slate-400">
-                                (Matikan jika 1 CP hanya boleh dihitung 1x untuk Tim Induk)
-                              </span>
-                            </span>
-                          </label>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer p-2 rounded-lg bg-slate-900/60 border border-slate-800">
                         <input
-                          type="checkbox"
-                          checked={newCourseEnforceOrder}
-                          onChange={(e) =>
-                            setNewCourseEnforceOrder(e.target.checked)
+                          type="text"
+                          inputMode="numeric"
+                          disabled={
+                            newCourseRelayDnfMode !==
+                            RelayDnfScoringMode.PARTIAL_WITH_PENALTY
                           }
-                          className="rounded border-slate-700"
+                          placeholder="100"
+                          value={newCourseRelayDnfPenalty}
+                          onChange={(e) =>
+                            setNewCourseRelayDnfPenalty(
+                              sanitizeDigitsOnly(e.target.value)
+                            )
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-rose-500/40 text-rose-200 font-mono disabled:opacity-40"
                         />
-                        <span>Wajib Urut (Point-to-Point)</span>
-                      </label>
-                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer p-2 rounded-lg bg-slate-900/60 border border-slate-800">
-                        <input
-                          type="checkbox"
-                          checked={newCourseScoring}
-                          onChange={(e) => setNewCourseScoring(e.target.checked)}
-                          className="rounded border-slate-700"
-                        />
-                        <span>Gunakan Sistem Poin</span>
-                      </label>
-                    </div>
-
-                    <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer p-2.5 rounded-lg bg-slate-900/80 border border-emerald-500/30">
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={newCourseAllowMap}
-                          onChange={(e) => setNewCourseAllowMap(e.target.checked)}
-                          className="rounded border-slate-700"
-                        />
-                        <div>
-                          <span className="font-semibold text-emerald-300">
-                            Tampilkan Peta ke Peserta (Tab Course | Map)
-                          </span>
-                          <div className="text-[10px] text-slate-400">
-                            Matikan jika lomba mewajibkan navigasi peta kertas murni tanpa peta di HP peserta.
-                          </div>
-                        </div>
                       </div>
-                    </label>
+                      <div className="sm:col-span-4">
+                        <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={newCourseRelayAllowDuplicateCps}
+                            onChange={(e) =>
+                              setNewCourseRelayAllowDuplicateCps(e.target.checked)
+                            }
+                            className="rounded border-slate-700"
+                          />
+                          <span>Hitung CP ganda antar sub-team</span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
-                    <button
-                      type="submit"
-                      disabled={isCourseCreationDisabled}
-                      className={`w-full py-2.5 rounded-lg font-bold transition flex items-center justify-center gap-1.5 ${
-                        isCourseCreationDisabled
-                          ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                          : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer shadow-md shadow-amber-500/20'
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={newCourseEnforceOrder}
+                        onChange={(e) =>
+                          setNewCourseEnforceOrder(e.target.checked)
+                        }
+                        className="rounded border-slate-700"
+                      />
+                      <span>Wajib Urut</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={newCourseScoring}
+                        onChange={(e) => setNewCourseScoring(e.target.checked)}
+                        className="rounded border-slate-700"
+                      />
+                      <span>Sistem Poin</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-emerald-300 font-semibold cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={newCourseAllowMap}
+                        onChange={(e) => setNewCourseAllowMap(e.target.checked)}
+                        className="rounded border-slate-700"
+                      />
+                      <span>Tampilkan Peta ke Peserta</span>
+                    </label>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isCourseCreationDisabled}
+                    className={`px-5 py-2 rounded-lg font-bold transition flex items-center gap-1.5 ${
+                      isCourseCreationDisabled
+                        ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                        : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer shadow-sm'
+                    }`}
+                  >
+                    <Plus className="w-4 h-4" />
+                    Simpan Course
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {filteredCoursesByOrganizer.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-400 border border-dashed border-slate-800 rounded-xl">
+                Belum ada Course.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                {filteredCoursesByOrganizer.map((c: Course) => {
+                  const isSelected = selectedCourse?.id === c.id;
+                  return (
+                    <div
+                      key={c.id}
+                      onClick={() => {
+                        setSelectedCourseId(c.id);
+                        setIsEditingCourse(false);
+                        setEditingCheckpointId(null);
+                      }}
+                      className={`p-3 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2.5 ${
+                        isSelected
+                          ? 'bg-amber-500/10 border-amber-500/50 text-white'
+                          : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/60'
                       }`}
                     >
-                      <Plus className="w-4 h-4" />
-                      {isOrgQuotaReached
-                        ? 'Batas Kuota Course Tercapai'
-                        : isOrgExpired
-                          ? 'Masa Aktif Akun Kedaluwarsa'
-                          : 'Buat Course Baru'}
-                    </button>
-                  </form>
-                </>
-              )}
-            </div>
-
-            {/* Right 7 cols: Existing Courses List */}
-            <div className="lg:col-span-7 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Daftar Course ({filteredCoursesByOrganizer.length})
-                  </h3>
-                </div>
-              </div>
-
-              {filteredCoursesByOrganizer.length === 0 ? (
-                <div className="p-8 text-center text-xs text-slate-400 border border-dashed border-slate-800 rounded-xl">
-                  Belum ada Course untuk filter Organizer yang dipilih.
-                </div>
-              ) : (
-                <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
-                  {filteredCoursesByOrganizer.map((c: Course) => {
-                    const isSelected = selectedCourse?.id === c.id;
-                    return (
-                      <div
-                        key={c.id}
-                        onClick={() => {
-                          setSelectedCourseId(c.id);
-                          setIsEditingCourse(false);
-                          setEditingCheckpointId(null);
-                        }}
-                        className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                          isSelected
-                            ? 'bg-amber-500/10 border-amber-500/50 text-white'
-                            : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/60'
-                        }`}
-                      >
-                        <div className="space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-bold text-sm text-white">
-                              {c.name}
-                            </span>
-                            {isSuperAdminUser && c.createdByOrganizerName && (
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                                🏢 {c.createdByOrganizerName}
-                              </span>
-                            )}
-                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                              {c.checkpoints.length} CP
-                            </span>
-                            {c.raceMode === CourseRaceMode.RELAY && (
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
-                                🏃 RELAY {c.relaySubTeamCount || 3} Sub-Team
-                              </span>
-                            )}
-                            {c.durationMinutes && c.durationMinutes > 0 ? (
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20">
-                                ⏱ {c.durationMinutes}m
-                                {c.overtimePenaltyEnabled &&
-                                c.overtimePenaltyPointsPerMinute
-                                  ? ` (-${c.overtimePenaltyPointsPerMinute}pts/m)`
-                                  : ''}
-                              </span>
-                            ) : null}
-                          </div>
-                          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
-                            {c.locationName && (
-                              <span className="flex items-center gap-1">
-                                <MapPin className="w-3 h-3 text-slate-500" />
-                                {c.locationName}
-                              </span>
-                            )}
-                            <span className="flex items-center gap-1">
-                              <Calendar className="w-3 h-3 text-slate-500" />
-                              {c.date}
-                            </span>
-                            <span className="font-mono text-amber-300/90">
-                              Validasi: {c.validationMethod} (
-                              {c.defaultGpsRadiusMeters}m)
-                            </span>
-                          </div>
+                      <div className="min-w-0 space-y-1">
+                        <div className="font-bold text-xs sm:text-sm text-white truncate">
+                          {c.name}
                         </div>
-
-                        <div className="flex items-center gap-2 shrink-0">
-                          {isSelected ? (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-xs shadow-sm">
-                              <Check className="w-3.5 h-3.5" />
-                              Sedang Aktif
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 text-slate-300 border border-slate-700 font-medium text-xs">
-                              Pilih Course
-                            </span>
-                          )}
+                        <div className="text-[11px] text-slate-400 truncate">
+                          {c.checkpoints.length} CP · {c.date}
+                          {c.raceMode === CourseRaceMode.RELAY
+                            ? ` · Relay ${c.relaySubTeamCount || 3}`
+                            : ''}
+                          {isSuperAdminUser && c.createdByOrganizerName
+                            ? ` · ${c.createdByOrganizerName}`
+                            : ''}
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+
+                      {isSelected && (
+                        <span className="text-[10px] font-bold text-amber-400 shrink-0">
+                          Aktif
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Bottom Row: Selected Course Active Management, Map Planner & Checkpoint Table */}
           {selectedCourse && effectiveSelectedCourse && (
             <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-5">
-              {/* Header Course Aktif + Tombol Edit Course, Hapus Course & Print QR Massal */}
+              {/* Header Course Aktif (Metadata Ringkas 1 Baris Tanpa Deretan Pill Panjang) */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
-                <div>
+                <div className="space-y-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                    <h2 className="text-lg font-bold text-white">
+                      {effectiveSelectedCourse.name}
+                    </h2>
+                    {hasUnsavedCourseEdits && (
+                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400 font-bold">
+                        Belum Disimpan
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
+                    <span>
                       {effectiveSelectedCourse.locationName
                         ? `${effectiveSelectedCourse.locationName} (${effectiveSelectedCourse.date})`
                         : effectiveSelectedCourse.date}
                     </span>
-                    <span className="text-xs font-mono text-slate-400">
-                      Validasi: {effectiveSelectedCourse.validationMethod}
-                      {effectiveSelectedCourse.validationMethod !==
-                      ValidationMethod.QR_ONLY
-                        ? ` • Radius Default: ${effectiveSelectedCourse.defaultGpsRadiusMeters}m`
-                        : ' (Tanpa Radius GPS)'}
+                    <span aria-hidden="true">·</span>
+                    <span className="text-amber-300/90 font-mono">
+                      {effectiveSelectedCourse.validationMethod}
+                      {effectiveSelectedCourse.validationMethod !== ValidationMethod.QR_ONLY
+                        ? ` ${effectiveSelectedCourse.defaultGpsRadiusMeters}m`
+                        : ''}
                     </span>
-                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
-                      {effectiveSelectedCourse.enforceOrder
-                        ? 'Wajib Urut (Garis Alur Aktif)'
-                        : 'Urutan Bebas (Tanpa Garis Alur)'}
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {effectiveSelectedCourse.enforceOrder ? 'Urut' : 'Bebas'}
                     </span>
-                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
-                      {effectiveSelectedCourse.durationMinutes &&
-                      effectiveSelectedCourse.durationMinutes > 0
-                        ? `Durasi: ${effectiveSelectedCourse.durationMinutes} Menit${
-                            effectiveSelectedCourse.overtimePenaltyEnabled
-                              ? ` • Penalti Telat: -${
-                                  effectiveSelectedCourse.overtimePenaltyPointsPerMinute ||
-                                  0
-                                } pts/mnt`
-                              : ' (Tanpa Penalti)'
-                          }`
-                        : 'Tanpa Batas Durasi'}
-                    </span>
+                    {effectiveSelectedCourse.durationMinutes &&
+                      effectiveSelectedCourse.durationMinutes > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-sky-300 font-mono">
+                            {effectiveSelectedCourse.durationMinutes} mnt
+                            {effectiveSelectedCourse.overtimePenaltyEnabled
+                              ? ` (-${effectiveSelectedCourse.overtimePenaltyPointsPerMinute || 0}/mnt)`
+                              : ''}
+                          </span>
+                        </>
+                      )}
                     {selectedCourse.raceMode === CourseRaceMode.RELAY && (
-                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/40 font-bold">
-                        🏃 Mode Relay • {selectedCourse.relaySubTeamCount || 3} Sub-Team
-                        {selectedCourse.relayEnforceSequential !== false
-                          ? ' (Giliran Terkunci)'
-                          : ' (Giliran Bebas)'}
-                        {selectedCourse.relayDnfScoringMode ===
-                        RelayDnfScoringMode.PARTIAL_WITH_PENALTY
-                          ? ` • DNF: Skor CP - ${selectedCourse.relayDnfPenaltyPoints || 0}`
-                          : ' • DNF: 0 Poin'}
-                        {selectedCourse.relayAllowDuplicateCheckpoints === false
-                          ? ' • CP Unik'
-                          : ' • CP Akumulasi Penuh'}
-                      </span>
-                    )}
-                    {hasUnsavedCourseEdits && (
-                      <span className="text-xs font-mono px-2.5 py-0.5 rounded bg-amber-500/25 text-amber-200 border border-amber-400 font-bold animate-pulse">
-                        ⚠️ Perubahan Edit Belum Disimpan ke Server!
-                      </span>
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-purple-300 font-semibold">
+                          Relay {selectedCourse.relaySubTeamCount || 3} Sub-Team
+                        </span>
+                      </>
                     )}
                   </div>
-                  <h2 className="text-lg font-bold text-white mt-1">
-                    {effectiveSelectedCourse.name}
-                  </h2>
                 </div>
 
                 {/* Action Buttons: Edit Course, Delete Course, Bulk Print QR, and Course Info Sheet */}
@@ -4553,11 +4482,8 @@ export default function OrganizerDashboard({
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-500/20 pb-2">
                     <div className="font-bold text-sky-300 flex items-center gap-2 text-sm">
                       <Edit3 className="w-4 h-4" />
-                      Edit / Update Pengaturan Course Aktif ({selectedCourse.name})
+                      Edit Course
                     </div>
-                    <span className="text-[11px] text-emerald-300 font-mono">
-                      ⚡ Klik "Simpan Perubahan Course" agar HP Peserta menerima pengaturan terbaru
-                    </span>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -4939,17 +4865,13 @@ export default function OrganizerDashboard({
                         <>
                           <Edit3 className="w-4 h-4 text-amber-400" />
                           <span className="text-amber-300 font-bold">
-                            Mode Edit Pos ({cpCode}) — Klik di peta jika ingin
-                            menggeser titik koordinatnya
+                            Edit Pos {cpCode} (klik peta untuk geser)
                           </span>
                         </>
                       ) : (
                         <>
                           <Plus className="w-4 h-4 text-amber-400" />
-                          <span>
-                            Tambah Checkpoint (Pos Kontrol) ke{' '}
-                            {effectiveSelectedCourse.name}
-                          </span>
+                          <span>Tambah Pos</span>
                         </>
                       )}
                     </div>
@@ -4957,9 +4879,9 @@ export default function OrganizerDashboard({
                       <button
                         type="button"
                         onClick={handleCancelEditCheckpoint}
-                        className="text-xs text-slate-300 hover:text-white flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700"
+                        className="text-xs text-slate-300 hover:text-white flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 cursor-pointer"
                       >
-                        <X className="w-3.5 h-3.5" /> Batal Edit Pos
+                        <X className="w-3.5 h-3.5" /> Batal
                       </button>
                     )}
                   </div>
@@ -4980,11 +4902,11 @@ export default function OrganizerDashboard({
                     </div>
                     <div className="sm:col-span-2">
                       <label className="block text-slate-400 mb-1">
-                        Nama Lokasi Pos (Opsional)
+                        Nama Pos
                       </label>
                       <input
                         type="text"
-                        placeholder="Boleh dikosongkan"
+                        placeholder="Opsional"
                         value={cpName}
                         onChange={(e) => setCpName(e.target.value)}
                         className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white"
@@ -5005,7 +4927,7 @@ export default function OrganizerDashboard({
                     </div>
                     <div>
                       <label className="block text-slate-400 mb-1">
-                        Latitude (Klik Peta)
+                        Latitude
                       </label>
                       <input
                         type="text"
@@ -5016,7 +4938,7 @@ export default function OrganizerDashboard({
                     </div>
                     <div>
                       <label className="block text-slate-400 mb-1">
-                        Longitude (Klik Peta)
+                        Longitude
                       </label>
                       <input
                         type="text"
@@ -5029,10 +4951,10 @@ export default function OrganizerDashboard({
 
                   <div className="flex flex-wrap items-center justify-end gap-2.5">
                     {effectiveSelectedCourse.validationMethod !==
-                    ValidationMethod.QR_ONLY ? (
+                    ValidationMethod.QR_ONLY && (
                       <>
                         <span className="text-slate-400 whitespace-nowrap">
-                          Radius Validasi GPS (m):
+                          Radius (m):
                         </span>
                         <input
                           type="text"
@@ -5042,38 +4964,27 @@ export default function OrganizerDashboard({
                           onChange={(e) =>
                             setCpRadiusInput(sanitizeDigitsOnly(e.target.value))
                           }
-                          className="w-24 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+                          className="w-20 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
                         />
                       </>
-                    ) : (
-                      <span className="text-[11px] font-mono text-slate-500">
-                        Validasi QR Saja (Tanpa Radius GPS)
-                      </span>
                     )}
                     <button
                       type="submit"
-                      className="px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold whitespace-nowrap transition"
+                      className="px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold whitespace-nowrap transition cursor-pointer"
                     >
-                      {editingCheckpointId
-                        ? 'Simpan Perubahan Pos'
-                        : '+ Tambah Pos ke Peta'}
+                      {editingCheckpointId ? 'Simpan Pos' : '+ Tambah Pos'}
                     </button>
                   </div>
                 </form>
               )}
 
-              {/* Baris Kontrol Auto-Sort & Tabel Daftar Pos Checkpoint */}
+              {/* Baris Kontrol Urut & Tabel Daftar Pos Checkpoint */}
               <div className="space-y-2">
                 {selectedCourse.checkpoints.length > 0 && (
                   <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-slate-300">
-                        Daftar Pos ({selectedCourse.checkpoints.length} CP)
-                      </span>
-                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                        Auto-Sort Aktif
-                      </span>
-                    </div>
+                    <span className="font-semibold text-slate-300">
+                      Daftar Pos ({selectedCourse.checkpoints.length} CP)
+                    </span>
                     {!isSuperAdminReadOnly &&
                       selectedCourse.checkpoints.length >= 2 && (
                         <div className="flex items-center gap-1.5">
@@ -5081,17 +4992,15 @@ export default function OrganizerDashboard({
                             type="button"
                             onClick={() => handleSortCheckpoints('CODE')}
                             className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-fuchsia-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
-                            title="Urutkan berdasarkan Kode Pos (CP1, CP2, CP3...)"
                           >
-                            ⇅ Urut Kode Pos (CP1..N)
+                            ⇅ Urut Kode
                           </button>
                           <button
                             type="button"
                             onClick={() => handleSortCheckpoints('NAME')}
                             className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
-                            title="Urutkan berdasarkan Nama Lokasi Pos (A-Z / 1-9)"
                           >
-                            ⇅ Urut Nama Lokasi
+                            ⇅ Urut Nama
                           </button>
                         </div>
                       )}
@@ -5102,16 +5011,11 @@ export default function OrganizerDashboard({
                   <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
-                      <th className="py-2.5 px-3">Urutan</th>
-                      <th className="py-2.5 px-3">Simbol &amp; Kode Pos</th>
-                      <th className="py-2.5 px-3">Nama Lokasi (Opsional)</th>
+                      <th className="py-2.5 px-3">#</th>
+                      <th className="py-2.5 px-3">Kode Pos</th>
+                      <th className="py-2.5 px-3">Nama Pos</th>
                       <th className="py-2.5 px-3">Poin</th>
-                      <th className="py-2.5 px-3">
-                        {effectiveSelectedCourse.validationMethod !==
-                        ValidationMethod.QR_ONLY
-                          ? 'Koordinat GPS & Radius'
-                          : 'Koordinat Peta'}
-                      </th>
+                      <th className="py-2.5 px-3">Koordinat</th>
                       <th className="py-2.5 px-3 text-right">Aksi</th>
                     </tr>
                   </thead>
@@ -5438,29 +5342,19 @@ export default function OrganizerDashboard({
                               }`}
                             />
                             {resolvedPos ? (
-                              <div>
-                                <div className="font-semibold text-emerald-300 text-[11px]">
-                                  {resolvedPos.sourceLabel}
+                              <div className="min-w-0">
+                                <div className="font-semibold text-emerald-300 text-[11px] flex flex-wrap items-center gap-1.5">
+                                  <span>{resolvedPos.sourceLabel}</span>
+                                  {resolvedPos.measuredAt && (
+                                    <span className="text-slate-400 font-normal">
+                                      · {formatTimeAgo(resolvedPos.measuredAt)}
+                                    </span>
+                                  )}
                                 </div>
-                                <div className="font-mono text-slate-200">
-                                  {resolvedPos.latitude.toFixed(5)},{' '}
-                                  {resolvedPos.longitude.toFixed(5)}
-                                  {resolvedPos.accuracyMeters
-                                    ? ` (±${Math.round(
-                                        resolvedPos.accuracyMeters
-                                      )}m)`
-                                    : ''}
-                                </div>
-                                {resolvedPos.measuredAt && (
-                                  <div className="text-[11px] text-slate-400">
-                                    Diperbarui:{' '}
-                                    {formatTimeAgo(resolvedPos.measuredAt)}
-                                  </div>
-                                )}
                               </div>
                             ) : (
                               <span className="text-slate-500">
-                                Menunggu peserta Scan Start atau mengirim sinyal GPS
+                                Belum ada sinyal
                               </span>
                             )}
                           </div>
@@ -5560,7 +5454,7 @@ export default function OrganizerDashboard({
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Klasemen Tim Induk (Akumulasi)
+                      Tim Induk
                     </button>
                     <button
                       type="button"
@@ -5571,12 +5465,12 @@ export default function OrganizerDashboard({
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Rincian Semua Sub-Team
+                      Sub-Team
                     </button>
                   </div>
                 )}
 
-                {/* Opsi Show Split / Hide Split */}
+                {/* Opsi Ringkas / Detail Split */}
                 {(!selectedCourse ||
                   selectedCourse.raceMode !== CourseRaceMode.RELAY ||
                   relayResultViewMode === 'SUBTEAMS') && (
@@ -5590,7 +5484,7 @@ export default function OrganizerDashboard({
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Hide Split
+                      Ringkas
                     </button>
                     <button
                       type="button"
@@ -5601,108 +5495,71 @@ export default function OrganizerDashboard({
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Show Split (#1..#{splitColumnCount || 1})
+                      Split (#1..#{splitColumnCount || 1})
                     </button>
                   </div>
-                )}
-
-                {selectedCourse && !isSuperAdminReadOnly && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIncludeAllRelayLegsInMassStart(false);
-                      setConfirmMassStartCourse(selectedCourse);
-                    }}
-                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold text-xs shadow-md shadow-emerald-500/20 transition cursor-pointer"
-                    title="Lepas serentak semua tim yang sudah Scan Setup QR di Course ini"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-slate-950" />
-                    <span>
-                      Mass Start (
-                      {
-                        dashboard.sessions.filter(
-                          (s: ParticipantSession) =>
-                            s.courseId === selectedCourse.id &&
-                            s.status === SessionStatus.NOT_STARTED
-                        ).length
-                      }{' '}
-                      Siap)
-                    </span>
-                  </button>
                 )}
 
                 {selectedCourse && (
                   <button
                     type="button"
                     onClick={() => setShareSpectatorCourse(selectedCourse)}
-                    className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-bold text-xs transition cursor-pointer"
-                    title="Bagikan Tautan & QR Code Live Leaderboard untuk penonton"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-bold text-xs transition cursor-pointer"
+                    title="Bagikan Link & QR Live Leaderboard Penonton"
                   >
-                    <Radio className="w-4 h-4 text-sky-400 animate-pulse" />
-                    Bagikan Link Penonton
+                    <Radio className="w-3.5 h-3.5 text-sky-400" />
+                    Link Penonton
                   </button>
                 )}
 
                 <button
                   type="button"
                   onClick={() => setIsSpectatorFullscreen(true)}
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-bold text-xs shadow-md shadow-amber-500/20 transition cursor-pointer"
-                  title="Tampilkan layar penuh khusus penonton & TV arena (tanpa tombol admin)"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer"
+                  title="Tampilkan layar penuh khusus TV arena"
                 >
-                  <Maximize2 className="w-4 h-4" />
-                  Layar Penuh Penonton (Live TV)
+                  <Maximize2 className="w-3.5 h-3.5" />
+                  Live TV
                 </button>
 
                 <button
                   onClick={handleExportCsv}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition cursor-pointer"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition cursor-pointer"
                 >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  Export Hasil (CSV)
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  Export CSV
                 </button>
               </div>
             </div>
 
             {/* Filter Gender & Kelompok Umur */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-xs">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400 font-medium">
-                    Filter Gender:
-                  </span>
-                  <select
-                    value={resultGenderFilter}
-                    onChange={(e) => setResultGenderFilter(e.target.value)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
-                  >
-                    <option value="ALL">Semua Gender</option>
-                    {ORIENTEERING_GENDER_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={resultGenderFilter}
+                  onChange={(e) => setResultGenderFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
+                >
+                  <option value="ALL">Semua Gender</option>
+                  {ORIENTEERING_GENDER_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400 font-medium">
-                    Filter Kelompok Umur:
-                  </span>
-                  <select
-                    value={resultAgeGroupFilter}
-                    onChange={(e) => setResultAgeGroupFilter(e.target.value)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
-                  >
-                    <option value="ALL">Semua Kategori Umur</option>
-                    {ORIENTEERING_AGE_GROUPS.map((ag) => (
-                      <option key={ag} value={ag}>
-                        {ag === 'Semua Umur'
-                          ? 'Semua Umur (Tanpa Kelompok Umur)'
-                          : `Kelompok ${ag}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <select
+                  value={resultAgeGroupFilter}
+                  onChange={(e) => setResultAgeGroupFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white font-medium focus:outline-none focus:border-amber-400"
+                >
+                  <option value="ALL">Semua Umur</option>
+                  {ORIENTEERING_AGE_GROUPS.map((ag) => (
+                    <option key={ag} value={ag}>
+                      {ag}
+                    </option>
+                  ))}
+                </select>
 
                 {(resultGenderFilter !== 'ALL' ||
                   resultAgeGroupFilter !== 'ALL') && (
@@ -5712,9 +5569,9 @@ export default function OrganizerDashboard({
                       setResultGenderFilter('ALL');
                       setResultAgeGroupFilter('ALL');
                     }}
-                    className="text-amber-400 hover:underline font-medium"
+                    className="text-amber-400 hover:underline font-medium px-1 cursor-pointer"
                   >
-                    Reset Filter
+                    Reset
                   </button>
                 )}
               </div>
@@ -5759,6 +5616,7 @@ export default function OrganizerDashboard({
                       <th className="py-3 px-3 whitespace-nowrap">Total Pos</th>
                       <th className="py-3 px-3 whitespace-nowrap">Penalti</th>
                       <th className="py-3 px-3 whitespace-nowrap">Total Skor Tim Induk</th>
+                      <th className="py-3 px-3 whitespace-nowrap">Waktu Start</th>
                       <th className="py-3 px-3 whitespace-nowrap">Total Waktu Gabungan</th>
                     </tr>
                   </thead>
@@ -5766,7 +5624,7 @@ export default function OrganizerDashboard({
                     {relayParentLeaderboardRows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={8}
+                          colSpan={9}
                           className="py-8 text-center text-slate-400 text-xs"
                         >
                           Belum ada Tim Induk yang mendaftarkan Sub-Team di Course Relay ini.
@@ -5876,6 +5734,23 @@ export default function OrganizerDashboard({
                           <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm whitespace-nowrap">
                             {team.totalScore} pts
                           </td>
+                          <td className="py-3 px-3 font-mono whitespace-nowrap">
+                            {(() => {
+                              const startParts = formatStartDateTimeParts(team.startedAt);
+                              return startParts.timeLabel !== '-' ? (
+                                <div className="leading-tight">
+                                  <div className="font-semibold text-slate-100">
+                                    {startParts.timeLabel}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {startParts.dateLabel}
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-slate-500">-</span>
+                              );
+                            })()}
+                          </td>
                           <td className="py-3 px-3 font-mono font-bold text-white whitespace-nowrap">
                             {formatElapsedSeconds(team.totalDurationSeconds)}
                           </td>
@@ -5900,6 +5775,7 @@ export default function OrganizerDashboard({
                     <th className="py-3 px-3 whitespace-nowrap">Poin Pos</th>
                     <th className="py-3 px-3 whitespace-nowrap">Penalti Waktu</th>
                     <th className="py-3 px-3 whitespace-nowrap">Total Skor Akhir</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Waktu Start</th>
                     <th className="py-3 px-3 whitespace-nowrap">Waktu Tempuh</th>
                     {showResultSplits &&
                       Array.from({ length: splitColumnCount }, (_, idx) => (
@@ -5923,7 +5799,7 @@ export default function OrganizerDashboard({
                     <tr>
                       <td
                         colSpan={
-                          12 + (showResultSplits ? splitColumnCount + 1 : 0)
+                          13 + (showResultSplits ? splitColumnCount + 1 : 0)
                         }
                         className="py-8 text-center text-slate-400 text-xs"
                       >
@@ -6045,6 +5921,23 @@ export default function OrganizerDashboard({
                         </td>
                         <td className="py-3 px-3 font-mono font-bold text-emerald-400 text-sm whitespace-nowrap">
                           {row.totalScore} pts
+                        </td>
+                        <td className="py-3 px-3 font-mono whitespace-nowrap">
+                          {(() => {
+                            const startParts = formatStartDateTimeParts(row.startedAt);
+                            return startParts.timeLabel !== '-' ? (
+                              <div className="leading-tight">
+                                <div className="font-semibold text-slate-100">
+                                  {startParts.timeLabel}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {startParts.dateLabel}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-500">-</span>
+                            );
+                          })()}
                         </td>
                         <td className="py-3 px-3 font-mono font-bold text-white whitespace-nowrap">
                           {formatElapsedSeconds(row.durationSeconds)}
@@ -6212,97 +6105,99 @@ export default function OrganizerDashboard({
           <div className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="space-y-6">
-              {/* Form Pengaturan Kredensial Superadmin (Ganti Username & PIN) */}
-              <div className="bg-[#0a1f38] border border-purple-500/30 rounded-xl p-5 space-y-4 shadow-lg shadow-purple-950/20">
-                <div className="border-b border-slate-800 pb-3">
-                  <div className="flex items-center gap-2">
-                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/20 text-purple-400">
-                      <KeyRound className="w-4 h-4" />
+              {/* Form Pengaturan Kredensial Superadmin (Terlipat Default agar Fokus ke Organizer) */}
+              <div className="bg-[#0a1f38] border border-purple-500/30 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <KeyRound className="w-4 h-4 text-purple-400 shrink-0" />
+                    <div className="min-w-0">
+                      <h2 className="text-sm font-bold text-white truncate">
+                        Password Superadmin
+                      </h2>
+                      <div className="text-[11px] font-mono text-slate-400 truncate">
+                        {dashboard.currentOrganizer?.username || 'superadmin'}
+                      </div>
                     </div>
-                    <h2 className="text-base font-bold text-white">
-                      Kredensial Superadmin
-                    </h2>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowSuperAdminCredForm((prev) => !prev)}
+                    className="px-2.5 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 text-xs font-bold transition cursor-pointer shrink-0"
+                  >
+                    {showSuperAdminCredForm ? 'Tutup' : 'Ubah'}
+                  </button>
                 </div>
 
-                <form onSubmit={handleUpdateSuperadminCredentials} className="space-y-3">
-                  <div className="rounded-lg bg-slate-950 p-2.5 border border-slate-800 text-xs">
-                    <span className="text-slate-400">Username Login Saat Ini: </span>
-                    <strong className="font-mono text-purple-300">
-                      {dashboard.currentOrganizer?.username || 'superadmin'}
-                    </strong>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Username Superadmin Baru{' '}
-                      <span className="text-slate-500 font-normal">(Opsional)</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={superNewUsername}
-                      onChange={(e) => setSuperNewUsername(e.target.value)}
-                      placeholder="Contoh: superadmin"
-                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Password Superadmin Saat Ini <span className="text-rose-400">*</span>
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      value={superCurrentPin}
-                      onChange={(e) => setSuperCurrentPin(e.target.value)}
-                      placeholder="Password saat ini"
-                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Password Superadmin Baru{' '}
-                      <span className="text-slate-500 font-normal">(Opsional)</span>
-                    </label>
-                    <input
-                      type="password"
-                      value={superNewPin}
-                      onChange={(e) => setSuperNewPin(e.target.value)}
-                      placeholder="Minimal 6 karakter"
-                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
-                    />
-                  </div>
-
-                  {superCredMsg && (
-                    <div
-                      className={`p-2.5 rounded-lg text-xs border ${
-                        superCredMsg.type === 'success'
-                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                          : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                      }`}
-                    >
-                      {superCredMsg.text}
+                {showSuperAdminCredForm && (
+                  <form onSubmit={handleUpdateSuperadminCredentials} className="space-y-3 pt-2 border-t border-slate-800">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Username Baru <span className="text-slate-500 font-normal">(opsional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={superNewUsername}
+                        onChange={(e) => setSuperNewUsername(e.target.value)}
+                        placeholder="superadmin"
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                      />
                     </div>
-                  )}
 
-                  <button
-                    type="submit"
-                    disabled={superCredLoading}
-                    className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow"
-                  >
-                    <KeyRound className="w-3.5 h-3.5" />
-                    {superCredLoading ? 'Menyimpan...' : 'Simpan Kredensial'}
-                  </button>
-                </form>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Password Saat Ini <span className="text-rose-400">*</span>
+                      </label>
+                      <input
+                        type="password"
+                        required
+                        value={superCurrentPin}
+                        onChange={(e) => setSuperCurrentPin(e.target.value)}
+                        placeholder="Password saat ini"
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Password Baru <span className="text-slate-500 font-normal">(opsional)</span>
+                      </label>
+                      <input
+                        type="password"
+                        value={superNewPin}
+                        onChange={(e) => setSuperNewPin(e.target.value)}
+                        placeholder="Min. 6 karakter"
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
+                      />
+                    </div>
+
+                    {superCredMsg && (
+                      <div
+                        className={`p-2.5 rounded-lg text-xs border ${
+                          superCredMsg.type === 'success'
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                            : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                        }`}
+                      >
+                        {superCredMsg.text}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={superCredLoading}
+                      className="w-full py-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer"
+                    >
+                      {superCredLoading ? 'Menyimpan...' : 'Simpan'}
+                    </button>
+                  </form>
+                )}
               </div>
 
               {/* Form Buat Akun Organizer Baru */}
               <div className="bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="border-b border-slate-800 pb-3">
                 <h2 className="text-base font-bold text-white">
-                  Buat Akun Organizer Baru
+                  Buat Akun Organizer
                 </h2>
               </div>
 
@@ -6312,52 +6207,47 @@ export default function OrganizerDashboard({
               >
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Nama Panitia / Organizer{' '}
-                    <span className="text-rose-400">*</span>
+                    Nama Organizer <span className="text-rose-400">*</span>
                   </label>
                   <input
                     type="text"
                     required
                     value={orgNameInput}
                     onChange={(e) => setOrgNameInput(e.target.value)}
-                    placeholder="Contoh: Panitia Cabang Bandung"
+                    placeholder="Contoh: Panitia Bandung"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-purple-400"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Username Login{' '}
-                    <span className="text-slate-500 font-normal">
-                      (Opsional — Otomatis jika kosong)
-                    </span>
+                    Username <span className="text-slate-500 font-normal">(opsional)</span>
                   </label>
                   <input
                     type="text"
                     value={orgUsernameInput}
                     onChange={(e) => setOrgUsernameInput(e.target.value)}
-                    placeholder="Contoh: panitiabandung"
+                    placeholder="Otomatis jika kosong"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Klub / Instansi / Kepanitiaan
+                    Instansi / Klub
                   </label>
                   <input
                     type="text"
                     value={orgOrganizationInput}
                     onChange={(e) => setOrgOrganizationInput(e.target.value)}
-                    placeholder="Contoh: FONI Pengcab Bandung"
+                    placeholder="Opsional"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-purple-400"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Password Login Organizer (Min. 6 karakter){' '}
-                    <span className="text-rose-400">*</span>
+                    Password <span className="text-rose-400">*</span>
                   </label>
                   <input
                     type="text"
@@ -6365,20 +6255,17 @@ export default function OrganizerDashboard({
                     minLength={6}
                     value={orgPinInput}
                     onChange={(e) => setOrgPinInput(e.target.value)}
-                    placeholder="Contoh: orientra123 atau 778899"
+                    placeholder="Min. 6 karakter"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-purple-400"
                   />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Boleh huruf, angka, tanda baca, simbol, minimal 6 karakter. Boleh sama dengan akun organizer lain.
-                  </p>
                 </div>
 
-                {/* Pengaturan Jatah Kuota Course */}
+                {/* Kuota Course */}
                 <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
                       <Layers className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Jatah Kuota Course</span>
+                      <span>Kuota Course</span>
                     </label>
                     <label className="flex items-center gap-1.5 text-xs text-amber-300 cursor-pointer select-none">
                       <input
@@ -6387,11 +6274,11 @@ export default function OrganizerDashboard({
                         onChange={(e) => setOrgIsUnlimited(e.target.checked)}
                         className="rounded border-slate-700 text-amber-500 focus:ring-0"
                       />
-                      <span>Tak Terbatas (Unlimited)</span>
+                      <span>Tak Terbatas</span>
                     </label>
                   </div>
 
-                  {!orgIsUnlimited ? (
+                  {!orgIsUnlimited && (
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
                         <input
@@ -6400,13 +6287,12 @@ export default function OrganizerDashboard({
                           max="100"
                           value={orgMaxCoursesInput}
                           onChange={(e) => setOrgMaxCoursesInput(e.target.value)}
-                          placeholder="Jumlah course (cth: 3)"
+                          placeholder="3"
                           className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
                         />
                         <span className="text-xs text-slate-400 shrink-0 font-medium">Course</span>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[10px] text-slate-500">Pilihan cepat:</span>
                         {[1, 2, 3, 5, 10].map((preset) => (
                           <button
                             key={preset}
@@ -6421,35 +6307,28 @@ export default function OrganizerDashboard({
                                 : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
                             }`}
                           >
-                            {preset} Course
+                            {preset}
                           </button>
                         ))}
                       </div>
                     </div>
-                  ) : (
-                    <div className="p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1.5">
-                      <InfinityIcon className="w-3.5 h-3.5 shrink-0" />
-                      <span>Organizer ini dapat membuat Course sebanyak-banyaknya tanpa batasan.</span>
-                    </div>
                   )}
                 </div>
 
-                {/* Pengaturan Masa Aktif Akun */}
-                <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-sky-400" />
-                      <span>Masa Aktif Akun</span>
-                    </label>
-                  </div>
+                {/* Masa Aktif Akun */}
+                <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2">
+                  <label className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Masa Aktif</span>
+                  </label>
 
                   <div className="grid grid-cols-3 gap-1.5">
                     {[
-                      { id: '1', label: '1 Bulan' },
-                      { id: '3', label: '3 Bulan' },
-                      { id: '6', label: '6 Bulan' },
-                      { id: '9', label: '9 Bulan' },
-                      { id: '12', label: '12 Bulan' },
+                      { id: '1', label: '1 Bln' },
+                      { id: '3', label: '3 Bln' },
+                      { id: '6', label: '6 Bln' },
+                      { id: '9', label: '9 Bln' },
+                      { id: '12', label: '12 Bln' },
                       { id: 'lifetime', label: 'Lifetime' },
                     ].map((opt) => (
                       <button
@@ -6467,16 +6346,16 @@ export default function OrganizerDashboard({
                     ))}
                   </div>
 
-                  {/* Pratinjau Tanggal Expired */}
-                  <div className="text-[11px] text-sky-300 font-mono bg-sky-950/30 p-2 rounded border border-sky-800/40">
-                    {(() => {
-                      if (orgDurationMonths === 'lifetime') return '♾️ Masa Aktif: Lifetime (Selamanya tanpa batas waktu)';
-                      const m = parseInt(orgDurationMonths, 10) || 3;
-                      const d = new Date();
-                      d.setMonth(d.getMonth() + m);
-                      return `📅 Berlaku s/d: ${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`;
-                    })()}
-                  </div>
+                  {orgDurationMonths !== 'lifetime' && (
+                    <div className="text-[11px] text-sky-300 font-mono">
+                      {(() => {
+                        const m = parseInt(orgDurationMonths, 10) || 3;
+                        const d = new Date();
+                        d.setMonth(d.getMonth() + m);
+                        return `s/d ${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+                      })()}
+                    </div>
+                  )}
                 </div>
 
                 {orgManageMsg && (
@@ -6490,7 +6369,7 @@ export default function OrganizerDashboard({
                   className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
-                  Buat Akun Organizer
+                  Buat Organizer
                 </button>
               </form>
             </div>
@@ -6499,21 +6378,14 @@ export default function OrganizerDashboard({
           {/* Daftar Akun Organizer */}
             <div className="lg:col-span-2 bg-[#0a1f38] border border-slate-800 rounded-xl p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                <div>
-                  <span className="text-[11px] font-mono uppercase text-amber-400">
-                    Daftar Penyelenggara Terdaftar
-                  </span>
-                  <h2 className="text-base font-bold text-white">
-                    Manajemen Akun Organizer ({dashboard.organizers?.length || 0}{' '}
-                    Akun)
-                  </h2>
-                </div>
+                <h2 className="text-base font-bold text-white">
+                  Daftar Organizer ({dashboard.organizers?.length || 0})
+                </h2>
               </div>
 
               {!dashboard.organizers || dashboard.organizers.length === 0 ? (
                 <div className="py-12 text-center text-slate-400 text-xs border border-dashed border-slate-800 rounded-xl">
-                  Belum ada akun Organizer tambahan. Gunakan formulir di sebelah
-                  kiri untuk membuat akun login bagi panitia/organizer.
+                  Belum ada akun Organizer.
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -6533,44 +6405,24 @@ export default function OrganizerDashboard({
                       >
                         <div className="space-y-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                            <span className="font-mono text-xs font-bold text-amber-300">
                               {org.code}
                             </span>
                             <span className="font-bold text-white text-sm">
                               {org.name}
                             </span>
                             <span
-                              className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-                                org.isActive
-                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              className={`text-[10px] font-mono font-semibold ${
+                                org.isActive ? 'text-emerald-400' : 'text-rose-400'
                               }`}
                             >
-                              {org.isActive ? 'AKTIF' : 'NONAKTIF / DIBEKUKAN'}
+                              · {org.isActive ? 'Aktif' : 'Nonaktif'}
                             </span>
                           </div>
-                          <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
-                            <span>
-                              Username:{' '}
-                              <code className="text-slate-200 font-mono">
-                                {org.username}
-                              </code>
-                            </span>
-                            {org.organization && (
-                              <span>• Instansi: {org.organization}</span>
-                            )}
-                            <span>
-                              • Course Dibuat:{' '}
-                              <strong className="text-amber-300">
-                                {orgCourses.length}
-                              </strong>
-                            </span>
-                            <span>
-                              • Sesi Peserta:{' '}
-                              <strong className="text-emerald-300">
-                                {orgSessionsCount}
-                              </strong>
-                            </span>
+                          <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2">
+                            <code className="text-slate-300 font-mono">@{org.username}</code>
+                            {org.organization && <span>· {org.organization}</span>}
+                            <span>· {orgSessionsCount} sesi</span>
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2 pt-1">

@@ -349,6 +349,7 @@ export default function ParticipantView({
 
   // Konfirmasi keluar Course (ditempatkan jauh dari tombol Scan)
   const [confirmingLeaveCourse, setConfirmingLeaveCourse] = useState(false);
+  const [showFooterMenu, setShowFooterMenu] = useState(false);
 
   // Pelacakan lokasi berkala (~5 menit) berjalan di latar belakang ke server
   const lastPeriodicAttemptMsRef = useRef<number>(0);
@@ -2738,12 +2739,39 @@ export default function ParticipantView({
     );
   }
 
+  function formatStartDateTimeLabel(isoString?: string | null): string {
+    if (!isoString) return '-';
+    const d = new Date(isoString);
+    if (Number.isNaN(d.getTime())) return '-';
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'Mei',
+      'Jun',
+      'Jul',
+      'Agu',
+      'Sep',
+      'Okt',
+      'Nov',
+      'Des',
+    ];
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mmm = months[d.getMonth()] || String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${dd} ${mmm} ${yyyy}, ${hh}:${mm}:${ss}`;
+  }
+
   function handleDownloadProofCard() {
     if (!participant || !activeCourse || !activeSession) return;
 
     const canvas = document.createElement('canvas');
     canvas.width = 720;
-    canvas.height = 440;
+    canvas.height = 470;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -2787,19 +2815,24 @@ export default function ParticipantView({
     ctx.fillStyle = '#e2e8f0';
     ctx.font = 'bold 18px sans-serif';
     ctx.fillText(
-      `Pos Tervalidasi Server: ${validatedCount} / ${activeCourse.checkpoints.length} Pos`,
+      `Waktu Start: ${formatStartDateTimeLabel(effectiveStartIso)}`,
       32,
-      228
+      226
     );
     ctx.fillText(
-      `Pos Tercatat di Perangkat: ${localRecordedCount} / ${activeCourse.checkpoints.length} Pos`,
+      `Pos Tervalidasi Server: ${validatedCount} / ${activeCourse.checkpoints.length} Pos`,
       32,
       258
     );
     ctx.fillText(
-      `Total Skor Resmi Server: ${activeSession.totalScore} Poin`,
+      `Pos Tercatat di Perangkat: ${localRecordedCount} / ${activeCourse.checkpoints.length} Pos`,
       32,
       288
+    );
+    ctx.fillText(
+      `Total Skor Resmi Server: ${activeSession.totalScore} Poin`,
+      32,
+      318
     );
     ctx.fillText(
       `Status Sesi Server: ${activeSession.status} | Durasi: ${
@@ -2808,7 +2841,7 @@ export default function ParticipantView({
           : 'Belum selesai / Menunggu sinkronisasi'
       }`,
       32,
-      318
+      348
     );
 
     ctx.fillStyle = '#64748b';
@@ -2816,7 +2849,7 @@ export default function ParticipantView({
     ctx.fillText(
       `Dicetak dari perangkat pada: ${new Date().toISOString()}`,
       32,
-      400
+      430
     );
 
     const dataUrl = canvas.toDataURL('image/png');
@@ -3148,20 +3181,6 @@ export default function ParticipantView({
               </span>
             </div>
             <div className="flex items-center gap-3">
-              {flashSupported && (
-                <button
-                  type="button"
-                  onClick={toggleCameraFlash}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs sm:text-sm font-extrabold uppercase tracking-wider transition cursor-pointer ${
-                    flashOn
-                      ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_15px_rgba(251,191,36,0.75)]'
-                      : 'border-white/25 bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  <span>🔦</span>
-                  <span>{flashOn ? 'SENTER ON' : 'SENTER'}</span>
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => {
@@ -3206,7 +3225,7 @@ export default function ParticipantView({
               <div className="pointer-events-none absolute top-1/2 left-0 right-0 -translate-y-1/2 h-[1.5px] bg-red-500/85 shadow-[0_0_6px_rgba(239,68,68,0.9)]" />
             </div>
 
-            {/* TOMBOL SENTER (FLASHLIGHT) BESAR DI BAWAH KOTAK BIDIK — MUDAH DITEKAN SAAT MALAM / RIMBUN */}
+            {/* SATU TOMBOL SENTER (FLASHLIGHT) DEKAT JEMPOL DI BAWAH KOTAK BIDIK */}
             {flashSupported && (
               <div className="relative z-20 mt-5">
                 <button
@@ -3219,11 +3238,7 @@ export default function ParticipantView({
                   }`}
                 >
                   <span className="text-base">🔦</span>
-                  <span>
-                    {flashOn
-                      ? 'Senter Aktif (Ketuk untuk Matikan)'
-                      : 'Nyalakan Senter / Flash Kamera'}
-                  </span>
+                  <span>{flashOn ? 'Matikan Senter' : 'Senter'}</span>
                 </button>
               </div>
             )}
@@ -3318,7 +3333,7 @@ export default function ParticipantView({
               Pos: {completedCheckpointCount} / {activeCourse?.checkpoints.length || 0} Selesai • Skor: {scoreBreakdown.netScore}
             </div>
             <div className="text-[11px] text-slate-500 font-mono">
-              Layar OLED 0-Watt • Sentuhan Terkunci di Saku
+              Layar Terkunci
             </div>
           </div>
 
@@ -3361,8 +3376,8 @@ export default function ParticipantView({
                 <Camera className="h-4 w-4 text-lime-300" />
                 <span>
                   {unlockScanHoldProgress > 0
-                    ? `Membuka Kamera... ${Math.round(unlockScanHoldProgress)}%`
-                    : 'Tahan 1 Detik: Buka & Langsung Scan QR'}
+                    ? `Membuka... ${Math.round(unlockScanHoldProgress)}%`
+                    : 'Tahan: Buka & Scan'}
                 </span>
               </div>
             </button>
@@ -3405,7 +3420,7 @@ export default function ParticipantView({
                 <span>
                   {unlockHoldProgress > 0
                     ? `Tahan... ${unlockHoldProgress}%`
-                    : 'Tahan 1.5 Detik: Buka ke Layar Course / Peta'}
+                    : 'Tahan: Buka Layar'}
                 </span>
               </div>
             </button>
@@ -3446,53 +3461,32 @@ export default function ParticipantView({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm select-none">
           <div className="w-full max-w-md rounded-2xl border-2 border-rose-500/80 bg-slate-900 p-5 shadow-2xl shadow-rose-950/70 space-y-4 animate-in fade-in zoom-in-95">
             <div className="flex items-center gap-3 border-b border-rose-500/30 pb-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/40">
-                <AlertTriangle className="h-6 w-6 animate-pulse" />
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/40">
+                <AlertTriangle className="h-5 w-5" />
               </div>
-              <div>
-                <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-rose-400">
-                  PERINGATAN RESMI LOMBA
-                </span>
-                <h3 className="text-base font-extrabold text-white">
-                  Lomba Sedang Berjalan!
-                </h3>
-              </div>
+              <h3 className="text-base font-extrabold text-white">
+                Keluar = Gugur (DNF)
+              </h3>
             </div>
 
-            <div className="rounded-xl bg-rose-950/40 border border-rose-500/30 p-3.5 space-y-2 text-xs text-rose-200">
-              <p className="font-semibold text-white">
-                Jika Anda memilih <span className="text-rose-400 underline decoration-rose-500">Keluar Sekarang</span>:
-              </p>
-              <ul className="list-disc pl-4 space-y-1.5 text-rose-200/90 text-[11px] leading-relaxed">
-                <li>
-                  Sesi lomba ini langsung <strong>dihentikan</strong> dan Anda dinyatakan <strong>Tidak Menyelesaikan Course (DNF / Gugur)</strong>.
-                </li>
-                <li>
-                  Stopwatch waktu lari Anda akan <strong>berhenti</strong> dan status DNF dicatat di papan klasemen panitia.
-                </li>
-                <li>
-                  Sisa pos checkpoint tidak dapat lagi diambil untuk sesi ini.
-                </li>
-                <li>
-                  Saat Anda login kembali nanti, Anda harus <strong>mengulang dari awal</strong> (Scan Setup QR &amp; Start QR baru, stopwatch mulai dari <strong>00:00:00</strong> sebagai attempt baru).
-                </li>
-              </ul>
-            </div>
+            <p className="text-xs text-rose-100 leading-relaxed">
+              Sesi lari langsung dihentikan dan dicatat <strong className="text-rose-400">DNF</strong>. Jika login lagi nanti, Anda harus mulai dari awal.
+            </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+            <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 type="button"
                 onClick={() => setShowDnfLogoutModal(false)}
                 disabled={isSubmittingDnf}
-                className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-3 px-4 text-xs font-extrabold text-white shadow-lg shadow-emerald-950/50 transition cursor-pointer order-2 sm:order-1"
+                className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] py-3 px-4 text-xs font-extrabold text-white transition cursor-pointer"
               >
-                Lanjut Lari / Batal
+                Lanjut Lari
               </button>
               <button
                 type="button"
                 onClick={() => void handleConfirmDnfLogout()}
                 disabled={isSubmittingDnf}
-                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-500/60 bg-rose-600/25 hover:bg-rose-600/40 active:scale-[0.98] py-3 px-4 text-xs font-bold text-rose-200 hover:text-white transition cursor-pointer order-1 sm:order-2"
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-500/60 bg-rose-600/25 hover:bg-rose-600/40 active:scale-[0.98] py-3 px-4 text-xs font-bold text-rose-200 hover:text-white transition cursor-pointer"
               >
                 {isSubmittingDnf ? (
                   <>
@@ -3500,7 +3494,7 @@ export default function ParticipantView({
                   </>
                 ) : (
                   <>
-                    <LogOut className="h-4 w-4" /> Ya, Keluar &amp; DNF
+                    <LogOut className="h-4 w-4" /> Ya, DNF
                   </>
                 )}
               </button>
@@ -4012,9 +4006,7 @@ export default function ParticipantView({
                     </div>
                     <div>
                       <h4 className="text-base font-extrabold text-white">
-                        {activeSession.isDnf
-                          ? 'Sesi Dihentikan (Status: DNF)'
-                          : 'Selamat! Anda Telah Menyelesaikan Lomba'}
+                        {activeSession.isDnf ? 'Status: DNF' : 'FINISH!'}
                       </h4>
                       {activeSession.isDnf && activeSession.dnfReason && (
                         <p className="text-[11px] text-rose-200 mt-1">
@@ -4032,6 +4024,11 @@ export default function ParticipantView({
                           {activeCourse.checkpoints.length}
                         </strong>
                       </p>
+                      {effectiveStartIso && (
+                        <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                          Start: {formatStartDateTimeLabel(effectiveStartIso)}
+                        </p>
+                      )}
                       {(scoreBreakdown.penaltyPoints > 0 || activeSession.isDnf) && (
                         <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-2 rounded-lg bg-slate-950/90 border border-rose-500/40 px-3 py-1.5 text-xs font-mono">
                           <span className="text-slate-300">
@@ -4156,7 +4153,7 @@ export default function ParticipantView({
                         onClick={handleDownloadProofCard}
                         className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 hover:bg-sky-500 py-3 text-xs sm:text-sm font-bold text-white transition cursor-pointer"
                       >
-                        <Download className="h-4 w-4" /> Unduh Kartu Bukti Hasil (PNG)
+                        <Download className="h-4 w-4" /> Simpan Bukti (PNG)
                       </button>
 
                       <button
@@ -4164,10 +4161,10 @@ export default function ParticipantView({
                         onClick={() => void handleRestartFromBeginning()}
                         className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 py-3 text-xs sm:text-sm font-extrabold text-white shadow-lg shadow-emerald-950/60 transition cursor-pointer"
                       >
-                        <RefreshCw className="h-4 w-4" /> Mulai Lagi dari Awal (Scan Setup QR)
+                        <RefreshCw className="h-4 w-4" /> Scan Course Baru
                       </button>
                       <p className="text-[11px] text-slate-400">
-                        Tenang, hasil lari Anda di atas tetap tersimpan di server &amp; Leaderboard panitia.
+                        Hasil otomatis tersimpan di panitia.
                       </p>
                     </div>
                   </div>
@@ -4183,12 +4180,12 @@ export default function ParticipantView({
                         </div>
                         <div>
                           <div className="text-[10px] font-mono uppercase tracking-wider text-purple-300 font-bold">
-                            Mode Lomba Relay (Estafet Akumulasi)
+                            Mode Relay
                           </div>
                           <div className="text-xs font-bold text-white">
                             {activeSession.relayParentTeamName
-                              ? `${activeSession.relayParentTeamName} • Sub-Team #${activeSession.relayLegIndex}`
-                              : `Lengkapi Tim Induk & Urutan (1–${activeCourse.relaySubTeamCount || 3})`}
+                              ? `${activeSession.relayParentTeamName} · Sub-Team #${activeSession.relayLegIndex}`
+                              : `Pilih Tim Induk & Urutan (1–${activeCourse.relaySubTeamCount || 3})`}
                           </div>
                         </div>
                       </div>
@@ -4235,11 +4232,9 @@ export default function ParticipantView({
                             relayStatus.existingParentTeams.length > 0 && (
                               <div className="rounded-lg bg-slate-950/90 border border-purple-500/30 p-2.5 space-y-1.5">
                                 <div className="text-[11px] font-bold text-purple-200 flex items-center justify-between">
-                                  <span>
-                                    📋 Pilih Tim Induk yang Sudah Ada (Anti-Typo untuk Sub-Team #2, #3, dst.):
-                                  </span>
+                                  <span>Pilih Tim Induk:</span>
                                   <span className="text-[10px] font-mono text-slate-400">
-                                    Ketuk untuk pilih
+                                    Ketuk
                                   </span>
                                 </div>
                                 <div className="grid grid-cols-1 gap-1.5 max-h-40 overflow-y-auto pr-1">
@@ -4303,12 +4298,12 @@ export default function ParticipantView({
 
                           <div>
                             <label className="block text-purple-200 font-semibold mb-1">
-                              Nama Tim Induk (Ketik baru jika Anda Sub-Team #1, atau klik daftar di atas) *
+                              Nama Tim Induk *
                             </label>
                             <input
                               type="text"
                               required
-                              placeholder="Contoh: GARUDA NUSANTARA"
+                              placeholder="Ketik baru atau pilih di atas"
                               value={relayParentInput}
                               onChange={(e) => setRelayParentInput(e.target.value)}
                               className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-purple-500/40 text-white focus:border-purple-400 focus:outline-none"
@@ -4317,7 +4312,7 @@ export default function ParticipantView({
 
                           <div>
                             <label className="block text-purple-200 font-semibold mb-1">
-                              Urutan Giliran Sub-Team Anda *
+                              Urutan Sub-Team *
                             </label>
                             <div className="flex flex-wrap gap-1.5">
                               {Array.from(
@@ -4347,7 +4342,7 @@ export default function ParticipantView({
                                         : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-purple-400'
                                     }`}
                                   >
-                                    Sub-Team #{legNum}
+                                    #{legNum}
                                     {occupiedByOther
                                       ? ` (${slotInfo?.participantTeamName})`
                                       : ''}
@@ -4359,7 +4354,7 @@ export default function ParticipantView({
 
                           <div>
                             <label className="block text-slate-300 mb-1">
-                              Nama Anggota Sub-Team (Opsional)
+                              Anggota (Opsional)
                             </label>
                             <input
                               type="text"
@@ -4717,14 +4712,11 @@ export default function ParticipantView({
           )}
 
           {/* ==================================================================
-              FOOTER AKUN TIM TERPADU (RINGKAS & BERSIH DI PALING BAWAH)
+              FOOTER AKUN TIM (AKSI AMAN DI DEPAN, AKSI LAINNYA DI MENU LIPAT)
              ================================================================== */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3.5 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3.5 py-3 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <div className="flex h-7 px-2 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold uppercase shrink-0">
-                  TIM
-                </div>
                 <div className="min-w-0">
                   <div className="text-xs sm:text-sm font-bold text-white leading-tight truncate">
                     {participant.teamName}
@@ -4732,17 +4724,17 @@ export default function ParticipantView({
                   <div className="text-[11px] text-slate-400 truncate">
                     {participant.name.trim().toLowerCase() !==
                       participant.teamName.trim().toLowerCase() && (
-                      <span>{participant.name} • </span>
+                      <span>{participant.name} · </span>
                     )}
                     <span>
-                      {participant.gender || 'Other'} •{' '}
+                      {participant.gender || 'Other'} ·{' '}
                       {participant.ageGroup || 'Semua Umur'}
                     </span>
                   </div>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center gap-1.5 shrink-0">
                 {activeCourse &&
                   activeSession &&
                   !sessionMarkedFinishedLocallyOrServer && (
@@ -4750,30 +4742,19 @@ export default function ParticipantView({
                       type="button"
                       onClick={handleDownloadProofCard}
                       className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-700 cursor-pointer"
-                      title="Simpan Bukti Cadangan PNG"
+                      title="Simpan Bukti PNG"
                     >
                       <Download className="h-3.5 w-3.5" />
-                      <span>Bukti PNG</span>
+                      <span>Bukti</span>
                     </button>
                   )}
-                {activeCourse && activeSession && !confirmingLeaveCourse && (
-                  <button
-                    type="button"
-                    onClick={() => setConfirmingLeaveCourse(true)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 cursor-pointer"
-                    title="Ganti Course / Scan Setup QR Baru"
-                  >
-                    <QrCode className="h-3.5 w-3.5 text-amber-400" />
-                    <span>Ganti Course</span>
-                  </button>
-                )}
                 {activeSession && (
                   <button
                     type="button"
                     onClick={() => triggerSyncQueue(false)}
                     disabled={isSyncing}
                     className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-700 disabled:opacity-50 cursor-pointer"
-                    title="Sinkronisasi Manual ke Server"
+                    title="Sinkronisasi ke Server"
                   >
                     <RefreshCw
                       className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`}
@@ -4783,28 +4764,61 @@ export default function ParticipantView({
                 )}
                 <button
                   type="button"
+                  onClick={() => setShowFooterMenu((prev) => !prev)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 cursor-pointer"
+                >
+                  <span>Lainnya</span>
+                  {showFooterMenu ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {showFooterMenu && (
+              <div className="flex flex-wrap items-center justify-end gap-1.5 pt-2 border-t border-slate-800">
+                {activeCourse && activeSession && !confirmingLeaveCourse && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowFooterMenu(false);
+                      setConfirmingLeaveCourse(true);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 cursor-pointer"
+                  >
+                    <QrCode className="h-3.5 w-3.5 text-amber-400" />
+                    <span>Ganti Course</span>
+                  </button>
+                )}
+                <button
+                  type="button"
                   onClick={() => {
+                    setShowFooterMenu(false);
                     setIsChangeParticipantPasswordOpen(true);
                     setPartPassError(null);
                     setPartPassCurrent('');
                     setPartPassNew('');
                     setPartPassConfirm('');
                   }}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition cursor-pointer shrink-0"
-                  title="Ganti Password Tim"
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 cursor-pointer"
                 >
                   <KeyRound className="h-3.5 w-3.5 text-amber-400" />
-                  <span>Password</span>
+                  <span>Ganti Password</span>
                 </button>
                 <button
                   type="button"
-                  onClick={handleLogout}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-rose-300 hover:bg-slate-700 shrink-0 cursor-pointer"
+                  onClick={() => {
+                    setShowFooterMenu(false);
+                    handleLogout();
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-950/30 px-2.5 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-950/60 cursor-pointer"
                 >
                   <LogOut className="h-3.5 w-3.5" /> Keluar
                 </button>
               </div>
-            </div>
+            )}
           </div>
         </>
       )}

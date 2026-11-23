@@ -44087,7 +44087,9 @@ __export(server_exports, {
   calculateHaversineMeters: () => calculateHaversineMeters,
   default: () => server_default,
   hashPin: () => hashPin,
-  verifyPin: () => verifyPin
+  hashPinAsync: () => hashPinAsync,
+  verifyPin: () => verifyPin,
+  verifyPinAsync: () => verifyPinAsync
 });
 module.exports = __toCommonJS(server_exports);
 var import_child_process = require("child_process");
@@ -77982,7 +77984,7 @@ var isAiStudioPreviewProxy = Boolean(process.env.NGINX_PORT && process.env.DEFAU
 var PORT = process.env.CPANEL_PORT || (!isAiStudioPreviewProxy && process.env.PORT ? Number.isNaN(Number(process.env.PORT)) ? process.env.PORT : Number(process.env.PORT) : 3e3);
 var DATA_DIR = process.env.VERCEL ? import_path.default.join("/tmp", "baraka-data") : import_path.default.join(ROOT_DIR, "data");
 var DB_FILE = import_path.default.join(DATA_DIR, "baraka-db.json");
-var TOKEN_SECRET = process.env.BARAKA_TOKEN_SECRET || "baraka-adventure-hmac-secret-2026";
+var TOKEN_SECRET = process.env.BARAKA_TOKEN_SECRET || import_crypto2.default.randomBytes(32).toString("hex");
 function hashPin(pin, existingSalt) {
   const salt = existingSalt || import_crypto2.default.randomBytes(16).toString("hex");
   const derivedKey = import_crypto2.default.scryptSync(String(pin).trim(), salt, 64).toString("hex");
@@ -77990,6 +77992,26 @@ function hashPin(pin, existingSalt) {
 }
 function verifyPin(pin, expectedHash, salt) {
   const { hash } = hashPin(pin, salt);
+  const a = Buffer.from(hash, "hex");
+  const b = Buffer.from(expectedHash, "hex");
+  if (a.length !== b.length) return false;
+  return import_crypto2.default.timingSafeEqual(a, b);
+}
+function hashPinAsync(pin, existingSalt) {
+  const salt = existingSalt || import_crypto2.default.randomBytes(16).toString("hex");
+  return new Promise((resolve, reject) => {
+    import_crypto2.default.scrypt(String(pin).trim(), salt, 64, (err, derivedKey) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve({ hash: derivedKey.toString("hex"), salt });
+    });
+  });
+}
+async function verifyPinAsync(pin, expectedHash, salt) {
+  if (!expectedHash || !salt) return false;
+  const { hash } = await hashPinAsync(pin, salt);
   const a = Buffer.from(hash, "hex");
   const b = Buffer.from(expectedHash, "hex");
   if (a.length !== b.length) return false;
@@ -78361,13 +78383,46 @@ var coalescedDiskSaveTimer = null;
 var DISK_STAT_THROTTLE_MS = 350;
 var DISK_SAVE_COALESCE_MS = 220;
 var BACKUP_WRITE_THROTTLE_MS = 3e4;
+function pruneStaleTokens(dbToSave) {
+  if (Array.isArray(dbToSave.organizerTokens) && dbToSave.organizerTokens.length > 30) {
+    dbToSave.organizerTokens = dbToSave.organizerTokens.slice(-30);
+  }
+  if (dbToSave.participantTokens && typeof dbToSave.participantTokens === "object") {
+    const entries = Object.entries(dbToSave.participantTokens);
+    if (entries.length > Math.max(150, (dbToSave.participants?.length || 0) * 2)) {
+      const latestTokenByPid = /* @__PURE__ */ new Map();
+      for (const [tok, pid] of entries) {
+        if (pid) latestTokenByPid.set(pid, tok);
+      }
+      const compacted = {};
+      for (const [pid, tok] of latestTokenByPid.entries()) {
+        compacted[tok] = pid;
+      }
+      dbToSave.participantTokens = compacted;
+    }
+  }
+}
 function flushDbToDiskNow(dbToSave, forceBackup = false) {
   try {
     if (!import_fs.default.existsSync(DATA_DIR)) {
       import_fs.default.mkdirSync(DATA_DIR, { recursive: true });
     }
+    if (lastKnownDiskMtimeMs > 0 && import_fs.default.existsSync(DB_FILE)) {
+      try {
+        const preStat = import_fs.default.statSync(DB_FILE);
+        if (preStat.mtimeMs !== lastKnownDiskMtimeMs) {
+          const diskRaw = import_fs.default.readFileSync(DB_FILE, "utf-8");
+          const diskDb = parseAndMigrateDbContent(diskRaw);
+          if (diskDb) {
+            smartMergeIntoServerDb(dbToSave, diskDb);
+          }
+        }
+      } catch {
+      }
+    }
+    pruneStaleTokens(dbToSave);
     const serialized = JSON.stringify(dbToSave);
-    const tmpFile = `${DB_FILE}.tmp`;
+    const tmpFile = `${DB_FILE}.tmp.${process.pid}`;
     const backupFile = `${DB_FILE}.bak`;
     import_fs.default.writeFileSync(tmpFile, serialized, "utf-8");
     import_fs.default.renameSync(tmpFile, DB_FILE);
@@ -78422,13 +78477,19 @@ try {
 }
 var cloudSyncTimer = null;
 var isPushingToCloud = false;
+var pendingCloudResync = false;
 var isCloudHydrated = false;
 var lastCloudHydratedAt = 0;
 var cloudHydrationPromise = null;
 var CLOUD_HYDRATE_TTL_MS = 25e3;
 async function pushDbToCloudNow(dbSnapshot) {
   if (!cloudFirestore) return;
+  if (isPushingToCloud) {
+    pendingCloudResync = true;
+    return;
+  }
   isPushingToCloud = true;
+  pendingCloudResync = false;
   try {
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const corePayload = {
@@ -78465,9 +78526,14 @@ async function pushDbToCloudNow(dbSnapshot) {
   } catch {
   } finally {
     isPushingToCloud = false;
+    if (pendingCloudResync) {
+      pendingCloudResync = false;
+      scheduleCloudSync(dbSnapshot);
+    }
   }
 }
 function scheduleCloudSync(dbToSync) {
+  if (!cloudFirestore) return;
   if (cloudSyncTimer) {
     clearTimeout(cloudSyncTimer);
   }
@@ -79725,11 +79791,96 @@ function processSingleReport(payload, authenticatedParticipantId) {
 }
 var app = (0, import_express.default)();
 app.use(import_express.default.json({ limit: "5mb" }));
-app.use("/api", async (_req, res, next) => {
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(self), geolocation=(self)");
+  next();
+});
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded[0]) {
+    return String(forwarded[0]).split(",")[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+function createAuthRateLimiter(options2) {
+  const buckets = /* @__PURE__ */ new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    if (buckets.size > 500) {
+      for (const [key, entry] of buckets.entries()) {
+        if (entry.resetAt <= now) {
+          buckets.delete(key);
+        }
+      }
+    }
+    const ip = getClientIp(req);
+    const existing = buckets.get(ip);
+    if (!existing || existing.resetAt <= now) {
+      buckets.set(ip, { count: 1, resetAt: now + options2.windowMs });
+      next();
+      return;
+    }
+    existing.count += 1;
+    if (existing.count > options2.maxRequests) {
+      const retryAfterSec = Math.max(1, Math.ceil((existing.resetAt - now) / 1e3));
+      res.setHeader("Retry-After", String(retryAfterSec));
+      res.status(429).json({
+        error: options2.message,
+        retryAfterSeconds: retryAfterSec
+      });
+      return;
+    }
+    next();
+  };
+}
+var organizerLoginLimiter = createAuthRateLimiter({
+  windowMs: 60 * 1e3,
+  maxRequests: 15,
+  message: "Terlalu banyak percobaan login. Tunggu 1 menit lalu coba lagi."
+});
+var participantAuthLimiter = createAuthRateLimiter({
+  windowMs: 60 * 1e3,
+  maxRequests: 30,
+  message: "Terlalu banyak percobaan login/daftar dari jaringan ini. Tunggu 1 menit lalu coba lagi."
+});
+app.use("/api", async (req, res, next) => {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
   res.setHeader("Surrogate-Control", "no-store");
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  if (acceptEncoding.includes("gzip")) {
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+      if (res.headersSent || res.getHeader("Content-Encoding")) {
+        return originalJson(body);
+      }
+      const jsonStr = JSON.stringify(body);
+      if (jsonStr.length < 1536) {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        return res.send(jsonStr);
+      }
+      import_zlib.default.gzip(Buffer.from(jsonStr, "utf-8"), (err, compressed) => {
+        if (err || res.headersSent) {
+          if (!res.headersSent) {
+            res.setHeader("Content-Type", "application/json; charset=utf-8");
+            res.send(jsonStr);
+          }
+          return;
+        }
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Content-Encoding", "gzip");
+        res.setHeader("Vary", "Accept-Encoding");
+        res.end(compressed);
+      });
+      return res;
+    };
+  }
   syncDbFromDisk(db);
   if (!isCloudHydrated) {
     await ensureCloudHydrated();
@@ -79746,7 +79897,7 @@ app.get("/api/health", (_req, res) => {
     serverTime: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
-app.post("/api/organizer/login", (req, res) => {
+app.post("/api/organizer/login", organizerLoginLimiter, async (req, res) => {
   const { username, pin, password, vaultBackup } = req.body;
   const rawInputPassword = String(password || pin || "").trim();
   if (!rawInputPassword) {
@@ -79767,7 +79918,7 @@ app.post("/api/organizer/login", (req, res) => {
     const currentSuperUsername = (db.organizerAuth?.username || "superadmin").toLowerCase();
     const isSuperAdminQuery = trimmedUsername === currentSuperUsername || trimmedUsername === "superadmin" || trimmedUsername === "admin" || trimmedUsername === "master" || trimmedUsername === "pusat";
     if (isSuperAdminQuery) {
-      const validSuper = isMasterRecoveryMatch || verifyPin(
+      const validSuper = isMasterRecoveryMatch || await verifyPinAsync(
         trimmedPin,
         db.organizerAuth.pinHash,
         db.organizerAuth.pinSalt
@@ -79777,7 +79928,7 @@ app.post("/api/organizer/login", (req, res) => {
         return;
       }
       if (isMasterRecoveryMatch) {
-        const updated = hashPin(masterRecoveryPin);
+        const updated = await hashPinAsync(masterRecoveryPin);
         db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
       }
       const token3 = createOrganizerToken("SUPERADMIN", true);
@@ -79793,7 +79944,7 @@ app.post("/api/organizer/login", (req, res) => {
     const matchedOrg = orgList.find(
       (o) => o.username.toLowerCase() === trimmedUsername || o.code.toLowerCase() === trimmedUsername || o.name.toLowerCase() === trimmedUsername
     );
-    if (!matchedOrg || !verifyPin(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt)) {
+    if (!matchedOrg || !await verifyPinAsync(trimmedPin, matchedOrg.pinHash, matchedOrg.pinSalt)) {
       res.status(401).json({
         error: "Username/ID Organizer atau Password tidak cocok."
       });
@@ -79824,14 +79975,14 @@ app.post("/api/organizer/login", (req, res) => {
     });
     return;
   }
-  const isSuperAdminPin = isMasterRecoveryMatch || verifyPin(
+  const isSuperAdminPin = isMasterRecoveryMatch || await verifyPinAsync(
     trimmedPin,
     db.organizerAuth.pinHash,
     db.organizerAuth.pinSalt
   );
   if (isSuperAdminPin) {
     if (isMasterRecoveryMatch) {
-      const updated = hashPin(masterRecoveryPin);
+      const updated = await hashPinAsync(masterRecoveryPin);
       db.organizerAuth = { pinHash: updated.hash, pinSalt: updated.salt };
     }
     const token2 = createOrganizerToken("SUPERADMIN", true);
@@ -79844,9 +79995,13 @@ app.post("/api/organizer/login", (req, res) => {
     });
     return;
   }
-  const matchesByPassword = orgList.filter(
-    (o) => verifyPin(trimmedPin, o.pinHash, o.pinSalt)
-  );
+  const matchesByPassword = [];
+  for (const o of orgList) {
+    if (await verifyPinAsync(trimmedPin, o.pinHash, o.pinSalt)) {
+      matchesByPassword.push(o);
+      if (matchesByPassword.length > 1) break;
+    }
+  }
   if (matchesByPassword.length > 1) {
     res.status(400).json({
       error: "Terdapat lebih dari satu akun dengan Password ini. Harap masukkan Username Anda untuk masuk."
@@ -79884,7 +80039,7 @@ app.post("/api/organizer/login", (req, res) => {
     organizerBackup: matchedByPin
   });
 });
-var handleChangeOrganizerPasswordHandler = (req, res) => {
+var handleChangeOrganizerPasswordHandler = async (req, res) => {
   const auth = req.organizerAuth;
   const { currentPin, currentPassword, newPin, newPassword, newUsername } = req.body;
   const rawCurrent = String(currentPassword || currentPin || "").trim();
@@ -79898,7 +80053,7 @@ var handleChangeOrganizerPasswordHandler = (req, res) => {
     return;
   }
   if (auth.isSuperAdmin) {
-    if (!isMasterCurrentMatch && !verifyPin(rawCurrent, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
+    if (!isMasterCurrentMatch && !await verifyPinAsync(rawCurrent, db.organizerAuth.pinHash, db.organizerAuth.pinSalt)) {
       res.status(401).json({ error: "Password Superadmin saat ini tidak sesuai." });
       return;
     }
@@ -79931,7 +80086,7 @@ var handleChangeOrganizerPasswordHandler = (req, res) => {
         res.status(400).json({ error: "Password baru minimal 6 karakter." });
         return;
       }
-      const updated2 = hashPin(rawNew);
+      const updated2 = await hashPinAsync(rawNew);
       db.organizerAuth.pinHash = updated2.hash;
       db.organizerAuth.pinSalt = updated2.salt;
     }
@@ -79947,7 +80102,7 @@ var handleChangeOrganizerPasswordHandler = (req, res) => {
     res.status(404).json({ error: "Akun Organizer tidak ditemukan." });
     return;
   }
-  if (!verifyPin(rawCurrent, targetOrg.pinHash, targetOrg.pinSalt)) {
+  if (!await verifyPinAsync(rawCurrent, targetOrg.pinHash, targetOrg.pinSalt)) {
     res.status(401).json({ error: "Password Organizer saat ini tidak sesuai." });
     return;
   }
@@ -79955,7 +80110,7 @@ var handleChangeOrganizerPasswordHandler = (req, res) => {
     res.status(400).json({ error: "Password baru minimal 6 karakter." });
     return;
   }
-  const updated = hashPin(rawNew);
+  const updated = await hashPinAsync(rawNew);
   targetOrg.pinHash = updated.hash;
   targetOrg.pinSalt = updated.salt;
   saveDb(db);
@@ -79969,7 +80124,7 @@ app.get("/api/organizer/accounts", requireSuperAdmin, (_req, res) => {
     organizers: orgList.map(toPublicOrganizer)
   });
 });
-app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
+app.post("/api/organizer/accounts", requireSuperAdmin, async (req, res) => {
   const {
     name: name4,
     username,
@@ -80020,7 +80175,7 @@ app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
       parsedMaxCourses = Math.max(1, Math.round(num));
     }
   }
-  const { hash, salt } = hashPin(cleanPin);
+  const { hash, salt } = await hashPinAsync(cleanPin);
   const newOrganizer = {
     id: `org-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     code,
@@ -80043,7 +80198,7 @@ app.post("/api/organizer/accounts", requireSuperAdmin, (req, res) => {
     organizers: db.organizers.map(toPublicOrganizer)
   });
 });
-app.put("/api/organizer/accounts/:organizerId", requireSuperAdmin, (req, res) => {
+app.put("/api/organizer/accounts/:organizerId", requireSuperAdmin, async (req, res) => {
   const orgList = db.organizers || [];
   const target = orgList.find((o) => o.id === req.params.organizerId);
   if (!target) {
@@ -80092,7 +80247,7 @@ app.put("/api/organizer/accounts/:organizerId", requireSuperAdmin, (req, res) =>
       res.status(400).json({ error: "Password baru minimal 6 karakter." });
       return;
     }
-    const updatedHash = hashPin(rawNewPass);
+    const updatedHash = await hashPinAsync(rawNewPass);
     target.pinHash = updatedHash.hash;
     target.pinSalt = updatedHash.salt;
   }
@@ -80179,33 +80334,46 @@ var PUBLIC_LEADERBOARD_CACHE_TTL_MS = 3e3;
 app.get("/api/public/leaderboard/:courseId", (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=5");
   const courseId = req.params.courseId;
+  const includeSplits = req.query.includeSplits === "true";
+  const cacheKey = `${courseId}:${includeSplits ? "1" : "0"}`;
   const course = (db.courses || []).find((c) => c.id === courseId);
   if (!course) {
     res.status(404).json({ error: "Course tidak ditemukan atau telah dinonaktifkan." });
     return;
   }
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  const supportsGzip = acceptEncoding.includes("gzip");
   const nowMs = Date.now();
-  const cachedEntry = publicLeaderboardCache.get(courseId);
+  const cachedEntry = publicLeaderboardCache.get(cacheKey);
   if (cachedEntry && nowMs - cachedEntry.cachedAtMs < PUBLIC_LEADERBOARD_CACHE_TTL_MS) {
-    res.json(cachedEntry.payload);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (supportsGzip) {
+      res.setHeader("Content-Encoding", "gzip");
+      res.setHeader("Vary", "Accept-Encoding");
+      res.end(cachedEntry.gzipBuffer);
+    } else {
+      res.end(cachedEntry.jsonString);
+    }
     return;
   }
   const sessions = (db.sessions || []).filter((s) => s.courseId === course.id);
   const partMap = new Map((db.participants || []).map((p) => [p.id, p]));
   const cpByIdMap = new Map((course.checkpoints || []).map((c) => [c.id, c]));
   const acceptedCpReportsBySession = /* @__PURE__ */ new Map();
-  for (const r of db.reports || []) {
-    if (r && r.courseId === course.id && r.reportType === "CHECKPOINT" && r.syncStatus === SyncStatus.ACCEPTED_SERVER) {
-      let bucket = acceptedCpReportsBySession.get(r.sessionId);
-      if (!bucket) {
-        bucket = [];
-        acceptedCpReportsBySession.set(r.sessionId, bucket);
+  if (includeSplits) {
+    for (const r of db.reports || []) {
+      if (r && r.courseId === course.id && r.reportType === "CHECKPOINT" && r.syncStatus === SyncStatus.ACCEPTED_SERVER) {
+        let bucket = acceptedCpReportsBySession.get(r.sessionId);
+        if (!bucket) {
+          bucket = [];
+          acceptedCpReportsBySession.set(r.sessionId, bucket);
+        }
+        bucket.push(r);
       }
-      bucket.push(r);
     }
-  }
-  for (const bucket of acceptedCpReportsBySession.values()) {
-    bucket.sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+    for (const bucket of acceptedCpReportsBySession.values()) {
+      bucket.sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+    }
   }
   const leaderboard = sessions.map((s) => {
     const part = partMap.get(s.participantId);
@@ -80213,43 +80381,48 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     const validStartMs = startMs !== void 0 && !Number.isNaN(startMs) ? startMs : void 0;
     const finishMs = s.finishedAt ? Date.parse(s.finishedAt) : void 0;
     const validFinishMs = finishMs !== void 0 && !Number.isNaN(finishMs) ? finishMs : void 0;
-    const cpReports = acceptedCpReportsBySession.get(s.id) || [];
-    const seenCpIds = /* @__PURE__ */ new Set();
-    const splits = [];
-    let prevMs = validStartMs;
-    for (const rep of cpReports) {
-      if (seenCpIds.has(rep.checkpointId)) continue;
-      seenCpIds.add(rep.checkpointId);
-      const cp = cpByIdMap.get(rep.checkpointId);
-      const repMs = Date.parse(rep.measuredAt);
-      const validRepMs = !Number.isNaN(repMs) ? repMs : void 0;
-      const cumulativeSeconds = validStartMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1e3)) : void 0;
-      const legSplitSeconds = prevMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - prevMs) / 1e3)) : cumulativeSeconds;
-      if (validRepMs !== void 0) prevMs = validRepMs;
-      splits.push({
-        stepIndex: splits.length + 1,
-        checkpointId: rep.checkpointId,
-        shortCode: cp?.code || `#${splits.length + 1}`,
-        points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
-        cumulativeSeconds,
-        legSplitSeconds
-      });
+    let splits;
+    let finishCumulativeSeconds;
+    let finishSplitSeconds;
+    if (includeSplits) {
+      const cpReports = acceptedCpReportsBySession.get(s.id) || [];
+      const seenCpIds = /* @__PURE__ */ new Set();
+      splits = [];
+      let prevMs = validStartMs;
+      for (const rep of cpReports) {
+        if (seenCpIds.has(rep.checkpointId)) continue;
+        seenCpIds.add(rep.checkpointId);
+        const cp = cpByIdMap.get(rep.checkpointId);
+        const repMs = Date.parse(rep.measuredAt);
+        const validRepMs = !Number.isNaN(repMs) ? repMs : void 0;
+        const cumulativeSeconds = validStartMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1e3)) : void 0;
+        const legSplitSeconds = prevMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - prevMs) / 1e3)) : cumulativeSeconds;
+        if (validRepMs !== void 0) prevMs = validRepMs;
+        splits.push({
+          stepIndex: splits.length + 1,
+          checkpointId: rep.checkpointId,
+          shortCode: cp?.code || `#${splits.length + 1}`,
+          points: cp ? Number(cp.points) || 0 : Number(rep.pointsAwarded) || 0,
+          cumulativeSeconds,
+          legSplitSeconds
+        });
+      }
+      for (const cpId of s.validatedCheckpointIds || []) {
+        if (seenCpIds.has(cpId)) continue;
+        seenCpIds.add(cpId);
+        const cp = cpByIdMap.get(cpId);
+        splits.push({
+          stepIndex: splits.length + 1,
+          checkpointId: cpId,
+          shortCode: cp?.code || `#${splits.length + 1}`,
+          points: cp ? Number(cp.points) || 0 : 0
+        });
+      }
+      finishCumulativeSeconds = s.durationSeconds ?? (validStartMs !== void 0 && validFinishMs !== void 0 ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1e3)) : void 0);
+      const lastSplitCumSec = splits.length > 0 ? splits[splits.length - 1].cumulativeSeconds : 0;
+      finishSplitSeconds = finishCumulativeSeconds !== void 0 && lastSplitCumSec !== void 0 ? Math.max(0, finishCumulativeSeconds - lastSplitCumSec) : void 0;
     }
-    for (const cpId of s.validatedCheckpointIds || []) {
-      if (seenCpIds.has(cpId)) continue;
-      seenCpIds.add(cpId);
-      const cp = cpByIdMap.get(cpId);
-      splits.push({
-        stepIndex: splits.length + 1,
-        checkpointId: cpId,
-        shortCode: cp?.code || `#${splits.length + 1}`,
-        points: cp ? Number(cp.points) || 0 : 0
-      });
-    }
-    const finishCumulativeSeconds = s.durationSeconds ?? (validStartMs !== void 0 && validFinishMs !== void 0 ? Math.max(0, Math.floor((validFinishMs - validStartMs) / 1e3)) : void 0);
-    const lastSplitCumSec = splits.length > 0 ? splits[splits.length - 1].cumulativeSeconds : 0;
-    const finishSplitSeconds = finishCumulativeSeconds !== void 0 && lastSplitCumSec !== void 0 ? Math.max(0, finishCumulativeSeconds - lastSplitCumSec) : void 0;
-    return {
+    const baseRow = {
       sessionId: s.id,
       teamName: part?.teamName || part?.name || "Tim Peserta",
       gender: part?.gender || "Other",
@@ -80257,16 +80430,12 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       attemptNumber: s.attemptNumber || 1,
       status: s.status,
       checkpointsCompleted: (s.validatedCheckpointIds || []).length,
-      validatedCheckpointIds: s.validatedCheckpointIds || [],
       totalCheckpoints: (course.checkpoints || []).length,
       grossScore: s.grossScore || 0,
       overtimeMinutes: s.overtimeMinutes || 0,
       penaltyPoints: s.penaltyPoints || 0,
       totalScore: s.totalScore || 0,
       durationSeconds: s.durationSeconds,
-      splits,
-      finishCumulativeSeconds,
-      finishSplitSeconds,
       isDnf: Boolean(s.isDnf),
       dnfReason: s.dnfReason,
       startedAt: s.startedAt,
@@ -80276,6 +80445,16 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       relayLegIndex: s.relayLegIndex,
       relayMemberNames: s.relayMemberNames,
       relayOverrideUnlocked: Boolean(s.relayOverrideUnlocked)
+    };
+    if (includeSplits) {
+      baseRow.validatedCheckpointIds = s.validatedCheckpointIds || [];
+      baseRow.splits = splits;
+      baseRow.finishCumulativeSeconds = finishCumulativeSeconds;
+      baseRow.finishSplitSeconds = finishSplitSeconds;
+    }
+    return {
+      ...baseRow,
+      _validatedCpIds: s.validatedCheckpointIds || []
     };
   });
   const statusWeightPublic = (st, isDnf) => {
@@ -80292,7 +80471,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     const bDur = b.durationSeconds ?? Number.MAX_SAFE_INTEGER;
     return aDur - bDur;
   });
-  const rankedLeaderboard = leaderboard.map((row, idx) => ({
+  const rankedLeaderboardInternal = leaderboard.map((row, idx) => ({
     ...row,
     rank: idx + 1
   }));
@@ -80302,7 +80481,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
   let relayTeamLeaderboard = [];
   if (isRelay) {
     const groupedByParent = /* @__PURE__ */ new Map();
-    for (const row of rankedLeaderboard) {
+    for (const row of rankedLeaderboardInternal) {
       const pKey = row.relayParentTeamKey || normalizeRelayParentKey(row.relayParentTeamName);
       if (!pKey) continue;
       if (!groupedByParent.has(pKey)) {
@@ -80326,7 +80505,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
           status: picked?.status || null,
           isDnf: Boolean(picked?.isDnf),
           checkpointsCompleted: picked?.checkpointsCompleted || 0,
-          validatedCheckpointIds: picked?.validatedCheckpointIds || [],
+          _validatedCpIds: picked?._validatedCpIds || [],
           totalScore: picked?.totalScore || 0,
           grossScore: picked?.grossScore || 0,
           penaltyPoints: picked?.penaltyPoints || 0,
@@ -80342,14 +80521,14 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
         const uniqueCpSet = /* @__PURE__ */ new Set();
         for (const l of legs) {
           if (l.isDnf && course.relayDnfScoringMode === RelayDnfScoringMode.ZERO) continue;
-          for (const cpId of l.validatedCheckpointIds || []) {
+          for (const cpId of l._validatedCpIds || []) {
             uniqueCpSet.add(cpId);
           }
         }
         totalCheckpointsCompleted = uniqueCpSet.size;
         if (course.scoringEnabled) {
           grossScore = Array.from(uniqueCpSet).reduce((sum, cpId) => {
-            const cp = (course.checkpoints || []).find((c) => c.id === cpId);
+            const cp = cpByIdMap.get(cpId);
             return sum + (cp ? Number(cp.points) || 0 : 0);
           }, 0);
           const nonZeroPenalties = legs.reduce((sum, l) => {
@@ -80380,7 +80559,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
         penaltyPoints,
         totalScore,
         totalDurationSeconds,
-        legs
+        legs: legs.map(({ _validatedCpIds: _omit, ...cleanLeg }) => cleanLeg)
       };
     }).sort((a, b) => {
       if (b.totalScore !== a.totalScore) {
@@ -80398,6 +80577,9 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       rank: idx + 1
     }));
   }
+  const rankedLeaderboard = rankedLeaderboardInternal.map(
+    ({ _validatedCpIds: _omit, ...cleanRow }) => cleanRow
+  );
   const responsePayload = {
     course: {
       id: course.id,
@@ -80419,13 +80601,23 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     leaderboard: rankedLeaderboard,
     relayTeamLeaderboard
   };
-  publicLeaderboardCache.set(courseId, {
+  const jsonString = JSON.stringify(responsePayload);
+  const gzipBuffer = import_zlib.default.gzipSync(Buffer.from(jsonString, "utf-8"));
+  publicLeaderboardCache.set(cacheKey, {
     cachedAtMs: nowMs,
-    payload: responsePayload
+    jsonString,
+    gzipBuffer
   });
-  res.json(responsePayload);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (supportsGzip) {
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.end(gzipBuffer);
+  } else {
+    res.end(jsonString);
+  }
 });
-app.post("/api/participant/register", (req, res) => {
+app.post("/api/participant/register", participantAuthLimiter, async (req, res) => {
   const { name: name4, teamName, gender, ageGroup, phone, pin, password } = req.body;
   const rawPassword = String(password || pin || "").trim();
   if (!name4 || !name4.trim() || !teamName || !teamName.trim() || rawPassword.length < 6) {
@@ -80434,7 +80626,7 @@ app.post("/api/participant/register", (req, res) => {
     });
     return;
   }
-  const { hash, salt } = hashPin(rawPassword);
+  const { hash, salt } = await hashPinAsync(rawPassword);
   const newParticipant = {
     id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     name: name4.trim(),
@@ -80457,7 +80649,7 @@ app.post("/api/participant/register", (req, res) => {
     participantBackup: newParticipant
   });
 });
-app.post("/api/participant/login", (req, res) => {
+app.post("/api/participant/login", participantAuthLimiter, async (req, res) => {
   const { teamName, bibOrName, pin, password, participantBackup, vaultParticipants } = req.body;
   const rawIdentity = (teamName || bibOrName || "").trim();
   const rawPassword = String(password || pin || "").trim();
@@ -80478,12 +80670,27 @@ app.post("/api/participant/login", (req, res) => {
     }
   }
   const query = rawIdentity.toLowerCase();
-  const foundByTeam = db.participants.find(
-    (p) => p.teamName.trim().toLowerCase() === query && verifyPin(rawPassword, p.pinHash, p.pinSalt)
+  let found;
+  const teamCandidates = db.participants.filter(
+    (p) => p.teamName.trim().toLowerCase() === query
   );
-  const found = foundByTeam || db.participants.find(
-    (p) => p.name.trim().toLowerCase() === query && verifyPin(rawPassword, p.pinHash, p.pinSalt)
-  );
+  for (const candidate of teamCandidates) {
+    if (await verifyPinAsync(rawPassword, candidate.pinHash, candidate.pinSalt)) {
+      found = candidate;
+      break;
+    }
+  }
+  if (!found) {
+    const nameCandidates = db.participants.filter(
+      (p) => p.name.trim().toLowerCase() === query
+    );
+    for (const candidate of nameCandidates) {
+      if (await verifyPinAsync(rawPassword, candidate.pinHash, candidate.pinSalt)) {
+        found = candidate;
+        break;
+      }
+    }
+  }
   if (!found) {
     res.status(401).json({
       error: "Nama Tim atau Password tidak cocok. Pastikan Nama Tim dan Password sesuai saat pendaftaran."
@@ -80516,7 +80723,7 @@ app.post("/api/participant/login", (req, res) => {
     relayStatus: matchedCourse && latestSession ? buildRelayTeamStatus(latestSession, matchedCourse) : null
   });
 });
-app.post("/api/participant/change-password", requireParticipant, (req, res) => {
+app.post("/api/participant/change-password", requireParticipant, async (req, res) => {
   const participantId = req.participantId;
   const { currentPassword, newPassword } = req.body;
   const rawCurrent = String(currentPassword || "").trim();
@@ -80534,11 +80741,11 @@ app.post("/api/participant/change-password", requireParticipant, (req, res) => {
     res.status(404).json({ error: "Data peserta tidak ditemukan." });
     return;
   }
-  if (!verifyPin(rawCurrent, participant.pinHash, participant.pinSalt)) {
+  if (!await verifyPinAsync(rawCurrent, participant.pinHash, participant.pinSalt)) {
     res.status(401).json({ error: "Password saat ini tidak sesuai." });
     return;
   }
-  const updated = hashPin(rawNew);
+  const updated = await hashPinAsync(rawNew);
   participant.pinHash = updated.hash;
   participant.pinSalt = updated.salt;
   saveDb(db);
@@ -80777,7 +80984,7 @@ app.post("/api/participant/reports/sync", requireParticipant, (req, res) => {
   const results = sortedIncoming.map(
     (item) => processSingleReport(item, participantId)
   );
-  void pushDbToCloudNow(db);
+  scheduleCloudSync(db);
   const latestSession = results[results.length - 1]?.session || db.sessions.find((s) => s.participantId === participantId) || null;
   const latestCourse = latestSession ? db.courses.find((c) => c.id === latestSession.courseId) || null : null;
   res.json({
@@ -81713,7 +81920,7 @@ app.delete(
     res.json({ course });
   }
 );
-app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
+app.post("/api/organizer/participants", requireOrganizer, async (req, res) => {
   const auth = req.organizerAuth;
   const { name: name4, teamName, gender, ageGroup, phone, pin, password } = req.body;
   const rawPassword = String(password || pin || "").trim();
@@ -81723,7 +81930,7 @@ app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
     });
     return;
   }
-  const { hash, salt } = hashPin(rawPassword);
+  const { hash, salt } = await hashPinAsync(rawPassword);
   const newParticipant = {
     id: `ptc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     name: name4.trim(),
@@ -81747,7 +81954,7 @@ app.post("/api/organizer/participants", requireOrganizer, (req, res) => {
 app.put(
   "/api/organizer/participants/:participantId/password",
   requireOrganizer,
-  (req, res) => {
+  async (req, res) => {
     const auth = req.organizerAuth;
     const participantId = req.params.participantId;
     const { newPassword, newPin } = req.body;
@@ -81769,7 +81976,7 @@ app.put(
         return;
       }
     }
-    const updated = hashPin(rawNew);
+    const updated = await hashPinAsync(rawNew);
     targetParticipant.pinHash = updated.hash;
     targetParticipant.pinSalt = updated.salt;
     saveDb(db);
@@ -82261,7 +82468,9 @@ var server_default = app;
   app,
   calculateHaversineMeters,
   hashPin,
-  verifyPin
+  hashPinAsync,
+  verifyPin,
+  verifyPinAsync
 });
 /*! Bundled license information:
 
