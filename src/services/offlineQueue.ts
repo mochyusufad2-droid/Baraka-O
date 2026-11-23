@@ -388,11 +388,62 @@ export function mergeSessionMonotonically(
   };
 }
 
+let cachedOrganizerVault: OrganizerVaultBackup | null = null;
+let vaultLocalStorageFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushOrganizerVaultToLocalStorageNow(vault: OrganizerVaultBackup): void {
+  if (vaultLocalStorageFlushTimer) {
+    clearTimeout(vaultLocalStorageFlushTimer);
+    vaultLocalStorageFlushTimer = null;
+  }
+  try {
+    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(vault));
+    localStorage.setItem(
+      LS_ORGANIZER_COURSES_BACKUP_KEY,
+      JSON.stringify(vault.courses)
+    );
+  } catch {
+    // Abaikan jika penyimpanan penuh
+  }
+}
+
+function schedulePersistOrganizerVaultToLocalStorage(
+  vault: OrganizerVaultBackup,
+  immediate = false
+): void {
+  cachedOrganizerVault = vault;
+  if (immediate) {
+    flushOrganizerVaultToLocalStorageNow(vault);
+    return;
+  }
+  if (vaultLocalStorageFlushTimer) {
+    return;
+  }
+  vaultLocalStorageFlushTimer = setTimeout(() => {
+    vaultLocalStorageFlushTimer = null;
+    if (cachedOrganizerVault) {
+      flushOrganizerVaultToLocalStorageNow(cachedOrganizerVault);
+    }
+  }, 2200);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (vaultLocalStorageFlushTimer && cachedOrganizerVault) {
+      flushOrganizerVaultToLocalStorageNow(cachedOrganizerVault);
+    }
+  });
+}
+
 /**
  * Membaca seluruh cadangan Vault di perangkat (Organizers, Courses, Participants, Sessions, Reports)
  * serta memigrasikan cadangan Course versi lama jika ada.
+ * Dilengkapi in-memory cache agar tidak memicu JSON.parse besar di main thread setiap 6 detik.
  */
 export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
+  if (cachedOrganizerVault) {
+    return cachedOrganizerVault;
+  }
   const legacyCourses = (() => {
     try {
       const raw = localStorage.getItem(LS_ORGANIZER_COURSES_BACKUP_KEY);
@@ -407,10 +458,12 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
   try {
     const rawVault = localStorage.getItem(LS_ORGANIZER_VAULT_BACKUP_KEY);
     if (!rawVault) {
-      return {
+      const initialVault = {
         ...createEmptyVaultBackup(),
         courses: legacyCourses,
       };
+      cachedOrganizerVault = initialVault;
+      return initialVault;
     }
     const parsed = JSON.parse(rawVault) as Partial<OrganizerVaultBackup>;
     const deletedCourseIds = Array.isArray(parsed.deletedCourseIds)
@@ -474,7 +527,7 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
         )
       : [];
 
-    return {
+    const loadedVault: OrganizerVaultBackup = {
       organizers,
       deletedOrganizerIds,
       courses: Array.from(courseMap.values()),
@@ -486,11 +539,15 @@ export function loadOrganizerVaultBackup(): OrganizerVaultBackup {
       reports,
       updatedAt: parsed.updatedAt || new Date().toISOString(),
     };
+    cachedOrganizerVault = loadedVault;
+    return loadedVault;
   } catch {
-    return {
+    const fallbackVault = {
       ...createEmptyVaultBackup(),
       courses: legacyCourses,
     };
+    cachedOrganizerVault = fallbackVault;
+    return fallbackVault;
   }
 }
 
@@ -715,15 +772,7 @@ export function mergeAndSaveOrganizerVaultBackup(
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(merged));
-    localStorage.setItem(
-      LS_ORGANIZER_COURSES_BACKUP_KEY,
-      JSON.stringify(merged.courses)
-    );
-  } catch {
-    // Abaikan jika penyimpanan penuh
-  }
+  schedulePersistOrganizerVaultToLocalStorage(merged, false);
 
   return merged;
 }
@@ -754,15 +803,7 @@ export function removeCourseFromOrganizerBackup(courseId: string): void {
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
-    localStorage.setItem(
-      LS_ORGANIZER_COURSES_BACKUP_KEY,
-      JSON.stringify(filteredCourses)
-    );
-  } catch {
-    // Abaikan
-  }
+  schedulePersistOrganizerVaultToLocalStorage(updated, true);
 }
 
 export function removeOrganizerFromVaultBackup(organizerId: string): void {
@@ -781,11 +822,7 @@ export function removeOrganizerFromVaultBackup(organizerId: string): void {
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
-  } catch {
-    // Abaikan
-  }
+  schedulePersistOrganizerVaultToLocalStorage(updated, true);
 }
 
 export function removeSessionFromVaultBackup(sessionId: string): void {
@@ -804,11 +841,7 @@ export function removeSessionFromVaultBackup(sessionId: string): void {
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
-  } catch {
-    // Abaikan
-  }
+  schedulePersistOrganizerVaultToLocalStorage(updated, true);
 }
 
 export function removeParticipantsFromVaultBackup(participantIds: string[]): void {
@@ -836,11 +869,7 @@ export function removeParticipantsFromVaultBackup(participantIds: string[]): voi
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    localStorage.setItem(LS_ORGANIZER_VAULT_BACKUP_KEY, JSON.stringify(updated));
-  } catch {
-    // Abaikan
-  }
+  schedulePersistOrganizerVaultToLocalStorage(updated, true);
 }
 
 

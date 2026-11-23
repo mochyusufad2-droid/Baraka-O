@@ -8,13 +8,105 @@ import {
   ValidationMethod,
 } from '../../types';
 
+export type QrFlagLayoutMode = 'TWIN_VERTICAL' | 'TWIN_SIDE';
+
 export interface PrintableQrItem {
   id: string;
   type: 'SETUP' | 'START' | 'CP' | 'FINISH';
-  badge: string;
+  displayCode: string;
+  centerBadgeText: string;
+  subHeaderLabel: string;
   title: string;
   subtitle: string;
   payload: string;
+}
+
+/**
+ * Membuat DataURL QR Code beresolusi tinggi (Error Correction Level 'H')
+ * lengkap dengan kotak nomor/kode pos di tengah QR persis seperti standar kartu pos Orienteering.
+ */
+async function generateQrWithCenterBadge(
+  payload: string,
+  centerText: string
+): Promise<string> {
+  const size = 400;
+  const rawQrUrl = await QRCode.toDataURL(payload, {
+    width: size,
+    margin: 0,
+    errorCorrectionLevel: 'H',
+    color: { dark: '#090d16', light: '#ffffff' },
+  });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return rawQrUrl;
+
+  const img = new Image();
+  await new Promise<void>((resolve) => {
+    img.onload = () => resolve();
+    img.onerror = () => resolve();
+    img.src = rawQrUrl;
+  });
+
+  ctx.drawImage(img, 0, 0, size, size);
+
+  if (centerText) {
+    const boxSize = Math.round(size * 0.19);
+    const boxX = Math.round((size - boxSize) / 2);
+    const boxY = Math.round((size - boxSize) / 2);
+
+    // Latar putih bersih di tengah QR
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(boxX - 3, boxY - 3, boxSize + 6, boxSize + 6);
+
+    // Bingkai kotak biru-langit tegas seperti gambar referensi
+    ctx.strokeStyle = '#0284c7';
+    ctx.lineWidth = 3.5;
+    ctx.strokeRect(boxX, boxY, boxSize, boxSize);
+
+    // Angka / Kode di tengah kotak
+    ctx.fillStyle = '#090d16';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const fontSize =
+      centerText.length <= 2 ? 30 : centerText.length === 3 ? 23 : 18;
+    ctx.font = `900 ${fontSize}px sans-serif`;
+    ctx.fillText(centerText, size / 2, size / 2 + 1);
+  }
+
+  return canvas.toDataURL('image/png');
+}
+
+/**
+ * Komponen SVG Bendera Orienteering Putih-Oranye Diagonal Standar IOF (Persegi 1:1)
+ */
+function OrienteeringFlagSvg({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      className={`aspect-square border-[2.5px] border-slate-950 overflow-hidden shrink-0 ${className}`}
+      style={{
+        WebkitPrintColorAdjust: 'exact',
+        printColorAdjust: 'exact',
+      }}
+    >
+      {/* Segitiga Kiri-Atas Putih */}
+      <polygon points="0,0 100,0 0,100" fill="#ffffff" />
+      {/* Segitiga Kanan-Bawah Oranye IOF */}
+      <polygon points="100,0 100,100 0,100" fill="#ff5500" />
+      {/* Garis Diagonal Pemisah Hitam */}
+      <line
+        x1="0"
+        y1="100"
+        x2="100"
+        y2="0"
+        stroke="#090d16"
+        strokeWidth="2.2"
+      />
+    </svg>
+  );
 }
 
 /**
@@ -235,6 +327,7 @@ export function BulkQrPrintModal({
   onClose: () => void;
 }) {
   const [qrPerPage, setQrPerPage] = useState<number>(4);
+  const [flagLayout, setFlagLayout] = useState<QrFlagLayoutMode>('TWIN_VERTICAL');
   const [qrImages, setQrImages] = useState<Record<string, string>>({});
   const [isGeneratingSheet, setIsGeneratingSheet] = useState(false);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
@@ -242,18 +335,16 @@ export function BulkQrPrintModal({
   const allItems: PrintableQrItem[] = useMemo(() => {
     const durationNote =
       course.durationMinutes && course.durationMinutes > 0
-        ? ` • Durasi: ${course.durationMinutes} Menit${
-            course.overtimePenaltyEnabled && course.overtimePenaltyPointsPerMinute
-              ? ` (Penalti -${course.overtimePenaltyPointsPerMinute} pts/mnt)`
-              : ''
-          }`
+        ? ` • Durasi: ${course.durationMinutes}m`
         : '';
 
     return [
       {
         id: 'setup',
         type: 'SETUP',
-        badge: 'WAJIB SEBELUM MULAI',
+        displayCode: 'SETUP',
+        centerBadgeText: 'SET',
+        subHeaderLabel: `Muat Lintasan: ${course.name}`,
         title: 'SETUP QR CODE',
         subtitle: `Course: ${course.name}${durationNote}`,
         payload: course.setupQrCode,
@@ -261,23 +352,39 @@ export function BulkQrPrintModal({
       {
         id: 'start',
         type: 'START',
-        badge: 'GARIS START',
+        displayCode: 'START',
+        centerBadgeText: 'S',
+        subHeaderLabel:
+          course.startLocation?.name || `Garis Start (${course.name})`,
         title: 'START QR CODE',
         subtitle: `Course: ${course.name}${durationNote}`,
         payload: course.startQrCode,
       },
-      ...course.checkpoints.map((cp) => ({
-        id: cp.id,
-        type: 'CP' as const,
-        badge: `CHECKPOINT #${cp.orderIndex}`,
-        title: cp.name ? `${cp.code} — ${cp.name}` : cp.code,
-        subtitle: `Radius GPS: ${cp.radiusMeters}m • Poin: ${cp.points}`,
-        payload: cp.qrSecret,
-      })),
+      ...course.checkpoints.map((cp) => {
+        const cleanCode = cp.code.replace(/^CP\s*/i, '').trim();
+        const displayCode = `CP ${cleanCode || cp.orderIndex}`;
+        const centerNum = cleanCode || String(cp.orderIndex);
+        const locName =
+          cp.name && cp.name.trim() ? cp.name.trim() : `Pos #${cp.orderIndex}`;
+
+        return {
+          id: cp.id,
+          type: 'CP' as const,
+          displayCode,
+          centerBadgeText: centerNum.slice(0, 4),
+          subHeaderLabel: `${cp.points} PTS • ${locName}`,
+          title: `POS CHECKPOINT • ${cp.code} (${cp.points} PTS)`,
+          subtitle: `${locName} • Radius GPS: ${cp.radiusMeters}m`,
+          payload: cp.qrSecret,
+        };
+      }),
       {
         id: 'finish',
         type: 'FINISH',
-        badge: 'GARIS FINISH',
+        displayCode: 'FINISH',
+        centerBadgeText: 'F',
+        subHeaderLabel:
+          course.finishLocation?.name || `Garis Finish (${course.name})`,
         title: 'FINISH QR CODE',
         subtitle: `Course: ${course.name}`,
         payload: course.finishQrCode,
@@ -291,11 +398,10 @@ export function BulkQrPrintModal({
       const map: Record<string, string> = {};
       for (const item of allItems) {
         try {
-          map[item.id] = await QRCode.toDataURL(item.payload, {
-            width: 360,
-            margin: 2,
-            color: { dark: '#090d16', light: '#ffffff' },
-          });
+          map[item.id] = await generateQrWithCenterBadge(
+            item.payload,
+            item.centerBadgeText
+          );
         } catch {
           map[item.id] = '';
         }
@@ -331,41 +437,85 @@ export function BulkQrPrintModal({
 
     // Header Lembar A4
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#0284c7';
+    ctx.fillStyle = '#ea580c';
     ctx.font = 'bold 20px sans-serif';
     ctx.fillText(
-      `ORIENTRA — LEMBAR QR RESMI (HALAMAN ${pageIndex + 1} DARI ${pages.length})`,
+      `ORIENTRA — LEMBAR QR POS ORIENTEERING (HALAMAN ${pageIndex + 1} DARI ${pages.length})`,
       50,
-      52
+      50
     );
 
     ctx.fillStyle = '#090d16';
     ctx.font = 'bold 26px sans-serif';
     ctx.fillText(
-      `${course.name} • ${course.locationName} (${course.date})`,
+      `${course.name}${course.locationName ? ` • ${course.locationName}` : ''} (${course.date})`,
       50,
-      86
+      82
     );
 
     ctx.textAlign = 'right';
     ctx.fillStyle = '#475569';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillText(`Opsi: ${qrPerPage} QR / Halaman`, canvas.width - 50, 86);
+    ctx.font = 'bold 17px sans-serif';
+    ctx.fillText(
+      `${flagLayout === 'TWIN_VERTICAL' ? 'Atas-Bawah (1:1 Sama Besar)' : 'Kiri-Kanan (1:1 Sama Besar)'} • ${qrPerPage} QR/Hal`,
+      canvas.width - 50,
+      82
+    );
 
     ctx.strokeStyle = '#cbd5e1';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(50, 104);
-    ctx.lineTo(canvas.width - 50, 104);
+    ctx.moveTo(50, 100);
+    ctx.lineTo(canvas.width - 50, 100);
     ctx.stroke();
 
     const cols = qrPerPage === 2 ? 1 : 2;
     const rows = Math.ceil(qrPerPage / cols);
-    const gridTop = 120;
+    const gridTop = 114;
     const gridWidth = canvas.width - 100;
-    const gridHeight = canvas.height - 165;
+    const gridHeight = canvas.height - 150;
     const cellW = gridWidth / cols;
     const cellH = gridHeight / rows;
+
+    // Helper menggambar Bendera Orienteering Putih-Oranye Diagonal di Canvas
+    function drawOrienteeringFlagRect(
+      c: CanvasRenderingContext2D,
+      fx: number,
+      fy: number,
+      fw: number,
+      fh: number
+    ) {
+      // Segitiga Kiri-Atas Putih
+      c.beginPath();
+      c.moveTo(fx, fy);
+      c.lineTo(fx + fw, fy);
+      c.lineTo(fx, fy + fh);
+      c.closePath();
+      c.fillStyle = '#ffffff';
+      c.fill();
+
+      // Segitiga Kanan-Bawah Oranye IOF (#ff5500)
+      c.beginPath();
+      c.moveTo(fx + fw, fy);
+      c.lineTo(fx + fw, fy + fh);
+      c.lineTo(fx, fy + fh);
+      c.closePath();
+      c.fillStyle = '#ff5500';
+      c.fill();
+
+      // Garis diagonal pemisah
+      c.beginPath();
+      c.moveTo(fx, fy + fh);
+      c.lineTo(fx + fw, fy);
+      c.strokeStyle = '#090d16';
+      c.lineWidth = 2.8;
+      c.stroke();
+
+      // Bingkai tegas luar bendera
+      c.strokeStyle = '#090d16';
+      c.lineWidth = 3.5;
+      c.strokeRect(fx, fy, fw, fh);
+    }
 
     for (let idx = 0; idx < pageItems.length; idx++) {
       const item = pageItems[idx];
@@ -375,62 +525,57 @@ export function BulkQrPrintModal({
       const y = gridTop + row * cellH;
       const centerX = x + cellW / 2;
 
-      // Peroleh warna tema berdasarkan jenis QR Code
-      const badgeColor =
-        item.type === 'SETUP'
-          ? '#d97706' // Amber/Ungu Emas
-          : item.type === 'START'
-          ? '#059669' // Emerald Green
-          : item.type === 'FINISH'
-          ? '#dc2626' // Crimson Red
-          : '#0284c7'; // Sky/Teal Blue untuk Checkpoint
+      const cardX = x + 10;
+      const cardY = y + 10;
+      const cardW = cellW - 20;
+      const cardH = cellH - 20;
 
-      const strokeColor =
-        item.type === 'SETUP'
-          ? '#f59e0b'
-          : item.type === 'START'
-          ? '#10b981'
-          : item.type === 'FINISH'
-          ? '#ef4444'
-          : '#0369a1';
+      // Bingkai kartu hitam tegas
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cardX, cardY, cardW, cardH);
+      ctx.strokeStyle = '#090d16';
+      ctx.lineWidth = 3.5;
+      ctx.strokeRect(cardX, cardY, cardW, cardH);
 
-      // Kotak garis potong putus-putus
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([8, 6]);
-      ctx.strokeRect(x + 8, y + 8, cellW - 16, cellH - 16);
-      ctx.setLineDash([]);
-
+      // 1. Judul Besar di Atas (CP 1, CP 2, CP 3, START, FINISH, SETUP)
       ctx.textAlign = 'center';
-
-      // Badge kategori
-      ctx.fillStyle = badgeColor;
-      ctx.font = 'bold 16px sans-serif';
-      ctx.fillText(item.badge, centerX, y + 38);
-
-      // Judul Pos / QR
       ctx.fillStyle = '#090d16';
-      ctx.font = 'bold 22px sans-serif';
-      ctx.fillText(item.title.slice(0, 38), centerX, y + 66);
+      const titleFontSize =
+        qrPerPage <= 2 ? 64 : qrPerPage <= 4 ? 52 : qrPerPage <= 6 ? 38 : 30;
+      ctx.font = `900 ${titleFontSize}px sans-serif`;
+      const titleY =
+        cardY +
+        (qrPerPage <= 2 ? 68 : qrPerPage <= 4 ? 56 : qrPerPage <= 6 ? 42 : 34);
+      ctx.fillText(item.displayCode, centerX, titleY);
 
-      // Subjudul
+      // 2. Sub-header ringkas (Poin & Nama Lokasi)
+      const subFontSize =
+        qrPerPage <= 2 ? 19 : qrPerPage <= 4 ? 15 : qrPerPage <= 6 ? 12 : 11;
       ctx.fillStyle = '#475569';
-      ctx.font = '15px sans-serif';
-      ctx.fillText(item.subtitle.slice(0, 54), centerX, y + 90);
+      ctx.font = `bold ${subFontSize}px sans-serif`;
+      const subY = titleY + (qrPerPage <= 4 ? 24 : 17);
+      ctx.fillText(item.subHeaderLabel.slice(0, 42), centerX, subY);
 
+      const contentTopY = subY + (qrPerPage <= 4 ? 18 : 12);
+      const footerY = cardY + cardH - (qrPerPage >= 7 ? 14 : 20);
+      const contentBottomY = footerY - (qrPerPage >= 7 ? 16 : 24);
+      const availH = Math.max(90, contentBottomY - contentTopY);
+      const availW = cardW - (qrPerPage <= 2 ? 70 : 40);
+
+      // Siapkan gambar QR Code (dengan kotak nomor di tengah QR)
       let qrDataUrl = qrImages[item.id];
       if (!qrDataUrl) {
         try {
-          qrDataUrl = await QRCode.toDataURL(item.payload, {
-            width: 360,
-            margin: 2,
-            color: { dark: '#090d16', light: '#ffffff' },
-          });
+          qrDataUrl = await generateQrWithCenterBadge(
+            item.payload,
+            item.centerBadgeText
+          );
         } catch {
           qrDataUrl = '';
         }
       }
 
+      let qrImg: HTMLImageElement | null = null;
       if (qrDataUrl) {
         const img = new Image();
         await new Promise<void>((resolve) => {
@@ -438,12 +583,74 @@ export function BulkQrPrintModal({
           img.onerror = () => resolve();
           img.src = qrDataUrl;
         });
-        const availableH = Math.max(140, cellH - 120);
-        const qrSize = Math.min(cellW - 70, availableH, 380);
-        const qrX = x + (cellW - qrSize) / 2;
-        const qrY = y + 98 + Math.max(0, (availableH - qrSize) / 2);
-        ctx.drawImage(img, qrX, qrY, qrSize, qrSize);
+        qrImg = img;
       }
+
+      if (flagLayout === 'TWIN_VERTICAL') {
+        // ====================================================================
+        // ATAS-BAWAH (PERSIS GAMBAR CONTOH): BENDERA 1:1 & QR 1:1 SAMA BESAR
+        // ====================================================================
+        const gap = qrPerPage <= 2 ? 26 : qrPerPage <= 4 ? 20 : 12;
+        const maxByHeight = Math.floor((availH - gap) / 2);
+        const maxByWidth = Math.floor(availW * 0.72);
+        const squareSize = Math.max(
+          68,
+          Math.min(maxByHeight, maxByWidth, 320)
+        );
+
+        const totalStackH = squareSize * 2 + gap;
+        const startY =
+          contentTopY + Math.max(0, Math.floor((availH - totalStackH) / 2));
+        const squareX = Math.floor(centerX - squareSize / 2);
+
+        // Kotak 1: Bendera Orienteering 1:1
+        drawOrienteeringFlagRect(ctx, squareX, startY, squareSize, squareSize);
+
+        // Kotak 2: QR Code 1:1 (Persis Sama Besar dengan Bendera di atasnya)
+        const qrY = startY + squareSize + gap;
+        if (qrImg) {
+          ctx.drawImage(qrImg, squareX, qrY, squareSize, squareSize);
+        }
+      } else {
+        // ====================================================================
+        // KIRI-KANAN: BENDERA 1:1 & QR 1:1 SAMA BESAR BERDAMPINGAN
+        // ====================================================================
+        const gap = qrPerPage <= 2 ? 32 : qrPerPage <= 4 ? 20 : 14;
+        const maxByWidth = Math.floor((availW - gap) / 2);
+        const maxByHeight = Math.floor(availH * 0.92);
+        const squareSize = Math.max(
+          68,
+          Math.min(maxByWidth, maxByHeight, 300)
+        );
+
+        const totalRowW = squareSize * 2 + gap;
+        const startX =
+          cardX + Math.floor((cardW - totalRowW) / 2);
+        const squareY =
+          contentTopY + Math.max(0, Math.floor((availH - squareSize) / 2));
+
+        // Kotak Kiri: Bendera Orienteering 1:1
+        drawOrienteeringFlagRect(ctx, startX, squareY, squareSize, squareSize);
+
+        // Kotak Kanan: QR Code 1:1 (Persis Sama Besar dengan Bendera di kirinya)
+        const qrX = startX + squareSize + gap;
+        if (qrImg) {
+          ctx.drawImage(qrImg, qrX, squareY, squareSize, squareSize);
+        }
+      }
+
+      // 4. Footer Monospace tipis di bagian paling bawah kartu
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#475569';
+      ctx.font = `bold ${
+        qrPerPage <= 2 ? 14 : qrPerPage <= 4 ? 11 : 9.5
+      }px monospace`;
+      const footerText = `${course.name.slice(0, 18).toUpperCase()} • ${item.payload}`;
+      ctx.fillText(
+        footerText.slice(0, qrPerPage <= 2 ? 62 : 44),
+        centerX,
+        footerY
+      );
     }
 
     ctx.textAlign = 'left';
@@ -467,7 +674,9 @@ export function BulkQrPrintModal({
         .replace(/^-|-$/g, '');
       const a = document.createElement('a');
       a.href = url;
-      a.download = `QR-Massal-${safeCourseName || course.id}-${pages.length}Hal-(${qrPerPage}perPage).pdf`;
+      a.download = `QR-Massal-${safeCourseName || course.id}-${
+        flagLayout === 'TWIN_VERTICAL' ? 'AtasBawah' : 'KiriKanan'
+      }-${pages.length}Hal-(${qrPerPage}perPage).pdf`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -487,7 +696,9 @@ export function BulkQrPrintModal({
       const url = canvas.toDataURL('image/png');
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Lembar-QR-${course.id}-Hal-${pageIndex + 1}-(${qrPerPage}perPage).png`;
+      a.download = `Lembar-QR-${course.id}-${
+        flagLayout === 'TWIN_VERTICAL' ? 'AtasBawah' : 'KiriKanan'
+      }-Hal-${pageIndex + 1}-(${qrPerPage}perPage).png`;
       a.click();
     } finally {
       setIsGeneratingSheet(false);
@@ -499,31 +710,59 @@ export function BulkQrPrintModal({
       <div className="mx-auto max-w-5xl rounded-xl border border-slate-700 bg-slate-900 p-5 space-y-5 shadow-2xl">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
           <div>
-            <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-              Print &amp; Unduh PDF QR Code Massal (2 s/d 8 QR per Halaman)
+            <span className="text-xs font-semibold uppercase tracking-wider text-amber-400">
+              Cetak QR Pos + Bendera Orienteering 1:1 Sama Besar
             </span>
             <h3 className="text-lg font-bold text-white">{course.name}</h3>
             <p className="text-xs text-slate-400">
-              Total {allItems.length} QR Code (Setup + Start + {course.checkpoints.length} Checkpoint + Finish) terbagi menjadi{' '}
-              <strong className="text-emerald-300">{pages.length} halaman A4</strong>.
+              {allItems.length} QR Code (Setup, Start, {course.checkpoints.length} Pos CP, Finish) •{' '}
+              <strong className="text-emerald-300">{pages.length} halaman A4</strong>
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Pemilih Posisi Twin-Square (Bendera 1:1 & QR 1:1 Sama Besar) */}
+            <div className="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setFlagLayout('TWIN_VERTICAL')}
+                className={`px-2.5 py-1.5 rounded-md font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                  flagLayout === 'TWIN_VERTICAL'
+                    ? 'bg-orange-500 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Atas-Bawah: Judul CP di atas, Bendera 1:1 di tengah, QR 1:1 Sama Besar di bawah"
+              >
+                <span>🟧 Atas–Bawah (1:1 Sama Besar)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setFlagLayout('TWIN_SIDE')}
+                className={`px-2.5 py-1.5 rounded-md font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                  flagLayout === 'TWIN_SIDE'
+                    ? 'bg-orange-500 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Kiri-Kanan: Bendera 1:1 di kiri & QR 1:1 Sama Besar di kanan"
+              >
+                <span>🟧 Kiri–Kanan (1:1 Sama Besar)</span>
+              </button>
+            </div>
+
             <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs">
-              <span className="text-slate-300 font-medium">Jumlah QR per Page:</span>
+              <span className="text-slate-300 font-medium">QR / Hal:</span>
               <select
                 value={qrPerPage}
                 onChange={(e) => setQrPerPage(Number(e.target.value))}
                 className="rounded bg-slate-800 px-2 py-1 font-bold text-emerald-300 focus:outline-none cursor-pointer"
               >
-                <option value={2}>2 QR / Halaman (Besar)</option>
-                <option value={3}>3 QR / Halaman</option>
-                <option value={4}>4 QR / Halaman (Grid 2x2)</option>
-                <option value={5}>5 QR / Halaman</option>
-                <option value={6}>6 QR / Halaman (Grid 2x3)</option>
-                <option value={7}>7 QR / Halaman</option>
-                <option value={8}>8 QR / Halaman (Grid 2x4)</option>
+                <option value={2}>2 QR / Hal (Besar)</option>
+                <option value={3}>3 QR / Hal</option>
+                <option value={4}>4 QR / Hal (Grid 2x2)</option>
+                <option value={5}>5 QR / Hal</option>
+                <option value={6}>6 QR / Hal (Grid 2x3)</option>
+                <option value={7}>7 QR / Hal</option>
+                <option value={8}>8 QR / Hal (Grid 2x4)</option>
               </select>
             </div>
 
@@ -531,17 +770,17 @@ export function BulkQrPrintModal({
               type="button"
               disabled={isGeneratingPdf || isGeneratingSheet}
               onClick={handleDownloadAllPdf}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-emerald-950/60 hover:bg-emerald-500 disabled:opacity-50 cursor-pointer transition"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white shadow-lg shadow-emerald-950/60 hover:bg-emerald-500 disabled:opacity-50 cursor-pointer transition"
             >
               {isGeneratingPdf ? (
                 <>
                   <RefreshCw className="h-4 w-4 animate-spin" />
-                  Menyusun {pages.length} Hal PDF...
+                  Menyusun PDF...
                 </>
               ) : (
                 <>
                   <FileText className="h-4 w-4" />
-                  Unduh Semua ({pages.length} Hal • 1 File PDF)
+                  Unduh PDF ({pages.length} Hal)
                 </>
               )}
             </button>
@@ -549,10 +788,10 @@ export function BulkQrPrintModal({
             <button
               type="button"
               onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700 cursor-pointer transition"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700 cursor-pointer transition"
             >
               <Printer className="h-4 w-4 text-emerald-400" />
-              Print Langsung
+              Print
             </button>
 
             <button
@@ -579,11 +818,15 @@ export function BulkQrPrintModal({
                     className="h-10 w-10 rounded-lg border border-slate-200 object-contain p-0.5"
                   />
                   <div>
-                    <div className="text-xs font-bold uppercase tracking-wider text-sky-700">
-                      ORIENTRA — LEMBAR QR RESMI (HALAMAN {pageIndex + 1} DARI {pages.length})
+                    <div className="text-xs font-bold uppercase tracking-wider text-orange-600">
+                      ORIENTRA — LEMBAR QR POS ORIENTEERING (HALAMAN {pageIndex + 1} DARI {pages.length})
                     </div>
                     <div className="text-sm font-bold text-slate-900">
-                      {course.name} • {course.locationName} ({course.date}) — Opsi: {qrPerPage} QR / Page
+                      {course.name}
+                      {course.locationName ? ` • ${course.locationName}` : ''} ({course.date}) —{' '}
+                      {flagLayout === 'TWIN_VERTICAL'
+                        ? 'Atas–Bawah (Bendera 1:1 & QR 1:1 Sama Besar)'
+                        : 'Kiri–Kanan (Bendera 1:1 & QR 1:1 Sama Besar)'}
                     </div>
                   </div>
                 </div>
@@ -594,7 +837,7 @@ export function BulkQrPrintModal({
                   className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Unduh Halaman {pageIndex + 1} (PNG)
+                  Unduh Hal {pageIndex + 1} (PNG)
                 </button>
               </div>
 
@@ -606,56 +849,76 @@ export function BulkQrPrintModal({
                 }`}
               >
                 {pageItems.map((item) => {
-                  const borderClass =
-                    item.type === 'SETUP'
-                      ? 'border-amber-400 bg-amber-50/20'
-                      : item.type === 'START'
-                      ? 'border-emerald-500 bg-emerald-50/20'
-                      : item.type === 'FINISH'
-                      ? 'border-rose-500 bg-rose-50/20'
-                      : 'border-sky-500 bg-sky-50/20';
-
-                  const badgeClass =
-                    item.type === 'SETUP'
-                      ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                      : item.type === 'START'
-                      ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                      : item.type === 'FINISH'
-                      ? 'bg-rose-100 text-rose-900 border border-rose-300'
-                      : 'bg-sky-100 text-sky-900 border border-sky-300';
+                  // Ukuran persegi 1:1 yang identik antara Bendera Orienteering dan QR Code
+                  const twinSquareClass =
+                    flagLayout === 'TWIN_VERTICAL'
+                      ? qrPerPage <= 2
+                        ? 'w-48 h-48'
+                        : qrPerPage <= 4
+                        ? 'w-40 h-40'
+                        : 'w-28 h-28'
+                      : qrPerPage <= 2
+                      ? 'w-44 h-44'
+                      : qrPerPage <= 4
+                      ? 'w-32 h-32'
+                      : 'w-24 h-24';
 
                   return (
                     <div
                       key={item.id}
-                      className={`flex flex-col items-center justify-between rounded-xl border-2 border-dashed p-4 text-center ${borderClass}`}
+                      className="flex flex-col items-center justify-between rounded-2xl border-[3px] border-slate-950 bg-white px-4 py-5 text-center shadow-sm"
                     >
+                      {/* 1. JUDUL POS RAKSASA DI ATAS (PERSIS GAMBAR REFERENSI: "CP 3") */}
                       <div className="w-full">
-                        <span
-                          className={`inline-block rounded px-2 py-0.5 text-[10px] font-bold ${badgeClass}`}
+                        <h4
+                          className={`font-black tracking-tight text-slate-950 leading-none ${
+                            qrPerPage <= 2
+                              ? 'text-5xl'
+                              : qrPerPage <= 4
+                              ? 'text-4xl'
+                              : 'text-2xl'
+                          }`}
                         >
-                          {item.badge}
-                        </span>
-                        <h4 className="mt-1 text-sm font-extrabold text-slate-900">
-                          {item.title}
+                          {item.displayCode}
                         </h4>
-                        <p className="text-[11px] text-slate-600">{item.subtitle}</p>
+                        <p
+                          className={`font-bold text-slate-500 mt-1.5 truncate ${
+                            qrPerPage <= 4 ? 'text-xs' : 'text-[10px]'
+                          }`}
+                        >
+                          {item.subHeaderLabel}
+                        </p>
                       </div>
 
-                      {qrImages[item.id] ? (
-                        <img
-                          src={qrImages[item.id]}
-                          alt={item.title}
-                          className={`my-2 object-contain ${
-                            qrPerPage <= 2
-                              ? 'h-56 w-56'
-                              : qrPerPage <= 4
-                              ? 'h-44 w-44'
-                              : 'h-32 w-32'
-                          }`}
-                        />
-                      ) : (
-                        <div className="my-4 text-xs text-slate-400">Memuat QR...</div>
-                      )}
+                      {/* 2. BENDERA ORIENTEERING 1:1 & QR CODE 1:1 SAMA BESAR */}
+                      <div
+                        className={`my-4 flex items-center justify-center ${
+                          flagLayout === 'TWIN_VERTICAL'
+                            ? 'flex-col gap-4'
+                            : 'flex-row gap-3.5'
+                        }`}
+                      >
+                        <OrienteeringFlagSvg className={twinSquareClass} />
+
+                        {qrImages[item.id] ? (
+                          <img
+                            src={qrImages[item.id]}
+                            alt={item.displayCode}
+                            className={`${twinSquareClass} aspect-square object-contain shrink-0`}
+                          />
+                        ) : (
+                          <div
+                            className={`${twinSquareClass} flex items-center justify-center border border-slate-200 text-xs text-slate-400`}
+                          >
+                            Memuat QR...
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 3. FOOTER MONOSPACE RINGKAS DI PALING BAWAH */}
+                      <div className="w-full pt-2 border-t border-slate-100 font-mono text-[10px] font-bold text-slate-500 truncate">
+                        {course.name.toUpperCase()} • {item.payload}
+                      </div>
                     </div>
                   );
                 })}

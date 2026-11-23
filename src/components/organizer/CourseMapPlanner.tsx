@@ -4,10 +4,10 @@ import {
   Compass,
   Crosshair,
   Layers,
-  MapPin,
-  Navigation,
+  Lock,
   RotateCcw,
   Search,
+  Unlock,
 } from 'lucide-react';
 import {
   Checkpoint,
@@ -140,9 +140,7 @@ function createCheckpointCircleIcon(
     : 'rgba(217,70,239,0.22)';
   const badgeBg = isEditing ? '#78350f' : '#4a044e';
   const badgeBorder = isEditing ? '#fbbf24' : '#e879f9';
-  const labelText = cp.name
-    ? `#${cp.orderIndex} ${cp.code}`
-    : `#${cp.orderIndex} ${cp.code}`;
+  const labelText = `#${cp.orderIndex} ${cp.code}`;
 
   const html = `
     <div style="position:relative;width:42px;height:42px;display:flex;align-items:center;justify-content:center;">
@@ -206,12 +204,16 @@ export function CourseMapPlanner({
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
   const lastFittedCourseIdRef = useRef<string>('');
 
+  // Default: Peta Tidak Terkunci (false) saat awal masuk, dan bisa dikunci kapan saja lewat tombol "Kunci Peta"
+  const [isMapLocked, setIsMapLocked] = useState<boolean>(false);
   const [clickMode, setClickMode] = useState<MapClickMode>('CP');
   const [tileStyle, setTileStyle] = useState<MapTileStyle>('STREET');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchStatus, setSearchStatus] = useState<string | null>(null);
   const [isSavingPoint, setIsSavingPoint] = useState<boolean>(false);
+
+  const isInteractionLocked = readOnly || isMapLocked;
 
   // Pelindung status Drag agar layer peta tidak pernah di-reset/clear saat user sedang menahan & menggeser marker
   const isDraggingRef = useRef<boolean>(false);
@@ -243,7 +245,8 @@ export function CourseMapPlanner({
   // Simpan referensi callback terbaru agar event listener klik peta selalu menggunakan state terkini
   const clickHandlerRef = useRef<(lat: number, lng: number) => void>(() => {});
   clickHandlerRef.current = async (lat: number, lng: number) => {
-    if (readOnly || isDraggingRef.current) return;
+    // Jika peta sedang Terkunci (isMapLocked) atau Read-Only, abaikan semua klik di peta
+    if (readOnly || isMapLocked || isDraggingRef.current) return;
     const roundedLat = Number(lat.toFixed(6));
     const roundedLng = Number(lng.toFixed(6));
 
@@ -450,7 +453,7 @@ export function CourseMapPlanner({
   const usesGpsRadius = course.validationMethod !== ValidationMethod.QR_ONLY;
 
   // Render ulang simbol IOF (Start 🔺, CP ⭕ + Radius, Finish ◎, Garis Rute, dan Preview CP 🎯)
-  // Dilengkapi fitur Drag & Drop langsung di peta dengan pelindung isDraggingRef agar tidak pernah terlepas saat digeser
+  // Dilengkapi fitur Drag & Drop langsung di peta dengan pelindung isDraggingRef & Kunci Peta (isMapLocked)
   useEffect(() => {
     const group = overlayGroupRef.current;
     if (!group) return;
@@ -513,11 +516,11 @@ export function CourseMapPlanner({
       }
     };
 
-    // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung jika tidak Read-Only)
+    // 1. Titik START (Segitiga 🔺 — Bisa Di-drag Langsung hanya jika Peta Terbuka & tidak Read-Only)
     if (activeCourse.startLocation && liveStartCoord) {
       const startMarker = L.marker(liveStartCoord, {
         icon: createStartTriangleIcon(),
-        draggable: !readOnly,
+        draggable: !isInteractionLocked,
       });
       startMarker.bindTooltip(
         `<strong>🔺 TITIK START</strong><br/>${activeCourse.startLocation.latitude.toFixed(
@@ -525,11 +528,13 @@ export function CourseMapPlanner({
         )}, ${activeCourse.startLocation.longitude.toFixed(5)}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : isMapLocked
+            ? '🔒 Posisi Peta Terkunci (Klik "Buka Kunci" untuk menggeser)'
             : 'Geser (Drag) simbol ini untuk memindahkan posisi Start'
         }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
-      if (!readOnly) {
+      if (!isInteractionLocked) {
         startMarker.on('dragstart', () => {
           isDraggingRef.current = true;
         });
@@ -555,7 +560,7 @@ export function CourseMapPlanner({
       startMarker.addTo(group);
     }
 
-    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag jika tidak Read-Only)
+    // 2. Titik CHECKPOINTS (Lingkaran Tunggal ⭕ + Lingkaran Radius GPS — Bisa Di-drag jika Peta Terbuka)
     sortedCps.forEach((cp) => {
       const isEditingThis = !readOnly && editingCheckpointId === cp.id;
       const effectiveLat =
@@ -590,7 +595,7 @@ export function CourseMapPlanner({
 
       const cpMarker = L.marker(cpLatLng, {
         icon: createCheckpointCircleIcon(cpForIcon, isEditingThis),
-        draggable: !readOnly,
+        draggable: !isInteractionLocked,
       });
 
       const titleStr = cp.name ? `${effectiveCode} — ${cp.name}` : effectiveCode;
@@ -604,6 +609,8 @@ export function CourseMapPlanner({
         } pts • ${radiusOrQrInfo}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : isMapLocked
+            ? '🔒 Posisi Peta Terkunci (Klik "Buka Kunci" untuk menggeser/edit di peta)'
             : isEditingThis
             ? 'Mode Edit Aktif — Klik di peta atau geser simbol ini, lalu klik Simpan Perubahan Pos'
             : 'Klik untuk edit detail • Geser (Drag) untuk pindah posisi langsung'
@@ -611,7 +618,7 @@ export function CourseMapPlanner({
         { direction: 'top', offset: [0, -14] }
       );
 
-      if (!readOnly) {
+      if (!isInteractionLocked) {
         cpMarker.on('click', (ev) => {
           L.DomEvent.stopPropagation(ev);
           callbacksRef.current.onSelectCheckpointForEdit(cp);
@@ -652,7 +659,7 @@ export function CourseMapPlanner({
       cpMarker.addTo(group);
     });
 
-    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag jika tidak Read-Only)
+    // 3. Titik FINISH (Lingkaran Ganda Konsentris ◎ — Bisa Di-drag jika Peta Terbuka)
     if (activeCourse.finishLocation && liveFinishCoord) {
       const isSameAsStart = Boolean(
         activeCourse.startLocation &&
@@ -668,7 +675,7 @@ export function CourseMapPlanner({
 
       const finishMarker = L.marker(liveFinishCoord, {
         icon: createFinishDoubleCircleIcon(isSameAsStart),
-        draggable: !readOnly,
+        draggable: !isInteractionLocked,
       });
       finishMarker.bindTooltip(
         `<strong>◎ TITIK FINISH</strong><br/>${activeCourse.finishLocation.latitude.toFixed(
@@ -676,11 +683,13 @@ export function CourseMapPlanner({
         )}, ${activeCourse.finishLocation.longitude.toFixed(5)}<br/><em>${
           readOnly
             ? 'Mode Pantau (Read-Only) — Posisi dikunci'
+            : isMapLocked
+            ? '🔒 Posisi Peta Terkunci (Klik "Buka Kunci" untuk menggeser)'
             : 'Geser (Drag) simbol ini untuk memindahkan posisi Finish'
         }</em>`,
         { direction: 'top', offset: [0, -14] }
       );
-      if (!readOnly) {
+      if (!isInteractionLocked) {
         finishMarker.on('dragstart', () => {
           isDraggingRef.current = true;
         });
@@ -706,8 +715,8 @@ export function CourseMapPlanner({
       finishMarker.addTo(group);
     }
 
-    // 4. Titik Preview / Calon Pos Baru (Draft CP) saat tambah pos baru (bukan sedang edit pos lama)
-    if (!readOnly && !editingCheckpointId && hasValidDraftCoords) {
+    // 4. Titik Preview / Calon Pos Baru (Draft CP) — Hanya muncul jika Peta Terbuka (tidak terkunci)
+    if (!isInteractionLocked && !editingCheckpointId && hasValidDraftCoords) {
       const matchesExistingUnedited = activeCourse.checkpoints.some(
         (cp) =>
           Math.abs(cp.latitude - parsedDraftLat) < 0.00001 &&
@@ -767,6 +776,8 @@ export function CourseMapPlanner({
     draftCpRadiusMeters,
     editingCheckpointId,
     readOnly,
+    isMapLocked,
+    isInteractionLocked,
     dragFinishedTick,
   ]);
 
@@ -825,8 +836,14 @@ export function CourseMapPlanner({
         const lat = Number(pos.coords.latitude.toFixed(6));
         const lng = Number(pos.coords.longitude.toFixed(6));
         mapInstanceRef.current?.setView([lat, lng], 17);
-        onPickCpCoordinates(lat, lng);
-        setSearchStatus(`GPS ditemukan (${lat}, ${lng}). Koordinat siap digunakan.`);
+        if (!isInteractionLocked) {
+          onPickCpCoordinates(lat, lng);
+          setSearchStatus(`GPS ditemukan (${lat}, ${lng}). Koordinat siap digunakan.`);
+        } else {
+          setSearchStatus(
+            `Peta diarahkan ke GPS Anda (${lat}, ${lng}). Buka Kunci Peta jika ingin menaruh titik.`
+          );
+        }
       },
       () => {
         setSearchStatus('Gagal membaca GPS perangkat. Gunakan pencarian lokasi atau klik langsung di peta.');
@@ -837,7 +854,7 @@ export function CourseMapPlanner({
 
   // Tombol cepat: Samakan Lokasi Finish = Lokasi Start
   const handleCopyStartToFinish = async () => {
-    if (!course.startLocation) return;
+    if (!course.startLocation || isInteractionLocked) return;
     setIsSavingPoint(true);
     try {
       await onUpdateFinishLocation({
@@ -849,6 +866,19 @@ export function CourseMapPlanner({
       setIsSavingPoint(false);
     }
   };
+
+  // Update kursor kanvas peta tanpa mengubah atribut className (agar class 'leaflet-container' milik Leaflet tidak terhapus oleh React)
+  useEffect(() => {
+    if (mapContainerRef.current) {
+      mapContainerRef.current.classList.add('leaflet-container');
+      mapContainerRef.current.style.cursor = isInteractionLocked
+        ? 'grab'
+        : 'crosshair';
+    }
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.invalidateSize({ pan: false });
+    }
+  }, [isInteractionLocked]);
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-3.5 space-y-2.5">
@@ -911,7 +941,7 @@ export function CourseMapPlanner({
         </div>
       </div>
 
-      {/* Baris Kontrol: Mode Klik Peta (CP / Start / Finish) + Pencarian Tempat */}
+      {/* Baris Kontrol: Tombol Kunci Peta + Mode Klik Peta (CP / Start / Finish) + Pencarian Tempat */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-center">
         <div className="lg:col-span-7 flex flex-wrap items-center gap-1.5">
           {readOnly ? (
@@ -920,13 +950,44 @@ export function CourseMapPlanner({
             </div>
           ) : (
             <>
+              {/* Tombol Utama Kunci / Buka Kunci Peta */}
               <button
                 type="button"
-                onClick={() => setClickMode('CP')}
+                onClick={() => setIsMapLocked((prev) => !prev)}
                 className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
-                  clickMode === 'CP'
-                    ? 'bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-400 shadow-sm'
-                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                  isMapLocked
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/80 shadow-sm hover:bg-amber-500/30'
+                    : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/80 shadow-sm hover:bg-emerald-500/30'
+                }`}
+                title={
+                  isMapLocked
+                    ? 'Peta sedang terkunci (aman digeser/diklik). Klik untuk membuka kunci edit posisi CP/Start/Finish.'
+                    : 'Peta sedang terbuka untuk tambah/geser titik. Klik untuk mengunci posisi peta.'
+                }
+              >
+                {isMapLocked ? (
+                  <>
+                    <Lock className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Peta Terkunci (Buka)</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>Kunci Peta</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={isMapLocked}
+                onClick={() => setClickMode('CP')}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  isMapLocked
+                    ? 'bg-slate-900/50 text-slate-600 border-slate-800/70 cursor-not-allowed'
+                    : clickMode === 'CP'
+                    ? 'bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-400 shadow-sm cursor-pointer'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200 cursor-pointer'
                 }`}
               >
                 <span>⭕</span>
@@ -937,11 +998,14 @@ export function CourseMapPlanner({
 
               <button
                 type="button"
+                disabled={isMapLocked}
                 onClick={() => setClickMode('START')}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
-                  clickMode === 'START'
-                    ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400 shadow-sm'
-                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  isMapLocked
+                    ? 'bg-slate-900/50 text-slate-600 border-slate-800/70 cursor-not-allowed'
+                    : clickMode === 'START'
+                    ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400 shadow-sm cursor-pointer'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200 cursor-pointer'
                 }`}
               >
                 <span>🔺</span>
@@ -950,18 +1014,21 @@ export function CourseMapPlanner({
 
               <button
                 type="button"
+                disabled={isMapLocked}
                 onClick={() => setClickMode('FINISH')}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
-                  clickMode === 'FINISH'
-                    ? 'bg-sky-500/20 text-sky-200 border-sky-400 shadow-sm'
-                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition ${
+                  isMapLocked
+                    ? 'bg-slate-900/50 text-slate-600 border-slate-800/70 cursor-not-allowed'
+                    : clickMode === 'FINISH'
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-400 shadow-sm cursor-pointer'
+                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200 cursor-pointer'
                 }`}
               >
                 <span>◎</span>
                 <span>Set Finish</span>
               </button>
 
-              {course.startLocation && (
+              {course.startLocation && !isMapLocked && (
                 <button
                   type="button"
                   disabled={isSavingPoint}
@@ -1032,19 +1099,21 @@ export function CourseMapPlanner({
         </div>
       )}
 
-      {/* Kanvas Peta Interaktif */}
+      {/* Kanvas Peta Interaktif (className wajib statis & menyertakan leaflet-container agar tidak pernah hilang) */}
       <div className="relative rounded-xl overflow-hidden border border-slate-700 shadow-inner">
         <div
           ref={mapContainerRef}
-          className={`h-[390px] sm:h-[440px] w-full bg-slate-900 z-0 ${
-            readOnly ? 'cursor-grab' : 'cursor-crosshair'
-          }`}
+          className="leaflet-container h-[390px] sm:h-[440px] w-full bg-slate-900 z-0"
         />
 
         {/* Chip Mode Klik Singkat di Sudut Atas Peta */}
         {!readOnly && (
           <div className="pointer-events-none absolute top-2.5 right-2.5 z-[400] rounded-lg bg-slate-950/90 border border-slate-700 px-2.5 py-1 text-[11px] font-semibold text-slate-200 shadow-lg backdrop-blur-sm">
-            {clickMode === 'CP' ? (
+            {isMapLocked ? (
+              <span className="text-amber-300">
+                🔒 Posisi Peta Terkunci (Aman Digeser)
+              </span>
+            ) : clickMode === 'CP' ? (
               <span className="text-fuchsia-300">
                 ⭕ Klik Peta: {draftCpCode || 'CP'} (Bisa Digeser)
               </span>
@@ -1069,7 +1138,7 @@ export function CourseMapPlanner({
                 : 'Belum diset'}
             </span>
           </div>
-          {!readOnly && course.startLocation && (
+          {!isInteractionLocked && course.startLocation && (
             <button
               type="button"
               onClick={() => onUpdateStartLocation(null)}
@@ -1087,7 +1156,7 @@ export function CourseMapPlanner({
             <span className="font-bold text-fuchsia-300">POS:</span>
             <span className="font-mono text-[11px] text-slate-300 truncate">
               {course.checkpoints.length} CP
-              {!readOnly && draftCpLat && draftCpLng
+              {!isInteractionLocked && draftCpLat && draftCpLng
                 ? ` • Draft: ${Number(draftCpLat).toFixed(4)}, ${Number(draftCpLng).toFixed(4)}`
                 : ''}
             </span>
@@ -1104,7 +1173,7 @@ export function CourseMapPlanner({
                 : 'Belum diset'}
             </span>
           </div>
-          {!readOnly && course.finishLocation && (
+          {!isInteractionLocked && course.finishLocation && (
             <button
               type="button"
               onClick={() => onUpdateFinishLocation(null)}

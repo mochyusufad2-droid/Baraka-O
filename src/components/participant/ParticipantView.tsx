@@ -601,8 +601,11 @@ export default function ParticipantView({
       const courseIdParam = encodeURIComponent(
         activeCourse?.id || activeSession.courseId || ''
       );
+      const courseUpdatedAtParam = encodeURIComponent(
+        activeCourse?.updatedAt || ''
+      );
       const res = await fetch(
-        `/api/participant/session/${activeSession.id}?courseId=${courseIdParam}`,
+        `/api/participant/session/${activeSession.id}?courseId=${courseIdParam}&courseUpdatedAt=${courseUpdatedAtParam}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         }
@@ -708,6 +711,7 @@ export default function ParticipantView({
   }, [
     activeSession,
     activeCourse?.id,
+    activeCourse?.updatedAt,
     token,
     isEffectivelyOnline,
     cameraActiveFor,
@@ -722,10 +726,21 @@ export default function ParticipantView({
       return;
     }
     syncLatestCourseAndSession();
-    const poll = window.setInterval(syncLatestCourseAndSession, 5000);
+    // Adaptive polling interval:
+    // - NOT_STARTED (4.5s): responsif saat menunggu Mass Start atau giliran estafet
+    // - ACTIVE (10s): hemat baterai & paket data saat berlari (karena scan QR/GPS tetap dikirim instan)
+    // - FINISHED (25s): hemat resource setelah peserta mencapai garis Finish
+    const pollIntervalMs =
+      activeSession.status === SessionStatus.NOT_STARTED
+        ? 4500
+        : activeSession.status === SessionStatus.ACTIVE
+          ? 10000
+          : 25000;
+    const poll = window.setInterval(syncLatestCourseAndSession, pollIntervalMs);
     return () => window.clearInterval(poll);
   }, [
     activeSession?.id,
+    activeSession?.status,
     token,
     isEffectivelyOnline,
     cameraActiveFor,

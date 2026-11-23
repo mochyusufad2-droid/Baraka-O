@@ -360,8 +360,8 @@ export default function OrganizerDashboard({
   const [cpCode, setCpCode] = useState('CP1');
   const [cpName, setCpName] = useState('');
   const [cpPointsInput, setCpPointsInput] = useState<string>('100');
-  const [cpLat, setCpLat] = useState<string>('-6.8586');
-  const [cpLng, setCpLng] = useState<string>('107.6305');
+  const [cpLat, setCpLat] = useState<string>('');
+  const [cpLng, setCpLng] = useState<string>('');
   const [cpRadiusInput, setCpRadiusInput] = useState<string>('35');
 
   // Form States for Participant Creation & Deletion by Organizer
@@ -457,12 +457,24 @@ export default function OrganizerDashboard({
   const [resetParticipantPasswordId, setResetParticipantPasswordId] = useState<string | null>(null);
   const [resetParticipantPasswordValue, setResetParticipantPasswordValue] = useState<string>('');
 
-  // Live timer tick for active sessions
+  // Live timer tick for active sessions (1s on live monitoring/results tabs, 5s on course/organizer config tabs to prevent input & map jitter)
   const [nowTick, setNowTick] = useState<number>(Date.now());
+  const hasActiveSession = useMemo(
+    () =>
+      Boolean(
+        dashboard?.sessions?.some((s) => s.status === SessionStatus.ACTIVE)
+      ),
+    [dashboard?.sessions]
+  );
   useEffect(() => {
-    const interval = setInterval(() => setNowTick(Date.now()), 1000);
+    const isLiveTimerTab =
+      activeTab === 'OVERVIEW' ||
+      activeTab === 'MONITORING' ||
+      activeTab === 'RESULT';
+    const tickIntervalMs = isLiveTimerTab && hasActiveSession ? 1000 : 5000;
+    const interval = setInterval(() => setNowTick(Date.now()), tickIntervalMs);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeTab, hasActiveSession]);
 
   const showTemporarySuccess = useCallback((msg: string) => {
     setSuccessMsg(msg);
@@ -665,6 +677,12 @@ export default function OrganizerDashboard({
     setIsLoggingIn(true);
     try {
       const localVault = loadOrganizerVaultBackup();
+      // Kirim hanya data kredensial Organizer saat login agar proses masuk super cepat (<0.2 detik)
+      // bahkan di jaringan sinyal lemah; sinkronisasi Course/Sesi/Peserta dilakukan otomatis oleh fetchDashboard setelah login
+      const lightweightAuthVault = {
+        organizers: localVault.organizers,
+        deletedOrganizerIds: localVault.deletedOrganizerIds,
+      };
       const res = await fetch('/api/organizer/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -672,7 +690,7 @@ export default function OrganizerDashboard({
           username: usernameInput.trim() || undefined,
           password: pinInput,
           pin: pinInput,
-          vaultBackup: localVault,
+          vaultBackup: lightweightAuthVault,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -846,7 +864,21 @@ export default function OrganizerDashboard({
       }
 
       const mergedVault = data.vaultSnapshot
-        ? mergeAndSaveOrganizerVaultBackup(data.vaultSnapshot)
+        ? mergeAndSaveOrganizerVaultBackup({
+            ...data.vaultSnapshot,
+            courses:
+              data.vaultSnapshot.courses && data.vaultSnapshot.courses.length > 0
+                ? data.vaultSnapshot.courses
+                : data.courses,
+            sessions:
+              data.vaultSnapshot.sessions && data.vaultSnapshot.sessions.length > 0
+                ? data.vaultSnapshot.sessions
+                : data.sessions,
+            reports:
+              data.vaultSnapshot.reports && data.vaultSnapshot.reports.length > 0
+                ? data.vaultSnapshot.reports
+                : data.reports,
+          })
         : mergeAndSaveOrganizerVaultBackup({
             courses: data.courses,
             deletedParticipantIds: data.deletedParticipantIds,
@@ -1099,19 +1131,60 @@ export default function OrganizerDashboard({
     );
   }, []);
 
-  // Saat berganti Course atau jumlah CP bertambah, otomatis isi saran kode pos berikutnya (CP1, CP2, dst.)
+  // Helper: Saran kode CP berikutnya secara pintar (mencari nomor CP terkecil yang belum terpakai, misal jika CP1, CP2, CP4 ada -> sarankan CP3)
+  const suggestNextCpCode = useCallback((checkpoints: Checkpoint[]): string => {
+    const usedNumbers = new Set<number>();
+    for (const cp of checkpoints) {
+      const m = (cp.code || '').trim().match(/^CP\s*(\d+)$/i);
+      if (m) {
+        usedNumbers.add(Number(m[1]));
+      }
+    }
+    let candidate = 1;
+    while (usedNumbers.has(candidate)) {
+      candidate++;
+    }
+    return `CP${candidate}`;
+  }, []);
+
+  // Helper: Urutkan daftar CP secara Natural Alphanumeric (CP1, CP2, ..., CP9, CP10) berdasarkan Kode Pos atau Nama Lokasi
+  const sortCheckpointsNaturally = useCallback(
+    (list: Checkpoint[], sortBy: 'CODE' | 'NAME' = 'CODE'): Checkpoint[] => {
+      const naturalCompare = (a: string, b: string) =>
+        a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+      return [...list]
+        .sort((a, b) => {
+          if (sortBy === 'NAME') {
+            const nameA = (a.name || '').trim() || a.code;
+            const nameB = (b.name || '').trim() || b.code;
+            const cmpName = naturalCompare(nameA, nameB);
+            if (cmpName !== 0) return cmpName;
+          }
+          const cmpCode = naturalCompare(a.code || '', b.code || '');
+          if (cmpCode !== 0) return cmpCode;
+          return naturalCompare(a.name || '', b.name || '');
+        })
+        .map((cpItem, idx) => ({
+          ...cpItem,
+          orderIndex: idx + 1,
+        }));
+    },
+    []
+  );
+
+  // Saat berganti Course atau jumlah CP berubah, otomatis isi saran kode pos berikutnya (CP1, CP2, dst.)
   useEffect(() => {
     if (!selectedCourse) return;
     if (!editingCheckpointId) {
-      const nextNum = selectedCourse.checkpoints.length + 1;
-      setCpCode(`CP${nextNum}`);
+      setCpCode(suggestNextCpCode(selectedCourse.checkpoints));
       setCpRadiusInput(String(selectedCourse.defaultGpsRadiusMeters || 35));
     }
   }, [
     selectedCourse?.id,
-    selectedCourse?.checkpoints.length,
+    selectedCourse?.checkpoints,
     selectedCourse?.defaultGpsRadiusMeters,
     editingCheckpointId,
+    suggestNextCpCode,
   ]);
 
   // Buka mode Edit Course dengan menyalin data Course aktif ke state form edit
@@ -1307,12 +1380,15 @@ export default function OrganizerDashboard({
 
   const handleCancelEditCheckpoint = useCallback(() => {
     setEditingCheckpointId(null);
-    const nextNum = (selectedCourse?.checkpoints.length || 0) + 1;
-    setCpCode(`CP${nextNum}`);
+    setCpCode(
+      selectedCourse ? suggestNextCpCode(selectedCourse.checkpoints) : 'CP1'
+    );
     setCpName('');
+    setCpLat('');
+    setCpLng('');
     setCpPointsInput('100');
     setCpRadiusInput(String(selectedCourse?.defaultGpsRadiusMeters || 35));
-  }, [selectedCourse]);
+  }, [selectedCourse, suggestNextCpCode]);
 
   // Geser (Drag & Drop) Posisi Pos CP Langsung di Peta -> Simpan Instan 1 Langkah
   const handleDragCheckpointCoordinates = useCallback(
@@ -1390,6 +1466,48 @@ export default function OrganizerDashboard({
     ]
   );
 
+  // Pre-index participants, courses, and verified checkpoint reports by ID (O(1) lookup, recomputed only when data arrives every 6s, NOT every 1s tick)
+  const participantsByIdMap = useMemo(() => {
+    const map = new Map<string, ParticipantPublic>();
+    for (const p of dashboard?.participants || []) {
+      if (p && p.id) map.set(p.id, p);
+    }
+    return map;
+  }, [dashboard?.participants]);
+
+  const coursesByIdMap = useMemo(() => {
+    const map = new Map<string, Course>();
+    for (const c of dashboard?.courses || []) {
+      if (c && c.id) map.set(c.id, c);
+    }
+    return map;
+  }, [dashboard?.courses]);
+
+  const verifiedCpReportsBySessionIdMap = useMemo(() => {
+    const map = new Map<string, CheckpointReport[]>();
+    for (const r of dashboard?.reports || []) {
+      if (
+        r &&
+        r.sessionId &&
+        r.reportType === 'CHECKPOINT' &&
+        r.serverVerified !== false
+      ) {
+        let bucket = map.get(r.sessionId);
+        if (!bucket) {
+          bucket = [];
+          map.set(r.sessionId, bucket);
+        }
+        bucket.push(r);
+      }
+    }
+    for (const bucket of map.values()) {
+      bucket.sort(
+        (a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt)
+      );
+    }
+    return map;
+  }, [dashboard?.reports]);
+
   // Compute Leaderboard rows with live / finished Overtime Penalty + Split Legs (#1..#N & Finish Split)
   const leaderboardRows = useMemo(() => {
     if (!dashboard) return [];
@@ -1406,12 +1524,8 @@ export default function OrganizerDashboard({
     };
 
     const enriched = filteredSessions.map((sess) => {
-      const participant = dashboard.participants.find(
-        (p: ParticipantPublic) => p.id === sess.participantId
-      );
-      const baseCourse = dashboard.courses.find(
-        (c: Course) => c.id === sess.courseId
-      );
+      const participant = participantsByIdMap.get(sess.participantId);
+      const baseCourse = coursesByIdMap.get(sess.courseId);
       const course =
         effectiveSelectedCourse && baseCourse?.id === effectiveSelectedCourse.id
           ? effectiveSelectedCourse
@@ -1425,16 +1539,8 @@ export default function OrganizerDashboard({
       const validFinishMs =
         finishMs !== undefined && !Number.isNaN(finishMs) ? finishMs : undefined;
 
-      const sessionCpReports = dashboard.reports
-        .filter(
-          (r: CheckpointReport) =>
-            r.sessionId === sess.id &&
-            r.reportType === 'CHECKPOINT' &&
-            r.serverVerified !== false
-        )
-        .sort(
-          (a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt)
-        );
+      const sessionCpReports =
+        verifiedCpReportsBySessionIdMap.get(sess.id) || [];
 
       const seenCpIds = new Set<string>();
       const orderedSplits: Array<{
@@ -1685,6 +1791,9 @@ export default function OrganizerDashboard({
       }));
   }, [
     dashboard,
+    participantsByIdMap,
+    coursesByIdMap,
+    verifiedCpReportsBySessionIdMap,
     selectedCourse,
     effectiveSelectedCourse,
     nowTick,
@@ -1948,25 +2057,26 @@ export default function OrganizerDashboard({
         : Math.max(5, Number(cpRadiusInput) || 35);
 
     try {
-        if (editingCheckpointId) {
+      if (editingCheckpointId) {
         const nowIso = new Date().toISOString();
+        const rawUpdatedCps = selectedCourse.checkpoints.map((item) =>
+          item.id === editingCheckpointId
+            ? {
+                ...item,
+                code: cpCode.trim().toUpperCase(),
+                name: cpName.trim(),
+                points: parsedPoints,
+                latitude: parsedLat,
+                longitude: parsedLng,
+                radiusMeters: parsedRadius,
+                updatedAt: nowIso,
+              }
+            : item
+        );
         const optimisticEditedCourse: Course = {
           ...selectedCourse,
           updatedAt: nowIso,
-          checkpoints: selectedCourse.checkpoints.map((item) =>
-            item.id === editingCheckpointId
-              ? {
-                  ...item,
-                  code: cpCode.trim().toUpperCase(),
-                  name: cpName.trim(),
-                  points: parsedPoints,
-                  latitude: parsedLat,
-                  longitude: parsedLng,
-                  radiusMeters: parsedRadius,
-                  updatedAt: nowIso,
-                }
-              : item
-          ),
+          checkpoints: sortCheckpointsNaturally(rawUpdatedCps, 'CODE'),
         };
         applyUpdatedCourseLocally(optimisticEditedCourse);
 
@@ -1996,9 +2106,11 @@ export default function OrganizerDashboard({
         }
         setEditingCheckpointId(null);
         setCpName('');
+        setCpLat('');
+        setCpLng('');
         await fetchDashboard();
         showTemporarySuccess(
-          `Pos ${cpCode.trim().toUpperCase()} berhasil diperbarui!`
+          `Pos ${cpCode.trim().toUpperCase()} diperbarui & diurutkan otomatis!`
         );
       } else {
         const res = await fetch(
@@ -2026,15 +2138,56 @@ export default function OrganizerDashboard({
           applyUpdatedCourseLocally(data.course);
         }
         setCpName('');
+        setCpLat('');
+        setCpLng('');
         await fetchDashboard();
         showTemporarySuccess(
-          `Pos ${cpCode.trim().toUpperCase()} berhasil ditambahkan ke ${selectedCourse.name}!`
+          `Pos ${cpCode.trim().toUpperCase()} ditambahkan & diurutkan otomatis!`
         );
       }
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'Gagal menyimpan checkpoint'
       );
+    }
+  };
+
+  // Urutkan Checkpoint secara instan berdasarkan Kode Pos (CP1..N) atau Nama Lokasi (A-Z)
+  const handleSortCheckpoints = async (sortBy: 'CODE' | 'NAME') => {
+    if (!selectedCourse || !token || selectedCourse.checkpoints.length < 2)
+      return;
+    const nowIso = new Date().toISOString();
+    const optimisticSortedCourse: Course = {
+      ...selectedCourse,
+      updatedAt: nowIso,
+      checkpoints: sortCheckpointsNaturally(selectedCourse.checkpoints, sortBy),
+    };
+    applyUpdatedCourseLocally(optimisticSortedCourse);
+
+    try {
+      const res = await fetch(
+        `/api/organizer/courses/${selectedCourse.id}/checkpoints/sort`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ sortBy }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (data?.course) {
+        applyUpdatedCourseLocally(data.course);
+      }
+      await fetchDashboard();
+      showTemporarySuccess(
+        sortBy === 'NAME'
+          ? 'Daftar Pos berhasil diurutkan berdasarkan Nama Lokasi!'
+          : 'Daftar Pos berhasil diurutkan berdasarkan Kode Pos (CP1, CP2, dst.)!'
+      );
+    } catch {
+      setErrorMsg('Gagal mengurutkan daftar pos checkpoint.');
     }
   };
 
@@ -4909,9 +5062,44 @@ export default function OrganizerDashboard({
                 </form>
               )}
 
-              {/* Tabel Daftar Pos Checkpoint */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
+              {/* Baris Kontrol Auto-Sort & Tabel Daftar Pos Checkpoint */}
+              <div className="space-y-2">
+                {selectedCourse.checkpoints.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-300">
+                        Daftar Pos ({selectedCourse.checkpoints.length} CP)
+                      </span>
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                        Auto-Sort Aktif
+                      </span>
+                    </div>
+                    {!isSuperAdminReadOnly &&
+                      selectedCourse.checkpoints.length >= 2 && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleSortCheckpoints('CODE')}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-fuchsia-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+                            title="Urutkan berdasarkan Kode Pos (CP1, CP2, CP3...)"
+                          >
+                            ⇅ Urut Kode Pos (CP1..N)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSortCheckpoints('NAME')}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+                            title="Urutkan berdasarkan Nama Lokasi Pos (A-Z / 1-9)"
+                          >
+                            ⇅ Urut Nama Lokasi
+                          </button>
+                        </div>
+                      )}
+                  </div>
+                )}
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
                       <th className="py-2.5 px-3">Urutan</th>
@@ -5022,6 +5210,7 @@ export default function OrganizerDashboard({
                     )}
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           )}

@@ -33,3 +33,13 @@ body {
   background-color: #051224;
   color: #e6f2ff;
 }
+
+/* Pastikan tile peta Leaflet tidak pernah terpengaruh reset img Tailwind v4 */
+.leaflet-container img.leaflet-tile,
+.leaflet-pane img.leaflet-tile {
+  max-width: none !important;
+  max-height: none !important;
+  width: 256px !important;
+  height: 256px !important;
+}
+

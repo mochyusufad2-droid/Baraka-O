@@ -78354,19 +78354,54 @@ function computeNextBibNumber(participants) {
   }
   return `BRK-${maxNum + 1}`;
 }
-function saveDbToDiskOnly(dbToSave) {
+var lastKnownDiskMtimeMs = 0;
+var lastDiskStatCheckAt = 0;
+var lastBackupWrittenAt = 0;
+var coalescedDiskSaveTimer = null;
+var DISK_STAT_THROTTLE_MS = 350;
+var DISK_SAVE_COALESCE_MS = 220;
+var BACKUP_WRITE_THROTTLE_MS = 3e4;
+function flushDbToDiskNow(dbToSave, forceBackup = false) {
   try {
     if (!import_fs.default.existsSync(DATA_DIR)) {
       import_fs.default.mkdirSync(DATA_DIR, { recursive: true });
     }
-    const serialized = JSON.stringify(dbToSave, null, 2);
+    const serialized = JSON.stringify(dbToSave);
     const tmpFile = `${DB_FILE}.tmp`;
     const backupFile = `${DB_FILE}.bak`;
     import_fs.default.writeFileSync(tmpFile, serialized, "utf-8");
     import_fs.default.renameSync(tmpFile, DB_FILE);
-    import_fs.default.writeFileSync(backupFile, serialized, "utf-8");
+    try {
+      const st = import_fs.default.statSync(DB_FILE);
+      lastKnownDiskMtimeMs = st.mtimeMs;
+      lastDiskStatCheckAt = Date.now();
+    } catch {
+      lastKnownDiskMtimeMs = Date.now();
+    }
+    const now = Date.now();
+    if (forceBackup || now - lastBackupWrittenAt >= BACKUP_WRITE_THROTTLE_MS) {
+      lastBackupWrittenAt = now;
+      import_fs.default.writeFileSync(backupFile, serialized, "utf-8");
+    }
   } catch {
   }
+}
+function saveDbToDiskOnly(dbToSave, immediate = false) {
+  if (immediate) {
+    if (coalescedDiskSaveTimer) {
+      clearTimeout(coalescedDiskSaveTimer);
+      coalescedDiskSaveTimer = null;
+    }
+    flushDbToDiskNow(dbToSave, true);
+    return;
+  }
+  if (coalescedDiskSaveTimer) {
+    return;
+  }
+  coalescedDiskSaveTimer = setTimeout(() => {
+    coalescedDiskSaveTimer = null;
+    flushDbToDiskNow(dbToSave, false);
+  }, DISK_SAVE_COALESCE_MS);
 }
 var CORE_VAULT_KEY = "brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_core_v2";
 var RACE_VAULT_KEY = "brk_vault_7e77298f_9df4_4a92_9135_7facdb364e9e_race_v2";
@@ -78390,7 +78425,7 @@ var isPushingToCloud = false;
 var isCloudHydrated = false;
 var lastCloudHydratedAt = 0;
 var cloudHydrationPromise = null;
-var CLOUD_HYDRATE_TTL_MS = 2500;
+var CLOUD_HYDRATE_TTL_MS = 25e3;
 async function pushDbToCloudNow(dbSnapshot) {
   if (!cloudFirestore) return;
   isPushingToCloud = true;
@@ -78439,7 +78474,7 @@ function scheduleCloudSync(dbToSync) {
   cloudSyncTimer = setTimeout(() => {
     cloudSyncTimer = null;
     void pushDbToCloudNow(dbToSync);
-  }, 180);
+  }, 2e3);
 }
 function mergeSessionMonotonicallyServer(current, incoming) {
   const statusRank = (st) => {
@@ -78814,18 +78849,24 @@ function loadDb() {
       import_fs.default.mkdirSync(DATA_DIR, { recursive: true });
     }
     if (import_fs.default.existsSync(DB_FILE)) {
-      const fromMain = parseAndMigrateDbContent(import_fs.default.readFileSync(DB_FILE, "utf-8"));
+      const raw = import_fs.default.readFileSync(DB_FILE, "utf-8");
+      try {
+        lastKnownDiskMtimeMs = import_fs.default.statSync(DB_FILE).mtimeMs;
+        lastDiskStatCheckAt = Date.now();
+      } catch {
+      }
+      const fromMain = parseAndMigrateDbContent(raw);
       if (fromMain) return fromMain;
     }
     if (import_fs.default.existsSync(backupFile)) {
       const fromBackup = parseAndMigrateDbContent(import_fs.default.readFileSync(backupFile, "utf-8"));
       if (fromBackup) {
-        saveDbToDiskOnly(fromBackup);
+        saveDbToDiskOnly(fromBackup, true);
         return fromBackup;
       }
     }
     const initial = createInitialDatabase();
-    saveDbToDiskOnly(initial);
+    saveDbToDiskOnly(initial, true);
     return initial;
   } catch {
     return createInitialDatabase();
@@ -78834,7 +78875,17 @@ function loadDb() {
 var telemetryDiskTimer = null;
 function syncDbFromDisk(targetDb) {
   try {
+    const now = Date.now();
+    if (lastKnownDiskMtimeMs > 0 && now - lastDiskStatCheckAt < DISK_STAT_THROTTLE_MS) {
+      return false;
+    }
+    lastDiskStatCheckAt = now;
     if (!import_fs.default.existsSync(DB_FILE)) return false;
+    const stat = import_fs.default.statSync(DB_FILE);
+    if (lastKnownDiskMtimeMs > 0 && stat.mtimeMs === lastKnownDiskMtimeMs) {
+      return false;
+    }
+    lastKnownDiskMtimeMs = stat.mtimeMs;
     const raw = import_fs.default.readFileSync(DB_FILE, "utf-8");
     const diskDb = parseAndMigrateDbContent(raw);
     if (!diskDb) return false;
@@ -78843,9 +78894,9 @@ function syncDbFromDisk(targetDb) {
     return false;
   }
 }
-function saveDb(dbToSave) {
+function saveDb(dbToSave, immediateDisk = false) {
   recoverOrphanedOrganizersFromCourses(dbToSave);
-  saveDbToDiskOnly(dbToSave);
+  saveDbToDiskOnly(dbToSave, immediateDisk);
   lastCloudHydratedAt = Date.now();
   scheduleCloudSync(dbToSave);
 }
@@ -79680,7 +79731,11 @@ app.use("/api", async (_req, res, next) => {
   res.setHeader("Expires", "0");
   res.setHeader("Surrogate-Control", "no-store");
   syncDbFromDisk(db);
-  await ensureCloudHydrated();
+  if (!isCloudHydrated) {
+    await ensureCloudHydrated();
+  } else {
+    void ensureCloudHydrated();
+  }
   next();
 });
 app.get("/api/health", (_req, res) => {
@@ -80119,6 +80174,8 @@ app.get("/api/public/courses", (_req, res) => {
   }));
   res.json({ courses: publicCourseList });
 });
+var publicLeaderboardCache = /* @__PURE__ */ new Map();
+var PUBLIC_LEADERBOARD_CACHE_TTL_MS = 3e3;
 app.get("/api/public/leaderboard/:courseId", (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=5");
   const courseId = req.params.courseId;
@@ -80127,24 +80184,43 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     res.status(404).json({ error: "Course tidak ditemukan atau telah dinonaktifkan." });
     return;
   }
+  const nowMs = Date.now();
+  const cachedEntry = publicLeaderboardCache.get(courseId);
+  if (cachedEntry && nowMs - cachedEntry.cachedAtMs < PUBLIC_LEADERBOARD_CACHE_TTL_MS) {
+    res.json(cachedEntry.payload);
+    return;
+  }
   const sessions = (db.sessions || []).filter((s) => s.courseId === course.id);
   const partMap = new Map((db.participants || []).map((p) => [p.id, p]));
+  const cpByIdMap = new Map((course.checkpoints || []).map((c) => [c.id, c]));
+  const acceptedCpReportsBySession = /* @__PURE__ */ new Map();
+  for (const r of db.reports || []) {
+    if (r && r.courseId === course.id && r.reportType === "CHECKPOINT" && r.syncStatus === SyncStatus.ACCEPTED_SERVER) {
+      let bucket = acceptedCpReportsBySession.get(r.sessionId);
+      if (!bucket) {
+        bucket = [];
+        acceptedCpReportsBySession.set(r.sessionId, bucket);
+      }
+      bucket.push(r);
+    }
+  }
+  for (const bucket of acceptedCpReportsBySession.values()) {
+    bucket.sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+  }
   const leaderboard = sessions.map((s) => {
     const part = partMap.get(s.participantId);
     const startMs = s.startedAt ? Date.parse(s.startedAt) : void 0;
     const validStartMs = startMs !== void 0 && !Number.isNaN(startMs) ? startMs : void 0;
     const finishMs = s.finishedAt ? Date.parse(s.finishedAt) : void 0;
     const validFinishMs = finishMs !== void 0 && !Number.isNaN(finishMs) ? finishMs : void 0;
-    const cpReports = (db.reports || []).filter(
-      (r) => r.sessionId === s.id && r.reportType === "CHECKPOINT" && r.syncStatus === SyncStatus.ACCEPTED_SERVER
-    ).sort((a, b) => Date.parse(a.measuredAt) - Date.parse(b.measuredAt));
+    const cpReports = acceptedCpReportsBySession.get(s.id) || [];
     const seenCpIds = /* @__PURE__ */ new Set();
     const splits = [];
     let prevMs = validStartMs;
     for (const rep of cpReports) {
       if (seenCpIds.has(rep.checkpointId)) continue;
       seenCpIds.add(rep.checkpointId);
-      const cp = (course.checkpoints || []).find((c) => c.id === rep.checkpointId);
+      const cp = cpByIdMap.get(rep.checkpointId);
       const repMs = Date.parse(rep.measuredAt);
       const validRepMs = !Number.isNaN(repMs) ? repMs : void 0;
       const cumulativeSeconds = validStartMs !== void 0 && validRepMs !== void 0 ? Math.max(0, Math.floor((validRepMs - validStartMs) / 1e3)) : void 0;
@@ -80162,7 +80238,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     for (const cpId of s.validatedCheckpointIds || []) {
       if (seenCpIds.has(cpId)) continue;
       seenCpIds.add(cpId);
-      const cp = (course.checkpoints || []).find((c) => c.id === cpId);
+      const cp = cpByIdMap.get(cpId);
       splits.push({
         stepIndex: splits.length + 1,
         checkpointId: cpId,
@@ -80322,7 +80398,7 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
       rank: idx + 1
     }));
   }
-  res.json({
+  const responsePayload = {
     course: {
       id: course.id,
       name: course.name,
@@ -80342,7 +80418,12 @@ app.get("/api/public/leaderboard/:courseId", (req, res) => {
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     leaderboard: rankedLeaderboard,
     relayTeamLeaderboard
+  };
+  publicLeaderboardCache.set(courseId, {
+    cachedAtMs: nowMs,
+    payload: responsePayload
   });
+  res.json(responsePayload);
 });
 app.post("/api/participant/register", (req, res) => {
   const { name: name4, teamName, gender, ageGroup, phone, pin, password } = req.body;
@@ -80826,7 +80907,9 @@ app.get("/api/participant/session/:sessionId", requireParticipant, (req, res) =>
   if (matchedCourse) {
     recalculateSessionScore(session, matchedCourse);
   }
-  const sanitizedCourse = matchedCourse ? {
+  const clientCourseUpdatedAt = req.query.courseUpdatedAt?.trim();
+  const isCourseUnchanged = Boolean(clientCourseUpdatedAt) && Boolean(matchedCourse?.updatedAt) && clientCourseUpdatedAt === matchedCourse?.updatedAt;
+  const sanitizedCourse = matchedCourse && !isCourseUnchanged ? {
     ...matchedCourse,
     startQrCode: "HIDDEN_ON_CLIENT",
     finishQrCode: "HIDDEN_ON_CLIENT",
@@ -80835,11 +80918,10 @@ app.get("/api/participant/session/:sessionId", requireParticipant, (req, res) =>
       qrSecret: "VERIFIED_BY_SERVER"
     }))
   } : null;
-  const sessionReports = db.reports.filter((r) => r.sessionId === session.id);
   res.json({
     session,
     course: sanitizedCourse,
-    reports: sessionReports,
+    courseUnchanged: isCourseUnchanged,
     relayStatus: matchedCourse ? buildRelayTeamStatus(session, matchedCourse) : null
   });
 });
@@ -80876,13 +80958,13 @@ app.get("/api/organizer/dashboard", requireOrganizer, (req, res) => {
   const vaultSnapshot = {
     organizers: visibleStoredOrganizers,
     deletedOrganizerIds: db.deletedOrganizerIds || [],
-    courses: visibleCourses,
+    courses: [],
     deletedCourseIds: db.deletedCourseIds || [],
     participants: visibleStoredParticipants,
     deletedParticipantIds: db.deletedParticipantIds || [],
-    sessions: visibleSessions,
+    sessions: [],
     deletedSessionIds: db.deletedSessionIds || [],
-    reports: visibleReports,
+    reports: [],
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (!db.historicalCourses || typeof db.historicalCourses !== "object") {
@@ -81436,6 +81518,23 @@ app.post(
       });
       return;
     }
+    const naturalCompare = (a, b) => a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+    const sortCourseCheckpoints = (list, sortBy = "CODE") => {
+      return [...list].sort((a, b) => {
+        if (sortBy === "NAME") {
+          const nameA = (a.name || "").trim() || a.code;
+          const nameB = (b.name || "").trim() || b.code;
+          const cmpName = naturalCompare(nameA, nameB);
+          if (cmpName !== 0) return cmpName;
+        }
+        const cmpCode = naturalCompare(a.code || "", b.code || "");
+        if (cmpCode !== 0) return cmpCode;
+        return naturalCompare(a.name || "", b.name || "");
+      }).map((cpItem, idx) => ({
+        ...cpItem,
+        orderIndex: idx + 1
+      }));
+    };
     const nextOrder = course.checkpoints.length + 1;
     const cleanCode = code.trim().toUpperCase();
     const secretSuffix = import_crypto2.default.randomBytes(2).toString("hex").toUpperCase();
@@ -81456,10 +81555,53 @@ app.post(
       updatedAt: nowIso
     };
     course.checkpoints.push(newCp);
+    course.checkpoints = sortCourseCheckpoints(course.checkpoints, "CODE");
     course.updatedAt = nowIso;
     saveDb(db);
     void pushDbToCloudNow(db);
-    res.status(201).json({ checkpoint: newCp, course });
+    const savedCp = course.checkpoints.find((item) => item.id === newCp.id) || newCp;
+    res.status(201).json({ checkpoint: savedCp, course });
+  }
+);
+app.post(
+  "/api/organizer/courses/:courseId/checkpoints/sort",
+  requireOrganizer,
+  (req, res) => {
+    const auth = req.organizerAuth;
+    const course = db.courses.find((c) => c.id === req.params.courseId);
+    if (!course) {
+      res.status(404).json({ error: "Course tidak ditemukan." });
+      return;
+    }
+    if (!canAccessCourse(course, auth)) {
+      res.status(403).json({
+        error: "Anda hanya dapat mengurutkan Checkpoint pada Course milik Anda."
+      });
+      return;
+    }
+    const { sortBy } = req.body || {};
+    const mode = sortBy === "NAME" ? "NAME" : "CODE";
+    const naturalCompare = (a, b) => a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    course.checkpoints = [...course.checkpoints].sort((a, b) => {
+      if (mode === "NAME") {
+        const nameA = (a.name || "").trim() || a.code;
+        const nameB = (b.name || "").trim() || b.code;
+        const cmpName = naturalCompare(nameA, nameB);
+        if (cmpName !== 0) return cmpName;
+      }
+      const cmpCode = naturalCompare(a.code || "", b.code || "");
+      if (cmpCode !== 0) return cmpCode;
+      return naturalCompare(a.name || "", b.name || "");
+    }).map((cpItem, idx) => ({
+      ...cpItem,
+      orderIndex: idx + 1,
+      updatedAt: nowIso
+    }));
+    course.updatedAt = nowIso;
+    saveDb(db);
+    void pushDbToCloudNow(db);
+    res.json({ course });
   }
 );
 app.put(
@@ -81484,6 +81626,7 @@ app.put(
       return;
     }
     const { code, name: name4, latitude, longitude, radiusMeters, points } = req.body;
+    let shouldResort = false;
     if (code !== void 0 && code.trim()) {
       const nextCode = code.trim().toUpperCase();
       if (nextCode !== cp.code) {
@@ -81491,10 +81634,15 @@ app.put(
         const suffix = parts[4] || import_crypto2.default.randomBytes(2).toString("hex").toUpperCase();
         cp.code = nextCode;
         cp.qrSecret = `BARAKA:CP:${course.id}:${nextCode}:${suffix}`;
+        shouldResort = true;
       }
     }
     if (name4 !== void 0) {
-      cp.name = name4.trim();
+      const nextName = name4.trim();
+      if (nextName !== cp.name) {
+        cp.name = nextName;
+        shouldResort = true;
+      }
     }
     if (typeof latitude === "number" && !Number.isNaN(latitude)) {
       cp.latitude = latitude;
@@ -81510,11 +81658,23 @@ app.put(
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     cp.updatedAt = nowIso;
+    if (shouldResort) {
+      const naturalCompare = (a, b) => a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+      course.checkpoints = [...course.checkpoints].sort((a, b) => {
+        const cmpCode = naturalCompare(a.code || "", b.code || "");
+        if (cmpCode !== 0) return cmpCode;
+        return naturalCompare(a.name || "", b.name || "");
+      }).map((cpItem, idx) => ({
+        ...cpItem,
+        orderIndex: idx + 1
+      }));
+    }
     course.updatedAt = nowIso;
     db.sessions.filter((s) => s.courseId === course.id).forEach((s) => recalculateSessionScore(s, course));
     saveDb(db);
     void pushDbToCloudNow(db);
-    res.json({ checkpoint: cp, course });
+    const updatedCp = course.checkpoints.find((item) => item.id === cp.id) || cp;
+    res.json({ checkpoint: updatedCp, course });
   }
 );
 app.delete(
@@ -81540,7 +81700,12 @@ app.delete(
     if (!course.deletedCheckpointIds.includes(deletedCpId)) {
       course.deletedCheckpointIds.push(deletedCpId);
     }
-    course.checkpoints = course.checkpoints.filter((cp) => cp.id !== deletedCpId).map((cp, index) => ({ ...cp, orderIndex: index + 1 }));
+    const naturalCompare = (a, b) => a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+    course.checkpoints = course.checkpoints.filter((cp) => cp.id !== deletedCpId).sort((a, b) => {
+      const cmpCode = naturalCompare(a.code || "", b.code || "");
+      if (cmpCode !== 0) return cmpCode;
+      return naturalCompare(a.name || "", b.name || "");
+    }).map((cp, index) => ({ ...cp, orderIndex: index + 1 }));
     course.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     db.sessions.filter((s) => s.courseId === course.id).forEach((s) => recalculateSessionScore(s, course));
     saveDb(db);
