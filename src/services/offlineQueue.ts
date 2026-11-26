@@ -889,6 +889,7 @@ export async function syncPendingReportsWithServer(params: {
   token: string;
   isOfflineSimulated?: boolean;
   forceSyncAllAccepted?: boolean;
+  onlyReportTypes?: Array<'START' | 'CHECKPOINT' | 'FINISH'>;
   sessionOverride?: ParticipantSession | null;
   onStatusUpdate?: (reports: CheckpointReport[]) => void;
 }): Promise<SyncQueueOutcome> {
@@ -897,18 +898,24 @@ export async function syncPendingReportsWithServer(params: {
     token,
     isOfflineSimulated,
     forceSyncAllAccepted,
+    onlyReportTypes,
     sessionOverride,
     onStatusUpdate,
   } = params;
   const allReports = await getLocalReportsForSession(sessionId);
 
-  const unsynced = allReports.filter(
-    (r) =>
+  const unsynced = allReports.filter((r) => {
+    const matchesStatus =
       r.syncStatus === SyncStatus.SAVED_LOCAL ||
       r.syncStatus === SyncStatus.PENDING_SYNC ||
       r.syncStatus === SyncStatus.SENDING ||
-      (forceSyncAllAccepted && r.syncStatus === SyncStatus.ACCEPTED_SERVER)
-  );
+      (forceSyncAllAccepted && r.syncStatus === SyncStatus.ACCEPTED_SERVER);
+    if (!matchesStatus) return false;
+    if (onlyReportTypes && onlyReportTypes.length > 0) {
+      return onlyReportTypes.includes(r.reportType);
+    }
+    return true;
+  });
 
   if (unsynced.length === 0) {
     return {

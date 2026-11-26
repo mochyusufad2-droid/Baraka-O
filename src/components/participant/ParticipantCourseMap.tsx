@@ -180,6 +180,7 @@ export function ParticipantCourseMap({
       zoom: 16,
       zoomControl: false,
     });
+    map.attributionControl?.setPrefix(false);
 
     // Jika peserta menggeser peta secara manual dengan jari, matikan auto-follow agar tidak melawan jari peserta
     map.on('dragstart', () => {

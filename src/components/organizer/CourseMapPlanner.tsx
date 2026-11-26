@@ -363,6 +363,7 @@ export function CourseMapPlanner({
       zoom: 15,
       zoomControl: true,
     });
+    map.attributionControl?.setPrefix(false);
 
     const initialLayerCfg = TILE_LAYERS.STREET;
     const tileLayer = L.tileLayer(initialLayerCfg.url, {

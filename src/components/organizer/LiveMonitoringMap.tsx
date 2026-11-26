@@ -270,6 +270,7 @@ export function LiveMonitoringMap({
       zoom: 15,
       zoomControl: true,
     });
+    map.attributionControl?.setPrefix(false);
 
     const cfg = TILE_LAYERS[tileStyle];
     const layer = L.tileLayer(cfg.url, {

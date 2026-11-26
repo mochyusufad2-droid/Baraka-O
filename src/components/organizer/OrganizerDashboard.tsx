@@ -39,6 +39,7 @@ import {
   Unlock,
   Flag,
   Play,
+  Copy,
 } from 'lucide-react';
 import {
   AllTimePlatformStats,
@@ -266,6 +267,21 @@ function formatShortCheckpointCode(code?: string, fallbackIndex?: number): strin
   return trimmed;
 }
 
+function isCourseStartFinishSame(course?: Course | null): boolean {
+  if (!course) return false;
+  if (typeof course.sameStartFinishLocation === 'boolean') {
+    return course.sameStartFinishLocation;
+  }
+  return Boolean(
+    course.startLocation &&
+      course.finishLocation &&
+      Math.abs(course.startLocation.latitude - course.finishLocation.latitude) <
+        0.00005 &&
+      Math.abs(course.startLocation.longitude - course.finishLocation.longitude) <
+        0.00005
+  );
+}
+
 /**
  * Hanya izinkan karakter angka (0-9) tetapi biarkan string kosong ""
  * saat dihapus dengan Backspace agar tidak pernah menyisakan angka 0 (mencegah bug 010).
@@ -372,6 +388,10 @@ export default function OrganizerDashboard({
   const [newCourseRelayDnfPenalty, setNewCourseRelayDnfPenalty] = useState<string>('100');
   const [newCourseRelayAllowDuplicateCps, setNewCourseRelayAllowDuplicateCps] =
     useState<boolean>(true);
+  const [newCourseLiveGps, setNewCourseLiveGps] = useState<boolean>(true);
+  const [newCourseResultSyncMode, setNewCourseResultSyncMode] = useState<
+    'REALTIME' | 'ON_FINISH'
+  >('REALTIME');
 
   // ==========================================================================
   // STATE EDIT COURSE AKTIF & KONFIRMASI HAPUS COURSE
@@ -402,6 +422,10 @@ export default function OrganizerDashboard({
   const [editCourseRelayDnfPenalty, setEditCourseRelayDnfPenalty] = useState<string>('0');
   const [editCourseRelayAllowDuplicateCps, setEditCourseRelayAllowDuplicateCps] =
     useState<boolean>(true);
+  const [editCourseLiveGps, setEditCourseLiveGps] = useState<boolean>(true);
+  const [editCourseResultSyncMode, setEditCourseResultSyncMode] = useState<
+    'REALTIME' | 'ON_FINISH'
+  >('REALTIME');
 
   const [confirmDeleteCourse, setConfirmDeleteCourse] = useState<Course | null>(null);
   const [focusedMonitoringSessionId, setFocusedMonitoringSessionId] = useState<string | null>(null);
@@ -460,7 +484,18 @@ export default function OrganizerDashboard({
   const [confirmMassStartCourse, setConfirmMassStartCourse] = useState<Course | null>(null);
   const [includeAllRelayLegsInMassStart, setIncludeAllRelayLegsInMassStart] =
     useState<boolean>(false);
+  const [massStartExcludedSessionIds, setMassStartExcludedSessionIds] = useState<string[]>([]);
+  const [deletingMassStartSessionId, setDeletingMassStartSessionId] = useState<string | null>(null);
   const [isExecutingMassStart, setIsExecutingMassStart] = useState<boolean>(false);
+
+  // State khusus Duplikat Course (QR Baru vs Shared Control)
+  const [duplicateCourseSource, setDuplicateCourseSource] = useState<Course | null>(null);
+  const [duplicateCourseName, setDuplicateCourseName] = useState<string>('');
+  const [duplicateCourseDate, setDuplicateCourseDate] = useState<string>('');
+  const [duplicateCourseQrMode, setDuplicateCourseQrMode] = useState<
+    'NEW_QR' | 'SHARED_CONTROL'
+  >('NEW_QR');
+  const [isDuplicatingCourse, setIsDuplicatingCourse] = useState<boolean>(false);
 
   // Full Database Backup & Restore States (Migrasi Mandiri)
   const [isExportingDb, setIsExportingDb] = useState<boolean>(false);
@@ -1108,6 +1143,8 @@ export default function OrganizerDashboard({
       relayDnfScoringMode: editCourseRelayDnfMode,
       relayDnfPenaltyPoints: liveDnfPenalty,
       relayAllowDuplicateCheckpoints: editCourseRelayAllowDuplicateCps,
+      liveGpsTrackingEnabled: editCourseLiveGps,
+      resultSyncMode: editCourseResultSyncMode,
     };
   }, [
     selectedCourse,
@@ -1129,6 +1166,8 @@ export default function OrganizerDashboard({
     editCourseRelayDnfMode,
     editCourseRelayDnfPenalty,
     editCourseRelayAllowDuplicateCps,
+    editCourseLiveGps,
+    editCourseResultSyncMode,
   ]);
 
   // Deteksi apakah ada perubahan pada form Edit Course yang belum disimpan ke server
@@ -1162,7 +1201,11 @@ export default function OrganizerDashboard({
       Number(effectiveSelectedCourse.relayDnfPenaltyPoints || 0) !==
         Number(selectedCourse.relayDnfPenaltyPoints || 0) ||
       Boolean(effectiveSelectedCourse.relayAllowDuplicateCheckpoints !== false) !==
-        Boolean(selectedCourse.relayAllowDuplicateCheckpoints !== false)
+        Boolean(selectedCourse.relayAllowDuplicateCheckpoints !== false) ||
+      Boolean(effectiveSelectedCourse.liveGpsTrackingEnabled !== false) !==
+        Boolean(selectedCourse.liveGpsTrackingEnabled !== false) ||
+      (effectiveSelectedCourse.resultSyncMode || 'REALTIME') !==
+        (selectedCourse.resultSyncMode || 'REALTIME')
     );
   }, [isEditingCourse, selectedCourse, effectiveSelectedCourse, editCourseAllowMap]);
 
@@ -1269,6 +1312,10 @@ export default function OrganizerDashboard({
     setEditCourseRelayDnfMode(course.relayDnfScoringMode || RelayDnfScoringMode.ZERO);
     setEditCourseRelayDnfPenalty(String(course.relayDnfPenaltyPoints ?? 0));
     setEditCourseRelayAllowDuplicateCps(course.relayAllowDuplicateCheckpoints !== false);
+    setEditCourseLiveGps(course.liveGpsTrackingEnabled !== false);
+    setEditCourseResultSyncMode(
+      course.resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME'
+    );
     setIsEditingCourse(true);
   };
 
@@ -1311,6 +1358,8 @@ export default function OrganizerDashboard({
           relayDnfScoringMode: editCourseRelayDnfMode,
           relayDnfPenaltyPoints: parsedRelayDnfPenalty,
           relayAllowDuplicateCheckpoints: editCourseRelayAllowDuplicateCps,
+          liveGpsTrackingEnabled: editCourseLiveGps,
+          resultSyncMode: editCourseResultSyncMode,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1359,6 +1408,18 @@ export default function OrganizerDashboard({
   const handleUpdateStartLocation = useCallback(
     async (loc: GeoPointLocation | null) => {
       if (!selectedCourse || !token) return;
+      const keepCombined = isCourseStartFinishSame(selectedCourse);
+      const payload: {
+        startLocation: GeoPointLocation | null;
+        finishLocation?: GeoPointLocation | null;
+      } = { startLocation: loc };
+      if (keepCombined && loc) {
+        payload.finishLocation = {
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          name: loc.name || 'Start / Finish',
+        };
+      }
       try {
         const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
           method: 'PUT',
@@ -1366,7 +1427,7 @@ export default function OrganizerDashboard({
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ startLocation: loc }),
+          body: JSON.stringify(payload),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error('Gagal menyimpan titik Start');
@@ -1376,7 +1437,9 @@ export default function OrganizerDashboard({
         await fetchDashboard();
         showTemporarySuccess(
           loc
-            ? `🔺 Titik Start disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+            ? keepCombined
+              ? `🔺◎ Titik Start/Finish disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+              : `🔺 Titik Start disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
             : 'Titik Start direset.'
         );
       } catch (err) {
@@ -1391,6 +1454,21 @@ export default function OrganizerDashboard({
   const handleUpdateFinishLocation = useCallback(
     async (loc: GeoPointLocation | null) => {
       if (!selectedCourse || !token) return;
+      const isNowSameAsStart = Boolean(
+        loc &&
+          selectedCourse.startLocation &&
+          Math.abs(selectedCourse.startLocation.latitude - loc.latitude) < 0.00005 &&
+          Math.abs(selectedCourse.startLocation.longitude - loc.longitude) < 0.00005
+      );
+      const payload: {
+        finishLocation: GeoPointLocation | null;
+        sameStartFinishLocation?: boolean;
+      } = { finishLocation: loc };
+      if (loc) {
+        payload.sameStartFinishLocation = isNowSameAsStart;
+      } else if (selectedCourse.sameStartFinishLocation) {
+        payload.sameStartFinishLocation = false;
+      }
       try {
         const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
           method: 'PUT',
@@ -1398,7 +1476,7 @@ export default function OrganizerDashboard({
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ finishLocation: loc }),
+          body: JSON.stringify(payload),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error('Gagal menyimpan titik Finish');
@@ -1408,12 +1486,70 @@ export default function OrganizerDashboard({
         await fetchDashboard();
         showTemporarySuccess(
           loc
-            ? `◎ Titik Finish disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+            ? isNowSameAsStart
+              ? `🔺◎ Finish disamakan dengan Start (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
+              : `◎ Titik Finish disimpan (${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)})`
             : 'Titik Finish direset.'
         );
       } catch (err) {
         setErrorMsg(
           err instanceof Error ? err.message : 'Gagal memperbarui titik Finish'
+        );
+      }
+    },
+    [selectedCourse, token, fetchDashboard, showTemporarySuccess, applyUpdatedCourseLocally]
+  );
+
+  const handleToggleSameStartFinish = useCallback(
+    async (nextSame: boolean) => {
+      if (!selectedCourse || !token) return;
+      const payload: {
+        sameStartFinishLocation: boolean;
+        startLocation?: GeoPointLocation;
+        finishLocation?: GeoPointLocation;
+      } = {
+        sameStartFinishLocation: nextSame,
+      };
+      if (nextSame) {
+        if (selectedCourse.startLocation) {
+          payload.finishLocation = {
+            latitude: selectedCourse.startLocation.latitude,
+            longitude: selectedCourse.startLocation.longitude,
+            name: selectedCourse.startLocation.name || 'Start / Finish',
+          };
+        } else if (selectedCourse.finishLocation) {
+          payload.startLocation = {
+            latitude: selectedCourse.finishLocation.latitude,
+            longitude: selectedCourse.finishLocation.longitude,
+            name: selectedCourse.finishLocation.name || 'Start / Finish',
+          };
+        }
+      }
+      try {
+        const res = await fetch(`/api/organizer/courses/${selectedCourse.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error('Gagal mengubah pengaturan lokasi Start/Finish');
+        if (data.course) {
+          applyUpdatedCourseLocally(data.course);
+        }
+        await fetchDashboard();
+        showTemporarySuccess(
+          nextSame
+            ? 'Start & Finish digabung di lokasi yang sama (tampil paling atas).'
+            : 'Start & Finish dipisah (Start paling atas, Finish paling bawah).'
+        );
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : 'Gagal mengubah pengaturan Start/Finish'
         );
       }
     },
@@ -2075,6 +2211,8 @@ export default function OrganizerDashboard({
           relayDnfScoringMode: newCourseRelayDnfMode,
           relayDnfPenaltyPoints: parsedRelayDnfPenalty,
           relayAllowDuplicateCheckpoints: newCourseRelayAllowDuplicateCps,
+          liveGpsTrackingEnabled: newCourseLiveGps,
+          resultSyncMode: newCourseResultSyncMode,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -2604,8 +2742,49 @@ export default function OrganizerDashboard({
     }
   };
 
-  // Organizer: Mass Start (Pelepasan Serentak 1-Klik untuk semua tim yang sudah Scan Setup QR di Course terpilih)
-  const handleExecuteMassStart = async () => {
+  // Organizer: Hapus 1 sesi Siap Start (NOT_STARTED) langsung dari modal Mass Start
+  const handleRemoveWaitingSessionFromMassStart = async (
+    sessionId: string,
+    teamLabel: string
+  ) => {
+    if (!token) return;
+    setDeletingMassStartSessionId(sessionId);
+    setErrorMsg(null);
+    try {
+      removeSessionFromVaultBackup(sessionId);
+      setDashboard((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          sessions: prev.sessions.filter((s) => s.id !== sessionId),
+          deletedSessionIds: Array.from(
+            new Set([...(prev.deletedSessionIds || []), sessionId])
+          ),
+          reports: prev.reports.filter((r) => r.sessionId !== sessionId),
+        };
+      });
+      setMassStartExcludedSessionIds((prev) => prev.filter((id) => id !== sessionId));
+      const res = await fetch(`/api/organizer/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(err.error || `Gagal menghapus sesi Siap Start tim "${teamLabel}".`);
+        await fetchDashboard();
+        return;
+      }
+      await fetchDashboard();
+      showTemporarySuccess(`Sesi Siap Start "${teamLabel}" dihapus dari antrean Mass Start.`);
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat menghapus sesi Siap Start.');
+    } finally {
+      setDeletingMassStartSessionId(null);
+    }
+  };
+
+  // Organizer: Mass Start (Pelepasan Serentak 1-Klik untuk tim yang dipilih di Course terpilih)
+  const handleExecuteMassStart = async (selectedSessionIds?: string[]) => {
     if (!token || !confirmMassStartCourse) return;
     setIsExecutingMassStart(true);
     setErrorMsg(null);
@@ -2622,6 +2801,7 @@ export default function OrganizerDashboard({
           },
           body: JSON.stringify({
             includeAllRelayLegs: includeAllRelayLegsInMassStart,
+            ...(Array.isArray(selectedSessionIds) ? { sessionIds: selectedSessionIds } : {}),
           }),
         }
       );
@@ -2632,6 +2812,7 @@ export default function OrganizerDashboard({
       }
       setConfirmMassStartCourse(null);
       setIncludeAllRelayLegsInMassStart(false);
+      setMassStartExcludedSessionIds([]);
       await fetchDashboard();
       if (data.startedCount > 0) {
         showTemporarySuccess(
@@ -2648,6 +2829,64 @@ export default function OrganizerDashboard({
       setErrorMsg('Kesalahan jaringan saat memicu Mass Start.');
     } finally {
       setIsExecutingMassStart(false);
+    }
+  };
+
+  const handleOpenDuplicateCourseModal = (course: Course) => {
+    setDuplicateCourseSource(course);
+    setDuplicateCourseName(`${course.name} (Salinan)`);
+    setDuplicateCourseDate(course.date || new Date().toISOString().slice(0, 10));
+    setDuplicateCourseQrMode('NEW_QR');
+    setErrorMsg(null);
+  };
+
+  const handleConfirmDuplicateCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !duplicateCourseSource) return;
+    const trimmedName = duplicateCourseName.trim();
+    if (!trimmedName) {
+      setErrorMsg('Nama Course hasil duplikat wajib diisi.');
+      return;
+    }
+    setIsDuplicatingCourse(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(
+        `/api/organizer/courses/${encodeURIComponent(duplicateCourseSource.id)}/duplicate`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            name: trimmedName,
+            date: duplicateCourseDate || duplicateCourseSource.date,
+            qrMode: duplicateCourseQrMode,
+          }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Gagal menduplikat Course.');
+        return;
+      }
+      const createdCourse: Course | undefined = data.course;
+      if (createdCourse) {
+        mergeAndSaveOrganizerVaultBackup({ courses: [createdCourse] });
+        void syncCourseToFirestore(createdCourse);
+        setSelectedCourseId(createdCourse.id);
+      }
+      setDuplicateCourseSource(null);
+      setIsEditingCourse(false);
+      await fetchDashboard();
+      showTemporarySuccess(
+        data.message || `Course "${trimmedName}" berhasil diduplikat.`
+      );
+    } catch {
+      setErrorMsg('Kesalahan jaringan saat menduplikat Course.');
+    } finally {
+      setIsDuplicatingCourse(false);
     }
   };
 
@@ -3468,6 +3707,7 @@ export default function OrganizerDashboard({
                         type="button"
                         onClick={() => {
                           setIncludeAllRelayLegsInMassStart(false);
+                          setMassStartExcludedSessionIds([]);
                           setConfirmMassStartCourse(selectedCourse);
                         }}
                         className="text-xs px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold shadow-md shadow-emerald-500/20 flex items-center gap-1.5 transition cursor-pointer"
@@ -4255,6 +4495,40 @@ export default function OrganizerDashboard({
                   )}
                 </div>
 
+                {/* Pengaturan Live GPS & Mode Kirim Data CP */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                  <div>
+                    <label className="block text-slate-300 mb-1">
+                      Mode Kirim Data CP
+                    </label>
+                    <select
+                      value={newCourseResultSyncMode}
+                      onChange={(e) =>
+                        setNewCourseResultSyncMode(
+                          e.target.value as 'REALTIME' | 'ON_FINISH'
+                        )
+                      }
+                      className="w-full px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    >
+                      <option value="REALTIME">Real-Time (Tiap Scan)</option>
+                      <option value="ON_FINISH">
+                        Kirim Saat Finish (Start lapor 1x, CP ditahan)
+                      </option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col justify-end">
+                    <label className="flex items-center gap-2 text-sky-200 font-semibold cursor-pointer p-2 rounded-lg bg-slate-950 border border-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={newCourseLiveGps}
+                        onChange={(e) => setNewCourseLiveGps(e.target.checked)}
+                        className="rounded border-slate-700"
+                      />
+                      <span>Live GPS Tracker (Kirim lokasi ke Monitoring)</span>
+                    </label>
+                  </div>
+                </div>
+
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex flex-wrap items-center gap-4">
                     <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
@@ -4406,10 +4680,35 @@ export default function OrganizerDashboard({
                         </span>
                       </>
                     )}
+                    {effectiveSelectedCourse.liveGpsTrackingEnabled === false && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-slate-300">GPS Tracker Off</span>
+                      </>
+                    )}
+                    {effectiveSelectedCourse.resultSyncMode === 'ON_FINISH' && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-sky-300 font-semibold">
+                          Kirim saat Finish
+                        </span>
+                      </>
+                    )}
+                    {effectiveSelectedCourse.sharedQrSourceCourseId && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span
+                          className="text-amber-300 font-semibold"
+                          title="Course ini berbagi stiker QR fisik Start, Finish, dan Pos CP dengan Course sumbernya (Setup QR tetap unik)"
+                        >
+                          Shared Control QR
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 
-                {/* Action Buttons: Edit Course, Delete Course, Bulk Print QR, and Course Info Sheet */}
+                {/* Action Buttons: Edit Course, Duplicate Course, Delete Course, Bulk Print QR, and Course Info Sheet */}
                 <div className="flex flex-wrap items-center gap-2">
                   {!isSuperAdminReadOnly && (
                     <>
@@ -4420,7 +4719,7 @@ export default function OrganizerDashboard({
                             ? setIsEditingCourse(false)
                             : handleStartEditCourse(selectedCourse)
                         }
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold text-xs transition"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold text-xs transition cursor-pointer"
                       >
                         <Edit3 className="w-3.5 h-3.5" />
                         {isEditingCourse ? 'Tutup Edit' : 'Edit Course'}
@@ -4428,8 +4727,18 @@ export default function OrganizerDashboard({
 
                       <button
                         type="button"
+                        onClick={() => handleOpenDuplicateCourseModal(effectiveSelectedCourse)}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 font-semibold text-xs transition cursor-pointer"
+                        title="Salin seluruh pengaturan dan daftar CP ke Course baru"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Duplikat
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => setConfirmDeleteCourse(selectedCourse)}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold text-xs transition"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold text-xs transition cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                         Hapus
@@ -4768,6 +5077,42 @@ export default function OrganizerDashboard({
                     )}
                   </div>
 
+                  {/* Pengaturan Live GPS & Mode Kirim Data CP */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-lg bg-slate-950/80 border border-slate-800">
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        Mode Kirim Data CP
+                      </label>
+                      <select
+                        value={editCourseResultSyncMode}
+                        onChange={(e) =>
+                          setEditCourseResultSyncMode(
+                            e.target.value as 'REALTIME' | 'ON_FINISH'
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white"
+                      >
+                        <option value="REALTIME">Real-Time (Tiap Scan)</option>
+                        <option value="ON_FINISH">
+                          Kirim Saat Finish (Start lapor 1x, CP ditahan)
+                        </option>
+                      </select>
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <label className="flex items-center gap-2 text-sky-200 font-semibold cursor-pointer p-2 rounded-lg bg-slate-900 border border-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={editCourseLiveGps}
+                          onChange={(e) =>
+                            setEditCourseLiveGps(e.target.checked)
+                          }
+                          className="rounded border-slate-700"
+                        />
+                        <span>Live GPS Tracker (Kirim lokasi ke Monitoring)</span>
+                      </label>
+                    </div>
+                  </div>
+
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-sky-500/20">
                     <div className="flex flex-wrap items-center gap-4">
                       <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
@@ -4979,143 +5324,290 @@ export default function OrganizerDashboard({
               )}
 
               {/* Baris Kontrol Urut & Tabel Daftar Pos Checkpoint */}
-              <div className="space-y-2">
-                {selectedCourse.checkpoints.length > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs">
-                    <span className="font-semibold text-slate-300">
-                      Daftar Pos ({selectedCourse.checkpoints.length} CP)
-                    </span>
-                    {!isSuperAdminReadOnly &&
-                      selectedCourse.checkpoints.length >= 2 && (
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleSortCheckpoints('CODE')}
-                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-fuchsia-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
-                          >
-                            ⇅ Urut Kode
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleSortCheckpoints('NAME')}
-                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
-                          >
-                            ⇅ Urut Nama
-                          </button>
-                        </div>
-                      )}
-                  </div>
-                )}
+              {(() => {
+                const startFinishSame = isCourseStartFinishSame(selectedCourse);
+                const combinedLoc =
+                  selectedCourse.startLocation || selectedCourse.finishLocation;
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
-                      <th className="py-2.5 px-3">#</th>
-                      <th className="py-2.5 px-3">Kode Pos</th>
-                      <th className="py-2.5 px-3">Nama Pos</th>
-                      <th className="py-2.5 px-3">Poin</th>
-                      <th className="py-2.5 px-3">Koordinat</th>
-                      <th className="py-2.5 px-3 text-right">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {selectedCourse.checkpoints.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={6}
-                          className="py-6 text-center text-slate-400"
-                        >
-                          {isSuperAdminReadOnly
-                            ? 'Belum ada pos checkpoint pada Course ini.'
-                            : 'Belum ada pos checkpoint. Klik titik pada peta di atas lalu tekan + Tambah Pos ke Peta.'}
-                        </td>
-                      </tr>
-                    ) : (
-                      selectedCourse.checkpoints.map((cp: Checkpoint) => {
-                        const isBeingEdited =
-                          !isSuperAdminReadOnly && editingCheckpointId === cp.id;
-                        return (
-                          <tr
-                            key={cp.id}
-                            className={`transition ${
-                              isBeingEdited
-                                ? 'bg-amber-500/10'
-                                : 'hover:bg-slate-900/40'
+                return (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs">
+                      <span className="font-semibold text-slate-300">
+                        {startFinishSame
+                          ? `Daftar Pos (Start/Finish · ${selectedCourse.checkpoints.length} CP)`
+                          : `Daftar Pos (Start · ${selectedCourse.checkpoints.length} CP · Finish)`}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {!isSuperAdminReadOnly && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleToggleSameStartFinish(!startFinishSame)
+                            }
+                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition cursor-pointer inline-flex items-center gap-1.5 ${
+                              startFinishSame
+                                ? 'bg-emerald-500/20 border-emerald-400/60 text-emerald-200 hover:bg-emerald-500/30'
+                                : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
                             }`}
+                            title="Gabungkan Start & Finish di baris paling atas jika lokasinya sama"
                           >
-                            <td className="py-2.5 px-3 font-mono text-slate-400">
-                              #{cp.orderIndex}
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <span className="inline-flex items-center gap-1.5 font-mono font-bold text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/30 px-2 py-0.5 rounded">
-                                <span>⭕</span>
-                                <span>{cp.code}</span>
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              {cp.name ? (
-                                <span className="font-medium text-white">
-                                  {cp.name}
-                                </span>
-                              ) : (
-                                <span className="text-slate-600">-</span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3 font-mono text-emerald-400 font-semibold">
-                              {cp.points} pts
-                            </td>
-                            <td className="py-2.5 px-3 font-mono text-slate-300">
-                              {cp.latitude.toFixed(5)},{' '}
-                              {cp.longitude.toFixed(5)}{' '}
-                              {effectiveSelectedCourse.validationMethod !==
-                              ValidationMethod.QR_ONLY ? (
-                                <span className="text-slate-500">
-                                  (Radius: {cp.radiusMeters}m)
-                                </span>
-                              ) : (
-                                <span className="text-slate-500">
-                                  (QR Saja)
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              {isSuperAdminReadOnly ? (
-                                <span className="text-[11px] text-slate-500 font-mono">
-                                  Mode Pantau
-                                </span>
-                              ) : (
-                                <div className="inline-flex items-center gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleSelectCheckpointForEdit(cp)
-                                    }
-                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-medium inline-flex items-center gap-1"
-                                    title="Edit Checkpoint"
-                                  >
-                                    <Edit3 className="w-3 h-3" />
-                                    Edit
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteCheckpoint(cp.id)}
-                                    className="p-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                                    title="Hapus Checkpoint"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              )}
-                            </td>
+                            <span>{startFinishSame ? '☑' : '☐'}</span>
+                            <span>Start &amp; Finish Lokasi Sama</span>
+                          </button>
+                        )}
+                        {!isSuperAdminReadOnly &&
+                          selectedCourse.checkpoints.length >= 2 && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleSortCheckpoints('CODE')}
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-fuchsia-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+                              >
+                                ⇅ Urut Kode
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSortCheckpoints('NAME')}
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+                              >
+                                ⇅ Urut Nama
+                              </button>
+                            </>
+                          )}
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
+                            <th className="py-2.5 px-3">#</th>
+                            <th className="py-2.5 px-3">Kode Pos</th>
+                            <th className="py-2.5 px-3">Nama Pos</th>
+                            <th className="py-2.5 px-3">Poin</th>
+                            <th className="py-2.5 px-3">Koordinat</th>
+                            <th className="py-2.5 px-3 text-right">Aksi</th>
                           </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-                </div>
-              </div>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {/* Baris Pertama (Selalu Teratas): START atau START/FINISH */}
+                          {startFinishSame ? (
+                            <tr className="bg-emerald-950/20">
+                              <td className="py-2.5 px-3 font-mono font-bold text-emerald-300 whitespace-nowrap">
+                                S/F
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1.5 font-mono font-bold text-emerald-200 bg-emerald-500/15 border border-emerald-400/40 px-2 py-0.5 rounded">
+                                  <span>🔺◎</span>
+                                  <span>START / FINISH</span>
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-white">
+                                {combinedLoc?.name || 'Garis Start / Finish'}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-500">
+                                -
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-300">
+                                {combinedLoc ? (
+                                  <>
+                                    {combinedLoc.latitude.toFixed(5)},{' '}
+                                    {combinedLoc.longitude.toFixed(5)}
+                                  </>
+                                ) : (
+                                  <span className="text-slate-500">
+                                    Belum diset di peta
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                                <span className="text-[11px] text-emerald-300/90 font-mono">
+                                  Lokasi Sama
+                                </span>
+                              </td>
+                            </tr>
+                          ) : (
+                            <tr className="bg-emerald-950/20">
+                              <td className="py-2.5 px-3 font-mono font-bold text-emerald-400">
+                                START
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span className="inline-flex items-center gap-1.5 font-mono font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded">
+                                  <span>🔺</span>
+                                  <span>START</span>
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-white">
+                                {selectedCourse.startLocation?.name || 'Garis Start'}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-500">
+                                -
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-300">
+                                {selectedCourse.startLocation ? (
+                                  <>
+                                    {selectedCourse.startLocation.latitude.toFixed(5)},{' '}
+                                    {selectedCourse.startLocation.longitude.toFixed(5)}
+                                  </>
+                                ) : (
+                                  <span className="text-slate-500">
+                                    Belum diset di peta
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span className="text-[11px] text-emerald-400/80 font-mono">
+                                  Titik Awal
+                                </span>
+                              </td>
+                            </tr>
+                          )}
+
+                          {selectedCourse.checkpoints.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={6}
+                                className="py-4 text-center text-slate-400"
+                              >
+                                {isSuperAdminReadOnly
+                                  ? 'Belum ada pos checkpoint pada Course ini.'
+                                  : 'Belum ada pos CP. Klik titik pada peta di atas lalu tekan + Tambah Pos ke Peta.'}
+                              </td>
+                            </tr>
+                          ) : (
+                            selectedCourse.checkpoints.map((cp: Checkpoint) => {
+                              const isBeingEdited =
+                                !isSuperAdminReadOnly &&
+                                editingCheckpointId === cp.id;
+                              return (
+                                <tr
+                                  key={cp.id}
+                                  className={`transition ${
+                                    isBeingEdited
+                                      ? 'bg-amber-500/10'
+                                      : 'hover:bg-slate-900/40'
+                                  }`}
+                                >
+                                  <td className="py-2.5 px-3 font-mono text-slate-400">
+                                    #{cp.orderIndex}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <span className="inline-flex items-center gap-1.5 font-mono font-bold text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/30 px-2 py-0.5 rounded">
+                                      <span>⭕</span>
+                                      <span>{cp.code}</span>
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    {cp.name ? (
+                                      <span className="font-medium text-white">
+                                        {cp.name}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-600">-</span>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono text-emerald-400 font-semibold">
+                                    {cp.points} pts
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono text-slate-300">
+                                    {cp.latitude.toFixed(5)},{' '}
+                                    {cp.longitude.toFixed(5)}{' '}
+                                    {effectiveSelectedCourse.validationMethod !==
+                                    ValidationMethod.QR_ONLY ? (
+                                      <span className="text-slate-500">
+                                        (Radius: {cp.radiusMeters}m)
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-500">
+                                        (QR Saja)
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    {isSuperAdminReadOnly ? (
+                                      <span className="text-[11px] text-slate-500 font-mono">
+                                        Mode Pantau
+                                      </span>
+                                    ) : (
+                                      <div className="inline-flex items-center gap-1">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleSelectCheckpointForEdit(cp)
+                                          }
+                                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-medium inline-flex items-center gap-1"
+                                          title="Edit Checkpoint"
+                                        >
+                                          <Edit3 className="w-3 h-3" />
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleDeleteCheckpoint(cp.id)
+                                          }
+                                          className="p-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                          title="Hapus Checkpoint"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+
+                          {/* Baris Terakhir (Hanya tampil jika Start & Finish lokasi terpisah) */}
+                          {!startFinishSame && (
+                            <tr className="bg-sky-950/20">
+                              <td className="py-2.5 px-3 font-mono font-bold text-sky-400">
+                                FINISH
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span className="inline-flex items-center gap-1.5 font-mono font-bold text-sky-300 bg-sky-500/10 border border-sky-500/30 px-2 py-0.5 rounded">
+                                  <span>◎</span>
+                                  <span>FINISH</span>
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-white">
+                                {selectedCourse.finishLocation?.name ||
+                                  'Garis Finish'}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-500">
+                                -
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-slate-300">
+                                {selectedCourse.finishLocation ? (
+                                  <>
+                                    {selectedCourse.finishLocation.latitude.toFixed(
+                                      5
+                                    )}
+                                    ,{' '}
+                                    {selectedCourse.finishLocation.longitude.toFixed(
+                                      5
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-slate-500">
+                                    Belum diset di peta
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span className="text-[11px] text-sky-400/80 font-mono">
+                                  Titik Akhir
+                                </span>
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -5138,6 +5630,7 @@ export default function OrganizerDashboard({
                     type="button"
                     onClick={() => {
                       setIncludeAllRelayLegsInMassStart(false);
+                      setMassStartExcludedSessionIds([]);
                       setConfirmMassStartCourse(selectedCourse);
                     }}
                     className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold text-xs shadow-md shadow-emerald-500/20 flex items-center gap-1.5 transition cursor-pointer"
@@ -5159,6 +5652,23 @@ export default function OrganizerDashboard({
                 )}
               </div>
             </div>
+
+            {selectedCourse &&
+              (selectedCourse.liveGpsTrackingEnabled === false ||
+                selectedCourse.resultSyncMode === 'ON_FINISH') && (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-2.5 rounded-lg bg-slate-950/90 border border-sky-500/30 text-xs text-sky-200">
+                  {selectedCourse.liveGpsTrackingEnabled === false && (
+                    <span>
+                      Live GPS Tracker <strong>nonaktif</strong> — lokasi peserta tidak dikirim ke peta Monitoring.
+                    </span>
+                  )}
+                  {selectedCourse.resultSyncMode === 'ON_FINISH' && (
+                    <span>
+                      Mode <strong>Kirim Saat Finish</strong> aktif — CP &amp; skor peserta akan masuk penuh saat Finish.
+                    </span>
+                  )}
+                </div>
+              )}
 
             {/* PETA INTERAKTIF LIVE MONITORING PERGERAKAN PESERTA */}
             <LiveMonitoringMap
@@ -5440,6 +5950,11 @@ export default function OrganizerDashboard({
                     </span>
                   )}
                 </h2>
+                {selectedCourse?.resultSyncMode === 'ON_FINISH' && (
+                  <p className="text-[11px] text-sky-300 mt-1">
+                    Mode Kirim Saat Finish — CP &amp; skor peserta yang sedang berlari akan masuk otomatis saat Finish.
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -7373,18 +7888,29 @@ export default function OrganizerDashboard({
               const waitingSessions = dashboard.sessions.filter(
                 (s: ParticipantSession) =>
                   s.courseId === confirmMassStartCourse.id &&
-                  s.status === SessionStatus.NOT_STARTED
+                  s.status === SessionStatus.NOT_STARTED &&
+                  !s.isDnf
               );
               const isRelaySeq =
                 confirmMassStartCourse.raceMode === CourseRaceMode.RELAY &&
                 confirmMassStartCourse.relayEnforceSequential !== false;
-              const eligibleCount = isRelaySeq && !includeAllRelayLegsInMassStart
-                ? waitingSessions.filter(
-                    (s: ParticipantSession) =>
-                      (Number(s.relayLegIndex) || 1) === 1 ||
-                      s.relayOverrideUnlocked
-                  ).length
-                : waitingSessions.length;
+              const eligibleSessions =
+                isRelaySeq && !includeAllRelayLegsInMassStart
+                  ? waitingSessions.filter(
+                      (s: ParticipantSession) =>
+                        (Number(s.relayLegIndex) || 1) === 1 ||
+                        Boolean(s.relayOverrideUnlocked)
+                    )
+                  : waitingSessions;
+
+              const excludedSet = new Set(massStartExcludedSessionIds);
+              const selectedSessions = eligibleSessions.filter(
+                (s: ParticipantSession) => !excludedSet.has(s.id)
+              );
+              const selectedSessionIds = selectedSessions.map((s) => s.id);
+              const allEligibleSelected =
+                eligibleSessions.length > 0 &&
+                selectedSessions.length === eligibleSessions.length;
 
               return (
                 <div className="space-y-3 text-xs">
@@ -7402,13 +7928,129 @@ export default function OrganizerDashboard({
                         Tim yang Akan Dilepas Sekarang:
                       </span>
                       <strong className="font-mono text-sm text-amber-300">
-                        {eligibleCount} Tim
+                        {selectedSessions.length} Tim
                       </strong>
                     </div>
                   </div>
 
+                  {/* Daftar Nama Tim Siap Start (Checklist + Hapus Sesi Nyangkut) */}
+                  <div className="rounded-xl bg-slate-950/90 border border-slate-800 overflow-hidden">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800/90 bg-slate-900/60">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">
+                        Daftar Tim di Garis Start ({eligibleSessions.length})
+                      </span>
+                      {eligibleSessions.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (allEligibleSelected) {
+                              setMassStartExcludedSessionIds(
+                                eligibleSessions.map((s) => s.id)
+                              );
+                            } else {
+                              setMassStartExcludedSessionIds([]);
+                            }
+                          }}
+                          className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 cursor-pointer"
+                        >
+                          {allEligibleSelected ? 'Batal Pilih Semua' : 'Pilih Semua'}
+                        </button>
+                      )}
+                    </div>
+
+                    {eligibleSessions.length === 0 ? (
+                      <div className="px-3 py-4 text-center text-[11px] text-slate-400">
+                        Belum ada tim yang siap dilepas. Minta peserta Scan Setup QR terlebih dahulu.
+                      </div>
+                    ) : (
+                      <div className="max-h-52 overflow-y-auto divide-y divide-slate-800/70">
+                        {eligibleSessions.map((sess) => {
+                          const p = dashboard.participants.find(
+                            (part: ParticipantPublic) => part.id === sess.participantId
+                          );
+                          const teamLabel =
+                            p?.teamName || p?.name || sess.participantId;
+                          const isChecked = !excludedSet.has(sess.id);
+                          const isDeletingThis = deletingMassStartSessionId === sess.id;
+                          const loadedTimeStr = sess.loadedAt
+                            ? new Date(sess.loadedAt).toLocaleTimeString('id-ID', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit',
+                              })
+                            : '';
+
+                          return (
+                            <div
+                              key={sess.id}
+                              className={`flex items-center justify-between gap-2 px-3 py-2 transition ${
+                                isChecked ? 'bg-slate-950/40' : 'bg-slate-950/80 opacity-55'
+                              }`}
+                            >
+                              <label className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  disabled={isExecutingMassStart || isDeletingThis}
+                                  onChange={() => {
+                                    setMassStartExcludedSessionIds((prev) =>
+                                      prev.includes(sess.id)
+                                        ? prev.filter((id) => id !== sess.id)
+                                        : [...prev, sess.id]
+                                    );
+                                  }}
+                                  className="rounded border-slate-600 accent-emerald-500 cursor-pointer shrink-0"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-bold text-slate-100 truncate flex items-center gap-1.5">
+                                    <span className="truncate">{teamLabel}</span>
+                                    {p?.bibNumber && (
+                                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                                        #{p.bibNumber}
+                                      </span>
+                                    )}
+                                    {confirmMassStartCourse.raceMode === CourseRaceMode.RELAY &&
+                                      sess.relayLegIndex && (
+                                        <span className="text-[10px] font-mono text-purple-300 shrink-0">
+                                          Sub-Team #{sess.relayLegIndex}
+                                        </span>
+                                      )}
+                                  </div>
+                                  {loadedTimeStr && (
+                                    <div className="text-[10px] text-slate-500">
+                                      Scan Setup: {loadedTimeStr}
+                                    </div>
+                                  )}
+                                </div>
+                              </label>
+
+                              <button
+                                type="button"
+                                disabled={isExecutingMassStart || isDeletingThis}
+                                onClick={() =>
+                                  void handleRemoveWaitingSessionFromMassStart(
+                                    sess.id,
+                                    teamLabel
+                                  )
+                                }
+                                title="Hapus dari antrean Mass Start (batal start)"
+                                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition cursor-pointer disabled:opacity-40 shrink-0"
+                              >
+                                {isDeletingThis ? (
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
                   <p className="text-slate-300 leading-relaxed">
-                    Seluruh tim yang siap di atas akan mendapatkan{' '}
+                    Seluruh tim yang dicentang di atas akan mendapatkan{' '}
                     <strong className="text-white">
                       waktu Start resmi yang persis sama detik ini
                     </strong>{' '}
@@ -7440,15 +8082,18 @@ export default function OrganizerDashboard({
                     <button
                       type="button"
                       disabled={isExecutingMassStart}
-                      onClick={() => setConfirmMassStartCourse(null)}
+                      onClick={() => {
+                        setMassStartExcludedSessionIds([]);
+                        setConfirmMassStartCourse(null);
+                      }}
                       className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium cursor-pointer"
                     >
                       Batal
                     </button>
                     <button
                       type="button"
-                      disabled={isExecutingMassStart || eligibleCount === 0}
-                      onClick={handleExecuteMassStart}
+                      disabled={isExecutingMassStart || selectedSessions.length === 0}
+                      onClick={() => void handleExecuteMassStart(selectedSessionIds)}
                       className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-lime-500 hover:from-emerald-400 hover:to-lime-400 text-slate-950 font-extrabold cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shadow-lg shadow-emerald-500/20"
                     >
                       {isExecutingMassStart ? (
@@ -7459,7 +8104,7 @@ export default function OrganizerDashboard({
                       ) : (
                         <>
                           <Play className="w-3.5 h-3.5 fill-slate-950" />
-                          Lepas Serentak Sekarang ({eligibleCount} Tim)
+                          Lepas Serentak Sekarang ({selectedSessions.length} Tim)
                         </>
                       )}
                     </button>
@@ -7468,6 +8113,154 @@ export default function OrganizerDashboard({
               );
             })()}
           </div>
+        </div>
+      )}
+
+      {/* Modal Duplikat Course (QR Baru vs Shared Control) */}
+      {duplicateCourseSource && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <form
+            onSubmit={handleConfirmDuplicateCourse}
+            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-2 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
+                  <Copy className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
+                    Duplikat Course
+                  </div>
+                  <h3 className="text-sm font-extrabold text-white truncate">
+                    Dari: {duplicateCourseSource.name} ({duplicateCourseSource.checkpoints.length} CP)
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isDuplicatingCourse}
+                onClick={() => setDuplicateCourseSource(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-slate-300 font-semibold mb-1">
+                  Nama Course Baru
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={duplicateCourseName}
+                  onChange={(e) => setDuplicateCourseName(e.target.value)}
+                  placeholder="Contoh: Kategori Putri / Gelombang 2"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-emerald-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-300 font-semibold mb-1">
+                  Tanggal Event
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={duplicateCourseDate}
+                  onChange={(e) => setDuplicateCourseDate(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-emerald-500 outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-slate-300">
+                Pilih Mode Kode QR
+              </div>
+
+              <label
+                className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                  duplicateCourseQrMode === 'NEW_QR'
+                    ? 'border-emerald-500/60 bg-emerald-950/25'
+                    : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="duplicateCourseQrMode"
+                  checked={duplicateCourseQrMode === 'NEW_QR'}
+                  onChange={() => setDuplicateCourseQrMode('NEW_QR')}
+                  className="mt-0.5 accent-emerald-500"
+                />
+                <div className="text-xs">
+                  <div className="font-bold text-white">
+                    Buat Kode QR Baru (Course Terpisah)
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    Setup QR, Start QR, Finish QR, dan seluruh QR CP dibuat baru & unik. Cocok untuk event, hari, atau lokasi baru.
+                  </p>
+                </div>
+              </label>
+
+              <label
+                className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                  duplicateCourseQrMode === 'SHARED_CONTROL'
+                    ? 'border-amber-500/60 bg-amber-950/25'
+                    : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="duplicateCourseQrMode"
+                  checked={duplicateCourseQrMode === 'SHARED_CONTROL'}
+                  onChange={() => setDuplicateCourseQrMode('SHARED_CONTROL')}
+                  className="mt-0.5 accent-amber-500"
+                />
+                <div className="text-xs">
+                  <div className="font-bold text-amber-200">
+                    Pakai QR Fisik yang Sama (Shared Control)
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    Hanya <strong className="text-slate-200">Setup QR</strong> yang dibuat baru. Start QR, Finish QR, dan stiker QR CP di lapangan tetap bisa dipakai bersama antar kategori tanpa cetak ulang stiker.
+                  </p>
+                </div>
+              </label>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Seluruh pengaturan Course, titik Start/Finish, dan {duplicateCourseSource.checkpoints.length} pos CP akan disalin. Data peserta dan hasil lomba tidak ikut disalin (mulai kosong).
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isDuplicatingCourse}
+                onClick={() => setDuplicateCourseSource(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={isDuplicatingCourse || !duplicateCourseName.trim()}
+                className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {isDuplicatingCourse ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Menduplikat...
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    Duplikat Course
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

@@ -2151,9 +2151,13 @@ function processSingleReport(
 
     const scannedStart = (payload.qrPayloadScanned || '').trim();
     const expectedStartPrefix = `BARAKA:START:${course.id}`.toUpperCase();
+    const sharedStartPrefix = course.sharedQrSourceCourseId
+      ? `BARAKA:START:${course.sharedQrSourceCourseId}`.toUpperCase()
+      : null;
     const isStartMatch =
       scannedStart === course.startQrCode ||
-      scannedStart.toUpperCase() === expectedStartPrefix;
+      scannedStart.toUpperCase() === expectedStartPrefix ||
+      (sharedStartPrefix !== null && scannedStart.toUpperCase() === sharedStartPrefix);
 
     if (!isStartMatch) {
       const rejected: CheckpointReport = {
@@ -2303,15 +2307,21 @@ function processSingleReport(
       }
     }
 
-    // Evaluasi QR & GPS sesuai aturan Course (dukung juga format deterministik BARAKA:CP:<courseId>:<cpCode>)
+    // Evaluasi QR & GPS sesuai aturan Course (dukung juga format deterministik BARAKA:CP:<courseId>:<cpCode> & Shared Control)
     const scannedCp = (payload.qrPayloadScanned || '').trim();
     const upperScannedCp = scannedCp.toUpperCase();
     const expectedCpPrefix = `BARAKA:CP:${course.id}:${checkpoint.code}`.toUpperCase();
+    const sharedCpPrefix = course.sharedQrSourceCourseId
+      ? `BARAKA:CP:${course.sharedQrSourceCourseId}:${checkpoint.code}`.toUpperCase()
+      : null;
     const qrMatch =
       Boolean(scannedCp) &&
       (scannedCp === checkpoint.qrSecret ||
         upperScannedCp === expectedCpPrefix ||
-        upperScannedCp.startsWith(`${expectedCpPrefix}:`));
+        upperScannedCp.startsWith(`${expectedCpPrefix}:`) ||
+        (sharedCpPrefix !== null &&
+          (upperScannedCp === sharedCpPrefix ||
+            upperScannedCp.startsWith(`${sharedCpPrefix}:`))));
 
     let gpsMatch = false;
     let distanceMeters: number | null = null;
@@ -2460,9 +2470,13 @@ function processSingleReport(
 
     const scannedFinish = (payload.qrPayloadScanned || '').trim();
     const expectedFinishPrefix = `BARAKA:FINISH:${course.id}`.toUpperCase();
+    const sharedFinishPrefix = course.sharedQrSourceCourseId
+      ? `BARAKA:FINISH:${course.sharedQrSourceCourseId}`.toUpperCase()
+      : null;
     const isFinishMatch =
       scannedFinish === course.finishQrCode ||
-      scannedFinish.toUpperCase() === expectedFinishPrefix;
+      scannedFinish.toUpperCase() === expectedFinishPrefix ||
+      (sharedFinishPrefix !== null && scannedFinish.toUpperCase() === sharedFinishPrefix);
 
     if (!isFinishMatch) {
       const rejected: CheckpointReport = {
@@ -3289,6 +3303,8 @@ app.get('/api/public/courses', (_req, res) => {
       relayEnforceSequential: c.relayEnforceSequential !== false,
       relayDnfScoringMode: c.relayDnfScoringMode || RelayDnfScoringMode.ZERO,
       relayDnfPenaltyPoints: c.relayDnfPenaltyPoints || 0,
+      liveGpsTrackingEnabled: c.liveGpsTrackingEnabled !== false,
+      resultSyncMode: c.resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME',
     }));
   res.json({ courses: publicCourseList });
 });
@@ -3625,6 +3641,8 @@ app.get('/api/public/leaderboard/:courseId', (req, res) => {
       relayDnfScoringMode: course.relayDnfScoringMode || RelayDnfScoringMode.ZERO,
       relayDnfPenaltyPoints: course.relayDnfPenaltyPoints || 0,
       relayAllowDuplicateCheckpoints: allowDuplicateCps,
+      liveGpsTrackingEnabled: course.liveGpsTrackingEnabled !== false,
+      resultSyncMode: course.resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME',
     },
     totalParticipants: rankedLeaderboard.length,
     updatedAt: new Date().toISOString(),
@@ -4328,6 +4346,57 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
     });
   });
 
+  // --------------------------------------------------------------------------
+  // ALUR PESERTA: BATALKAN SESI SIAP START (NOT_STARTED) SAAT KELUAR / GANTI COURSE
+  // Menghapus sesi NOT_STARTED dari server agar tidak tertinggal di antrean Mass Start
+  // --------------------------------------------------------------------------
+  app.post('/api/participant/cancel-setup', requireParticipant, (req, res) => {
+    const participantId = (req as Request & { participantId: string }).participantId;
+    const { sessionId } = (req.body || {}) as { sessionId?: string };
+
+    const targetSessions = db.sessions.filter((s) => {
+      if (s.participantId !== participantId || s.status !== SessionStatus.NOT_STARTED) {
+        return false;
+      }
+      if (sessionId) {
+        return s.id === sessionId;
+      }
+      return true;
+    });
+
+    if (targetSessions.length === 0) {
+      res.json({
+        cancelled: false,
+        cancelledSessionIds: [],
+        message: 'Tidak ada sesi Siap Start (NOT_STARTED) yang perlu dibatalkan.',
+      });
+      return;
+    }
+
+    const cancelledIds = targetSessions.map((s) => s.id);
+    const cancelledIdSet = new Set(cancelledIds);
+
+    if (!Array.isArray(db.deletedSessionIds)) {
+      db.deletedSessionIds = [];
+    }
+    for (const id of cancelledIds) {
+      if (!db.deletedSessionIds.includes(id)) {
+        db.deletedSessionIds.push(id);
+      }
+    }
+
+    db.sessions = db.sessions.filter((s) => !cancelledIdSet.has(s.id));
+    db.reports = db.reports.filter((r) => !cancelledIdSet.has(r.sessionId));
+    saveDb(db);
+    void pushDbToCloudNow(db);
+
+    res.json({
+      cancelled: true,
+      cancelledSessionIds: cancelledIds,
+      message: 'Sesi Siap Start berhasil dibatalkan.',
+    });
+  });
+
   app.get('/api/participant/session/:sessionId', requireParticipant, (req, res) => {
     const participantId = (req as Request & { participantId: string }).participantId;
     const courseIdQuery = (req.query.courseId as string | undefined)?.trim();
@@ -4637,6 +4706,9 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
       relayAllowDuplicateCheckpoints,
       startLocation,
       finishLocation,
+      sameStartFinishLocation,
+      liveGpsTrackingEnabled,
+      resultSyncMode,
     } = req.body as Partial<Course>;
 
     if (!name || !name.trim() || !date) {
@@ -4749,6 +4821,15 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
         typeof finishLocation.longitude === 'number'
           ? finishLocation
           : undefined,
+      sameStartFinishLocation:
+        sameStartFinishLocation !== undefined
+          ? Boolean(sameStartFinishLocation)
+          : undefined,
+      liveGpsTrackingEnabled:
+        liveGpsTrackingEnabled !== undefined
+          ? Boolean(liveGpsTrackingEnabled)
+          : true,
+      resultSyncMode: resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME',
       setupQrCode: `BARAKA:SETUP:${courseId}`,
       startQrCode: `BARAKA:START:${courseId}`,
       finishQrCode: `BARAKA:FINISH:${courseId}`,
@@ -4760,6 +4841,140 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
     saveDb(db);
     void pushDbToCloudNow(db);
     res.status(201).json({ course: newCourse });
+  });
+
+  // Duplikat Course (Salin seluruh pengaturan, Start/Finish, dan daftar CP — dukung QR Baru maupun Shared Control)
+  app.post('/api/organizer/courses/:courseId/duplicate', requireOrganizer, (req, res) => {
+    const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
+    const sourceCourse = db.courses.find((c) => c.id === req.params.courseId);
+    if (!sourceCourse) {
+      res.status(404).json({ error: 'Course sumber tidak ditemukan.' });
+      return;
+    }
+    if (!canAccessCourse(sourceCourse, auth)) {
+      res.status(403).json({
+        error: 'Anda hanya dapat menduplikat Course yang Anda kelola sendiri.',
+      });
+      return;
+    }
+
+    // Pengecekan Kuota & Masa Aktif khusus Organizer biasa (Superadmin bebas unlimited)
+    if (!auth.isSuperAdmin) {
+      const orgList = db.organizers || [];
+      const currentOrg = orgList.find((o) => o.id === auth.organizerId);
+      if (currentOrg) {
+        if (currentOrg.expiresAt) {
+          const expTime = new Date(currentOrg.expiresAt).getTime();
+          if (!Number.isNaN(expTime) && Date.now() > expTime) {
+            res.status(403).json({
+              error: `Masa aktif akun Organizer Anda telah berakhir pada ${new Date(currentOrg.expiresAt).toLocaleDateString('id-ID')}. Anda tidak dapat menduplikat Course.`,
+            });
+            return;
+          }
+        }
+        if (
+          currentOrg.maxCourses !== undefined &&
+          currentOrg.maxCourses !== null &&
+          currentOrg.maxCourses > 0
+        ) {
+          const existingCourses = (db.courses || []).filter(
+            (c) => c.createdByOrganizerId === auth.organizerId
+          );
+          if (existingCourses.length >= currentOrg.maxCourses) {
+            res.status(400).json({
+              error: `Batas kuota tercapai: Akun Anda dibatasi maksimal ${currentOrg.maxCourses} Course (saat ini sudah memiliki ${existingCourses.length} Course).`,
+            });
+            return;
+          }
+        }
+      }
+    }
+
+    const { name, date, qrMode } = (req.body || {}) as {
+      name?: string;
+      date?: string;
+      qrMode?: 'NEW_QR' | 'SHARED_CONTROL';
+    };
+
+    const trimmedName = (name || '').trim() || `${sourceCourse.name} (Salinan)`;
+    const targetDate = (date || '').trim() || sourceCourse.date;
+    const isSharedControl = qrMode === 'SHARED_CONTROL';
+    const newCourseId = `crs-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+    const rootSharedCourseId = isSharedControl
+      ? sourceCourse.sharedQrSourceCourseId || sourceCourse.id
+      : undefined;
+
+    const clonedCheckpoints: Checkpoint[] = (sourceCourse.checkpoints || []).map((cp, idx) => {
+      const randSuffix = crypto.randomBytes(2).toString('hex').toUpperCase();
+      const cpId = `cp-${Date.now()}-${idx + 1}-${crypto.randomBytes(2).toString('hex')}`;
+      return {
+        ...cp,
+        id: cpId,
+        courseId: newCourseId,
+        orderIndex: cp.orderIndex ?? idx + 1,
+        qrSecret: isSharedControl
+          ? cp.qrSecret || `BARAKA:CP:${rootSharedCourseId}:${cp.code.toUpperCase()}`
+          : `BARAKA:CP:${newCourseId}:${cp.code.toUpperCase()}:${randSuffix}`,
+      };
+    });
+
+    const duplicatedCourse: Course = {
+      id: newCourseId,
+      name: trimmedName,
+      description: sourceCourse.description || '',
+      locationName: sourceCourse.locationName || '',
+      date: targetDate,
+      isActive: true,
+      scoringEnabled: sourceCourse.scoringEnabled !== false,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByOrganizerId: auth.organizerId,
+      createdByOrganizerName: auth.name,
+      validationMethod: sourceCourse.validationMethod || ValidationMethod.QR_ONLY,
+      defaultGpsRadiusMeters: sourceCourse.defaultGpsRadiusMeters || 35,
+      enforceOrder: sourceCourse.enforceOrder !== false,
+      allowParticipantMapVisibility: sourceCourse.allowParticipantMapVisibility !== false,
+      durationMinutes: sourceCourse.durationMinutes || 0,
+      overtimePenaltyEnabled: Boolean(sourceCourse.overtimePenaltyEnabled),
+      overtimePenaltyPointsPerMinute: sourceCourse.overtimePenaltyPointsPerMinute || 0,
+      raceMode: sourceCourse.raceMode || CourseRaceMode.REGULAR,
+      relaySubTeamCount: sourceCourse.relaySubTeamCount || 3,
+      relayEnforceSequential: sourceCourse.relayEnforceSequential !== false,
+      relayDnfScoringMode:
+        sourceCourse.relayDnfScoringMode || RelayDnfScoringMode.PARTIAL_WITH_PENALTY,
+      relayDnfPenaltyPoints: sourceCourse.relayDnfPenaltyPoints || 0,
+      relayAllowDuplicateCheckpoints:
+        sourceCourse.relayAllowDuplicateCheckpoints !== false,
+      startLocation: sourceCourse.startLocation ? { ...sourceCourse.startLocation } : undefined,
+      finishLocation: sourceCourse.finishLocation ? { ...sourceCourse.finishLocation } : undefined,
+      sameStartFinishLocation: sourceCourse.sameStartFinishLocation,
+      liveGpsTrackingEnabled: sourceCourse.liveGpsTrackingEnabled !== false,
+      resultSyncMode:
+        sourceCourse.resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME',
+      sharedQrSourceCourseId: rootSharedCourseId,
+      // Setup QR selalu unik per Course agar peserta tidak salah masuk kategori
+      setupQrCode: `BARAKA:SETUP:${newCourseId}`,
+      startQrCode: isSharedControl
+        ? sourceCourse.startQrCode
+        : `BARAKA:START:${newCourseId}`,
+      finishQrCode: isSharedControl
+        ? sourceCourse.finishQrCode
+        : `BARAKA:FINISH:${newCourseId}`,
+      checkpoints: clonedCheckpoints,
+      deletedCheckpointIds: [],
+    };
+
+    db.courses.push(duplicatedCourse);
+    saveDb(db);
+    void pushDbToCloudNow(db);
+
+    res.status(201).json({
+      course: duplicatedCourse,
+      message: isSharedControl
+        ? `Course "${duplicatedCourse.name}" berhasil diduplikat (Mode Shared Control — ${clonedCheckpoints.length} CP).`
+        : `Course "${duplicatedCourse.name}" berhasil diduplikat dengan kode QR baru (${clonedCheckpoints.length} CP).`,
+    });
   });
 
   // Perbarui / Edit Pengaturan Course Aktif (Hanya Pemilik Course atau Superadmin)
@@ -4798,6 +5013,9 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
       relayAllowDuplicateCheckpoints,
       startLocation,
       finishLocation,
+      sameStartFinishLocation,
+      liveGpsTrackingEnabled,
+      resultSyncMode,
     } = req.body as Partial<Course> & {
       startLocation?: GeoPointLocation | null;
       finishLocation?: GeoPointLocation | null;
@@ -4871,6 +5089,16 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
         typeof finishLocation.longitude === 'number'
           ? finishLocation
           : undefined;
+    }
+    if (sameStartFinishLocation !== undefined) {
+      course.sameStartFinishLocation = Boolean(sameStartFinishLocation);
+    }
+    if (liveGpsTrackingEnabled !== undefined) {
+      course.liveGpsTrackingEnabled = Boolean(liveGpsTrackingEnabled);
+    }
+    if (resultSyncMode !== undefined) {
+      course.resultSyncMode =
+        resultSyncMode === 'ON_FINISH' ? 'ON_FINISH' : 'REALTIME';
     }
 
     course.updatedAt = new Date().toISOString();
@@ -4976,7 +5204,10 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
   app.post('/api/organizer/courses/:courseId/mass-start', requireOrganizer, (req, res) => {
     const auth = (req as Request & { organizerAuth: OrganizerAuthContext }).organizerAuth;
     const { courseId } = req.params;
-    const { includeAllRelayLegs } = req.body as { includeAllRelayLegs?: boolean };
+    const { includeAllRelayLegs, sessionIds } = (req.body || {}) as {
+      includeAllRelayLegs?: boolean;
+      sessionIds?: string[];
+    };
 
     const course = db.courses.find((c) => c.id === courseId);
     if (!course) {
@@ -4996,14 +5227,27 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
       course.raceMode === CourseRaceMode.RELAY &&
       course.relayEnforceSequential !== false &&
       !includeAllRelayLegs;
+    const selectedSessionIdSet = Array.isArray(sessionIds)
+      ? new Set(sessionIds.map((id) => String(id)))
+      : null;
+
+    if (selectedSessionIdSet && selectedSessionIdSet.size === 0) {
+      res.status(400).json({
+        error: 'Pilih minimal 1 tim untuk dilepas pada Mass Start.',
+      });
+      return;
+    }
 
     const waitingSessions = (db.sessions || []).filter((s) => {
       if (s.courseId !== course.id || s.status !== SessionStatus.NOT_STARTED || s.isDnf) {
         return false;
       }
+      if (selectedSessionIdSet && !selectedSessionIdSet.has(s.id)) {
+        return false;
+      }
       if (isSequentialRelay) {
-        // Pada mode estafet berurutan, Mass Start melepas Sub-Team #1 (pelari pertama tiap Tim Induk)
-        return !s.relayLegIndex || s.relayLegIndex === 1;
+        // Pada mode estafet berurutan, Mass Start melepas Sub-Team #1 (atau yang dibuka via Override Panitia)
+        return !s.relayLegIndex || s.relayLegIndex === 1 || Boolean(s.relayOverrideUnlocked);
       }
       return true;
     });
@@ -5011,8 +5255,8 @@ app.post('/api/participant/change-password', requireParticipant, async (req, res
     if (waitingSessions.length === 0) {
       res.status(400).json({
         error: isSequentialRelay
-          ? 'Tidak ada Sub-Team #1 berstatus Siap Start (NOT_STARTED) pada Course Relay ini.'
-          : 'Tidak ada tim berstatus Siap Start (NOT_STARTED) yang menunggu pelepasan pada Course ini.',
+          ? 'Tidak ada Sub-Team #1 berstatus Siap Start (NOT_STARTED) yang dipilih pada Course Relay ini.'
+          : 'Tidak ada tim berstatus Siap Start (NOT_STARTED) yang dipilih untuk dilepas pada Course ini.',
       });
       return;
     }

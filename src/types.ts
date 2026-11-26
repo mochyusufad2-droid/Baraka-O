@@ -87,6 +87,8 @@ export enum RelayDnfScoringMode {
 /**
  * Entitas tunggal Course (Hasil penyatuan Event & Course sesuai kesepakatan diskusi).
  */
+export type CourseResultSyncMode = 'REALTIME' | 'ON_FINISH';
+
 export interface Course {
   id: string;
   name: string;
@@ -114,6 +116,10 @@ export interface Course {
   relayAllowDuplicateCheckpoints?: boolean; // True = tiap sub-team boleh ambil CP yang sama & poin dijumlahkan penuh; False = CP yang sama hanya dihitung 1x untuk Tim Induk (default true)
   startLocation?: GeoPointLocation;       // Titik koordinat Start di peta (Segitiga 🔺)
   finishLocation?: GeoPointLocation;      // Titik koordinat Finish di peta (Lingkaran Ganda ◎)
+  sameStartFinishLocation?: boolean;      // True jika lokasi Start & Finish sama (tampil digabung di paling atas daftar CP)
+  liveGpsTrackingEnabled?: boolean;       // Default true; jika false, HP peserta tidak mengirim lokasi berkala ke server panitia
+  resultSyncMode?: CourseResultSyncMode;  // Default 'REALTIME'; jika 'ON_FINISH', Start lapor 1x lalu CP dikumpulkan & dikirim sekaligus saat Finish
+  sharedQrSourceCourseId?: string;        // Jika hasil duplikat mode Shared Control, merujuk ke ID Course sumber QR fisik Start/Finish/CP
   setupQrCode: string;                    // Payload Setup QR untuk Load Course
   startQrCode: string;                    // Payload Start QR untuk memulai sesi
   finishQrCode: string;                   // Payload Finish QR untuk menyelesaikan sesi

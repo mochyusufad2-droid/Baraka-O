@@ -681,6 +681,12 @@ export function SpectatorLiveLeaderboardModal({
               <option value="ALL">Semua Course</option>
             </select>
 
+            {selectedCourse?.resultSyncMode === 'ON_FINISH' && (
+              <span className="px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-400/40 text-sky-200 text-[11px] font-medium">
+                Mode Kirim Saat Finish — Skor &amp; CP tampil utuh saat Finish
+              </span>
+            )}
+
             {/* Gender Filter */}
             <select
               value={genderFilter}

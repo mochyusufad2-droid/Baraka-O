@@ -93,6 +93,7 @@ interface PublicLeaderboardData {
     createdByOrganizerName: string;
     raceMode?: CourseRaceMode;
     relaySubTeamCount?: number;
+    resultSyncMode?: 'REALTIME' | 'ON_FINISH';
   };
   totalParticipants: number;
   updatedAt: string;
@@ -454,6 +455,11 @@ export default function PublicLiveLeaderboard({
                     Oleh: {data.course.createdByOrganizerName}
                   </span>
                 </div>
+                {data.course.resultSyncMode === 'ON_FINISH' && (
+                  <div className="text-[11px] text-sky-300 font-medium">
+                    Mode Kirim Saat Finish — Skor &amp; CP peserta diperbarui penuh saat Finish.
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">

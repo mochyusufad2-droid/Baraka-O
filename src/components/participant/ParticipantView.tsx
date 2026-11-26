@@ -340,6 +340,7 @@ export default function ParticipantView({
   const [unlockScanHoldProgress, setUnlockScanHoldProgress] = useState(0);
   const unlockTimerRef = useRef<number | null>(null);
   const wakeLockSentinelRef = useRef<any>(null);
+  const lowBatteryBackupCountRef = useRef<number>(0);
   const [showRelayDetailWhileRunning, setShowRelayDetailWhileRunning] = useState(false);
 
   // Panel riwayat antrean laporan lokal
@@ -376,6 +377,8 @@ export default function ParticipantView({
   const [isSyncing, setIsSyncing] = useState(false);
   const [showDnfLogoutModal, setShowDnfLogoutModal] = useState(false);
   const [isSubmittingDnf, setIsSubmittingDnf] = useState(false);
+  const [showSetupLogoutModal, setShowSetupLogoutModal] = useState(false);
+  const [isCancellingSetupLogout, setIsCancellingSetupLogout] = useState(false);
   const [feedbackBanner, setFeedbackBanner] = useState<{
     type: 'success' | 'warning' | 'error';
     text: string;
@@ -514,6 +517,15 @@ export default function ParticipantView({
 
   const isSessionActivelyRunning =
     sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer;
+
+  const isLiveGpsTrackingEnabled = activeCourse?.liveGpsTrackingEnabled !== false;
+  const isBatchOnFinishMode = activeCourse?.resultSyncMode === 'ON_FINISH';
+  const needsLocalGpsSensor = Boolean(
+    activeCourse &&
+      (isLiveGpsTrackingEnabled ||
+        activeCourse.validationMethod !== ValidationMethod.QR_ONLY ||
+        activeCourse.allowParticipantMapVisibility !== false)
+  );
 
   // Daftar ID checkpoint yang sudah tervalidasi di sesi ini (gabungan server + lokal yang sah)
   const effectiveValidatedCheckpointIds = useMemo(() => {
@@ -729,19 +741,22 @@ export default function ParticipantView({
     syncLatestCourseAndSession();
     // Adaptive polling interval:
     // - NOT_STARTED (4.5s): responsif saat menunggu Mass Start atau giliran estafet
-    // - ACTIVE (10s): hemat baterai & paket data saat berlari (karena scan QR/GPS tetap dikirim instan)
+    // - ACTIVE: 60s saat Mode Kirim Saat Finish (hemat baterai & server), 10s saat Real-Time
     // - FINISHED (25s): hemat resource setelah peserta mencapai garis Finish
     const pollIntervalMs =
       activeSession.status === SessionStatus.NOT_STARTED
         ? 4500
         : activeSession.status === SessionStatus.ACTIVE
-          ? 10000
+          ? isBatchOnFinishMode
+            ? 60000
+            : 10000
           : 25000;
     const poll = window.setInterval(syncLatestCourseAndSession, pollIntervalMs);
     return () => window.clearInterval(poll);
   }, [
     activeSession?.id,
     activeSession?.status,
+    isBatchOnFinishMode,
     token,
     isEffectivelyOnline,
     cameraActiveFor,
@@ -752,15 +767,28 @@ export default function ParticipantView({
   const triggerSyncQueue = useCallback(
     async (
       showSilentIfEmpty = true,
-      sessionOverride?: ParticipantSession | null
+      sessionOverride?: ParticipantSession | null,
+      options?: {
+        forceSyncAll?: boolean;
+        onlyReportTypes?: Array<'START' | 'CHECKPOINT' | 'FINISH'>;
+      }
     ) => {
       const targetSession = sessionOverride || activeSession;
       if (!targetSession || !token) return;
+      const isFinishedNow =
+        sessionMarkedFinishedLocallyOrServer ||
+        targetSession.status === SessionStatus.FINISHED;
+      const effectiveOnlyReportTypes =
+        options?.onlyReportTypes ??
+        (isBatchOnFinishMode && !options?.forceSyncAll && !isFinishedNow
+          ? (['START'] as Array<'START' | 'CHECKPOINT' | 'FINISH'>)
+          : undefined);
       setIsSyncing(true);
       const outcome = await syncPendingReportsWithServer({
         sessionId: targetSession.id,
         token,
         isOfflineSimulated: simulatedOffline,
+        onlyReportTypes: effectiveOnlyReportTypes,
         sessionOverride: targetSession,
         onStatusUpdate: (updated) => setLocalReports(updated),
       });
@@ -824,7 +852,15 @@ export default function ParticipantView({
         });
       }
     },
-    [activeSession, token, simulatedOffline, mergeServerSessionSafely, showRunnerToast]
+    [
+      activeSession,
+      token,
+      simulatedOffline,
+      isBatchOnFinishMode,
+      sessionMarkedFinishedLocallyOrServer,
+      mergeServerSessionSafely,
+      showRunnerToast,
+    ]
   );
 
   // Simpan Identitas Tim Induk & Urutan Sub-Team pada Course Mode Relay
@@ -952,9 +988,9 @@ export default function ParticipantView({
     });
   }, [updateRealtimeGpsCoords]);
 
-  // Pelacakan GPS Lokal Real-Time (watchPosition) di HP Peserta (0 Kuota Data, memperbarui titik biru di Peta setiap peserta melangkah)
+  // Pelacakan GPS Lokal Real-Time (watchPosition) di HP Peserta (hanya aktif jika Course butuh GPS / Peta / Live Tracker)
   useEffect(() => {
-    if (!token || !participant || !activeCourse) return;
+    if (!token || !participant || !activeCourse || !needsLocalGpsSensor) return;
     if (typeof navigator === 'undefined' || !navigator.geolocation) return;
 
     let watchId: number | null = null;
@@ -989,10 +1025,18 @@ export default function ParticipantView({
         navigator.geolocation.clearWatch(watchId);
       }
     };
-  }, [token, participant, activeCourse?.id, updateRealtimeGpsCoords]);
+  }, [token, participant, activeCourse?.id, needsLocalGpsSensor, updateRealtimeGpsCoords]);
 
   const triggerSilentPeriodicLocationUpdate = useCallback(async () => {
-    if (!token || !participant || !activeSession || !activeCourse) return;
+    if (
+      !token ||
+      !participant ||
+      !activeSession ||
+      !activeCourse ||
+      !isLiveGpsTrackingEnabled
+    ) {
+      return;
+    }
 
     const perm = await checkGeolocationPermission();
     if (perm === 'unsupported' || perm === 'denied') return;
@@ -1035,13 +1079,21 @@ export default function ParticipantView({
     participant,
     activeSession,
     activeCourse,
+    isLiveGpsTrackingEnabled,
     simulatedOffline,
     updateRealtimeGpsCoords,
   ]);
 
   useEffect(() => {
     async function flushPendingLastLocation() {
-      if (!isEffectivelyOnline || !token || !activeSession) return;
+      if (
+        !isEffectivelyOnline ||
+        !token ||
+        !activeSession ||
+        !isLiveGpsTrackingEnabled
+      ) {
+        return;
+      }
       const pending = loadPendingLastLocationOnly(activeSession.id);
       if (!pending) return;
 
@@ -1057,11 +1109,24 @@ export default function ParticipantView({
       }
     }
     flushPendingLastLocation();
-  }, [isEffectivelyOnline, token, activeSession?.id, simulatedOffline]);
+  }, [
+    isEffectivelyOnline,
+    token,
+    activeSession?.id,
+    isLiveGpsTrackingEnabled,
+    simulatedOffline,
+  ]);
 
-  // PELACAKAN LOKASI BERKALA KE SERVER PANITIA (Mengirim 1 koordinat terakhir setiap GPS_INTERVAL_MS)
+  // PELACAKAN LOKASI BERKALA KE SERVER PANITIA (Hanya berjalan jika Live GPS Tracker aktif di Course)
   useEffect(() => {
-    if (!isSessionActivelyRunning || !activeCourse || !activeSession) return;
+    if (
+      !isSessionActivelyRunning ||
+      !activeCourse ||
+      !activeSession ||
+      !isLiveGpsTrackingEnabled
+    ) {
+      return;
+    }
 
     if (lastPeriodicAttemptMsRef.current === 0) {
       triggerSilentPeriodicLocationUpdate();
@@ -1089,6 +1154,7 @@ export default function ParticipantView({
     isSessionActivelyRunning,
     activeCourse,
     activeSession,
+    isLiveGpsTrackingEnabled,
     triggerSilentPeriodicLocationUpdate,
   ]);
 
@@ -1186,11 +1252,16 @@ export default function ParticipantView({
 
   useEffect(() => {
     if (!isEffectivelyOnline || !activeSession || !token) return;
-    const hasPending = localReports.some(
-      (r) =>
+    const hasPending = localReports.some((r) => {
+      const pending =
         r.syncStatus === SyncStatus.SAVED_LOCAL ||
-        r.syncStatus === SyncStatus.PENDING_SYNC
-    );
+        r.syncStatus === SyncStatus.PENDING_SYNC;
+      if (!pending) return false;
+      if (isBatchOnFinishMode && !sessionMarkedFinishedLocallyOrServer) {
+        return r.reportType === 'START';
+      }
+      return true;
+    });
     if (!hasPending) return;
 
     const timer = window.setInterval(() => {
@@ -1202,6 +1273,8 @@ export default function ParticipantView({
     activeSession,
     token,
     localReports,
+    isBatchOnFinishMode,
+    sessionMarkedFinishedLocallyOrServer,
     triggerSyncQueue,
   ]);
 
@@ -1223,6 +1296,76 @@ export default function ParticipantView({
       window.removeEventListener('pageshow', handleVisibilityResume);
     };
   }, [isEffectivelyOnline, activeSession, token, triggerSyncQueue]);
+
+  // Pengaman Baterai Kritis (<= 15%) pada Mode Kirim Saat Finish:
+  // Otomatis mengamankan cadangan data CP lokal ke server 1x sebelum HP mati total.
+  useEffect(() => {
+    if (
+      !isBatchOnFinishMode ||
+      !isSessionActivelyRunning ||
+      !isEffectivelyOnline ||
+      !activeSession ||
+      !token
+    ) {
+      return;
+    }
+    const pendingCpCount = localReports.filter(
+      (r) =>
+        r.reportType === 'CHECKPOINT' &&
+        (r.syncStatus === SyncStatus.SAVED_LOCAL ||
+          r.syncStatus === SyncStatus.PENDING_SYNC)
+    ).length;
+    if (pendingCpCount === 0) return;
+
+    const nav = typeof navigator !== 'undefined' ? (navigator as any) : null;
+    if (!nav || typeof nav.getBattery !== 'function') return;
+
+    let batteryObj: any = null;
+    let cancelled = false;
+
+    const checkAndBackupIfCritical = () => {
+      if (cancelled || !batteryObj) return;
+      const isLow =
+        typeof batteryObj.level === 'number' &&
+        batteryObj.level <= 0.15 &&
+        !batteryObj.charging;
+      if (isLow && lowBatteryBackupCountRef.current < pendingCpCount) {
+        lowBatteryBackupCountRef.current = pendingCpCount;
+        void triggerSyncQueue(true, activeSession, { forceSyncAll: true });
+        setFeedbackBanner({
+          type: 'warning',
+          text: 'Baterai HP ≤ 15% — cadangan data CP otomatis diamankan ke server.',
+        });
+      }
+    };
+
+    nav
+      .getBattery()
+      .then((bat: any) => {
+        if (cancelled || !bat) return;
+        batteryObj = bat;
+        checkAndBackupIfCritical();
+        bat.addEventListener?.('levelchange', checkAndBackupIfCritical);
+        bat.addEventListener?.('chargingchange', checkAndBackupIfCritical);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (batteryObj) {
+        batteryObj.removeEventListener?.('levelchange', checkAndBackupIfCritical);
+        batteryObj.removeEventListener?.('chargingchange', checkAndBackupIfCritical);
+      }
+    };
+  }, [
+    isBatchOnFinishMode,
+    isSessionActivelyRunning,
+    isEffectivelyOnline,
+    activeSession,
+    token,
+    localReports,
+    triggerSyncQueue,
+  ]);
 
   // Pengaman cegah tutup tab tidak sengaja saat sesi sedang berjalan aktif
   useEffect(() => {
@@ -1509,11 +1652,13 @@ export default function ParticipantView({
           },
         };
         setActiveSession(nextSessionState);
-        void sendLastLocationToServer({
-          token,
-          payload: instantLocPayload,
-          isOfflineSimulated: simulatedOffline,
-        });
+        if (isLiveGpsTrackingEnabled) {
+          void sendLastLocationToServer({
+            token,
+            payload: instantLocPayload,
+            isOfflineSimulated: simulatedOffline,
+          });
+        }
       }
 
       const timeStr = new Date(measuredAt).toLocaleTimeString('id-ID');
@@ -1531,23 +1676,41 @@ export default function ParticipantView({
         showRunnerToast(
           'success',
           '🏁 FINISH TERCATAT!',
-          `Waktu Finish disimpan (${timeStr}). Kerja bagus!`
+          isBatchOnFinishMode
+            ? `Finish (${timeStr}). Mengirim seluruh data CP ke panitia...`
+            : `Waktu Finish disimpan (${timeStr}). Kerja bagus!`
         );
       } else {
         showRunnerToast(
           'success',
           `✅ POS ${label} TERCATAT!`,
-          `Tersimpan pukul ${timeStr}. Lanjut ke pos berikutnya!`
+          isBatchOnFinishMode
+            ? `Disimpan di HP (${timeStr}). Akan dikirim saat Finish.`
+            : `Tersimpan pukul ${timeStr}. Lanjut ke pos berikutnya!`
         );
       }
 
       setFeedbackBanner({
         type: 'success',
-        text: `${label} berhasil disimpan di perangkat (${timeStr}).`,
+        text:
+          isBatchOnFinishMode && params.reportType === 'CHECKPOINT'
+            ? `${label} tersimpan di perangkat (${timeStr}) — dikirim otomatis saat Finish.`
+            : `${label} berhasil disimpan di perangkat (${timeStr}).`,
       });
 
-      // Sinkronisasi ke server di latar belakang dengan menyertakan snapshot sesi terbaru
-      await triggerSyncQueue(true, nextSessionState);
+      // Mode Kirim Saat Finish: Start tetap lapor 1x, CP ditahan di HP, Finish kirim semua sekaligus!
+      if (isBatchOnFinishMode && params.reportType === 'CHECKPOINT') {
+        return;
+      }
+      if (params.reportType === 'FINISH') {
+        await triggerSyncQueue(true, nextSessionState, { forceSyncAll: true });
+      } else if (isBatchOnFinishMode && params.reportType === 'START') {
+        await triggerSyncQueue(true, nextSessionState, {
+          onlyReportTypes: ['START'],
+        });
+      } else {
+        await triggerSyncQueue(true, nextSessionState);
+      }
     },
     [
       participant,
@@ -1556,6 +1719,8 @@ export default function ParticipantView({
       token,
       localReports,
       simulatedOffline,
+      isLiveGpsTrackingEnabled,
+      isBatchOnFinishMode,
       showRunnerToast,
       triggerSyncQueue,
     ]
@@ -1655,11 +1820,17 @@ export default function ParticipantView({
       const upperQr = cleanQr.toUpperCase();
       const expectedCpPrefix =
         `BARAKA:CP:${activeCourse.id}:${checkpoint.code}`.toUpperCase();
+      const sharedCpPrefix = activeCourse.sharedQrSourceCourseId
+        ? `BARAKA:CP:${activeCourse.sharedQrSourceCourseId}:${checkpoint.code}`.toUpperCase()
+        : null;
       const qrMatch =
         Boolean(cleanQr) &&
         (cleanQr === checkpoint.qrSecret ||
           upperQr === expectedCpPrefix ||
-          upperQr.startsWith(`${expectedCpPrefix}:`));
+          upperQr.startsWith(`${expectedCpPrefix}:`) ||
+          (sharedCpPrefix !== null &&
+            (upperQr === sharedCpPrefix ||
+              upperQr.startsWith(`${sharedCpPrefix}:`))));
 
       const baseRadius =
         checkpoint.radiusMeters || activeCourse.defaultGpsRadiusMeters || 35;
@@ -1851,8 +2022,15 @@ export default function ParticipantView({
       const upper = clean.toUpperCase();
       const expectedFinishCode =
         `BARAKA:FINISH:${activeCourse.id}`.toUpperCase();
+      const sharedFinishCode = activeCourse.sharedQrSourceCourseId
+        ? `BARAKA:FINISH:${activeCourse.sharedQrSourceCourseId}`.toUpperCase()
+        : null;
 
-      if (upper !== expectedFinishCode && clean !== activeCourse.finishQrCode) {
+      if (
+        upper !== expectedFinishCode &&
+        (sharedFinishCode === null || upper !== sharedFinishCode) &&
+        clean !== activeCourse.finishQrCode
+      ) {
         return {
           ok: false,
           severity: 'error',
@@ -2000,6 +2178,9 @@ export default function ParticipantView({
 
         const upperScanned = scanned.toUpperCase();
         const expectedStartCode = `BARAKA:START:${activeCourse.id}`.toUpperCase();
+        const sharedStartCode = activeCourse.sharedQrSourceCourseId
+          ? `BARAKA:START:${activeCourse.sharedQrSourceCourseId}`.toUpperCase()
+          : null;
         const expectedFinishCode = `BARAKA:FINISH:${activeCourse.id}`.toUpperCase();
 
         // KASUS 3: Deteksi apakah ini START QR atau sedang menekan tombol SCAN START
@@ -2029,9 +2210,10 @@ export default function ParticipantView({
             return;
           }
 
-          // Pastikan QR START adalah milik Course yang sedang dimuat
+          // Pastikan QR START adalah milik Course yang sedang dimuat (atau sumber Shared Control-nya)
           if (
             upperScanned !== expectedStartCode &&
+            (sharedStartCode === null || upperScanned !== sharedStartCode) &&
             scanned !== activeCourse.startQrCode
           ) {
             triggerRunnerFeedback('error');
@@ -2579,13 +2761,58 @@ export default function ParticipantView({
     }
   }
 
-  function handleLogout() {
+  async function cancelUnstartedSetupSession(authToken: string, sessionId?: string) {
+    try {
+      await Promise.race([
+        fetch('/api/participant/cancel-setup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(sessionId ? { sessionId } : {}),
+        }),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+    } catch {
+      // Abaikan error jaringan agar peserta tetap bisa keluar/ganti course saat offline
+    }
+  }
+
+  async function handleLogout() {
     // Jika peserta sedang berada dalam sesi lomba yang aktif atau sudah scan Start tapi belum Finish
     if (sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer) {
       setShowDnfLogoutModal(true);
       return;
     }
+    // Jika peserta baru Scan Setup QR (belum Start), tampilkan konfirmasi singkat sebelum membatalkan kesiapan & keluar
+    if (
+      activeSession &&
+      activeSession.status === SessionStatus.NOT_STARTED &&
+      !sessionMarkedFinishedLocallyOrServer
+    ) {
+      setShowSetupLogoutModal(true);
+      return;
+    }
+    // Bersihkan seluruh sisa sesi NOT_STARTED milik akun ini di server (jika ada) sebelum logout
+    if (token && isEffectivelyOnline) {
+      await cancelUnstartedSetupSession(token);
+    }
     executeCleanLogout();
+  }
+
+  async function handleConfirmSetupLogout() {
+    setIsCancellingSetupLogout(true);
+    try {
+      if (token && isEffectivelyOnline) {
+        // Hapus seluruh sesi NOT_STARTED milik akun ini di server agar bersih dari Mass Start, Monitoring & Leaderboard
+        await cancelUnstartedSetupSession(token);
+      }
+    } finally {
+      setIsCancellingSetupLogout(false);
+      setShowSetupLogoutModal(false);
+      executeCleanLogout();
+    }
   }
 
   function executeCleanLogout() {
@@ -2609,6 +2836,13 @@ export default function ParticipantView({
     setIsSubmittingDnf(true);
     try {
       if (token) {
+        // Flush seluruh antrean CP lokal dulu sebelum mencatat DNF (maks 3.5 detik agar tidak macet saat offline)
+        if (isEffectivelyOnline) {
+          await Promise.race([
+            triggerSyncQueue(true, activeSession, { forceSyncAll: true }),
+            new Promise((resolve) => setTimeout(resolve, 3500)),
+          ]).catch(() => {});
+        }
         await fetch('/api/participant/abandon-session', {
           method: 'POST',
           headers: {
@@ -2629,9 +2863,27 @@ export default function ParticipantView({
   }
 
   async function handleRestartFromBeginning() {
+    const wasRunningSession =
+      sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer;
+    const wasUnstartedSetupSession =
+      !wasRunningSession &&
+      Boolean(
+        activeSession &&
+          activeSession.status === SessionStatus.NOT_STARTED &&
+          !sessionMarkedFinishedLocallyOrServer
+      );
+
+    // Pastikan semua laporan CP lokal ikut terkirim ke panitia sebelum menutup sesi / mulai ulang
+    if (activeSession && token && isEffectivelyOnline && !wasUnstartedSetupSession) {
+      await Promise.race([
+        triggerSyncQueue(true, activeSession, { forceSyncAll: true }),
+        new Promise((resolve) => setTimeout(resolve, 3500)),
+      ]).catch(() => {});
+    }
+
     // JIKA SESI SEDANG BERJALAN AKTIF & BELUM FINISH:
     // Wajib tutup sesi saat ini di server sebagai DNF resmi sebelum peserta diizinkan scan Setup QR baru!
-    if (sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer && activeSession && token) {
+    if (wasRunningSession && activeSession && token) {
       try {
         await fetch('/api/participant/abandon-session', {
           method: 'POST',
@@ -2647,11 +2899,9 @@ export default function ParticipantView({
       } catch {
         // Abaikan jika offline, server tetap mencatat saat sinkronisasi
       }
-    }
-
-    // Pastikan semua laporan lokal disinkronkan ke server
-    if (activeSession && token && isEffectivelyOnline) {
-      await triggerSyncQueue(true);
+    } else if (wasUnstartedSetupSession && token && isEffectivelyOnline) {
+      // Batalkan seluruh sesi Siap Start (NOT_STARTED) milik akun ini di server agar bersih dari Mass Start & Monitoring
+      await cancelUnstartedSetupSession(token);
     }
 
     forceNewSessionRef.current = true;
@@ -2668,8 +2918,10 @@ export default function ParticipantView({
     });
     setFeedbackBanner({
       type: 'warning',
-      text: sessionCanRecordCheckpoints && !sessionMarkedFinishedLocallyOrServer
+      text: wasRunningSession
         ? 'Sesi sebelumnya resmi ditutup sebagai DNF (Gugur). Silakan Scan Setup QR dari panitia untuk memulai lomba baru!'
+        : wasUnstartedSetupSession
+        ? 'Sesi Siap Start sebelumnya telah dibatalkan. Silakan Scan Setup QR untuk memilih Course baru!'
         : 'Sesi sebelumnya tersimpan aman. Silakan Scan Setup QR untuk memulai Course baru!',
     });
   }
@@ -3495,6 +3747,63 @@ export default function ParticipantView({
                 ) : (
                   <>
                     <LogOut className="h-4 w-4" /> Ya, DNF
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          MODAL KONFIRMASI KELUAR SAAT SUDAH SCAN SETUP QR (BELUM START)
+         ==================================================================== */}
+      {showSetupLogoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm select-none">
+          <div className="w-full max-w-md rounded-2xl border border-amber-500/60 bg-slate-900 p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                <LogOut className="h-5 w-5" />
+              </div>
+              <h3 className="text-base font-extrabold text-white">
+                Keluar dari Course & Akun?
+              </h3>
+            </div>
+
+            <p className="text-xs text-slate-200 leading-relaxed">
+              Keluar sekarang akan <strong className="text-amber-300">membatalkan kesiapan Anda</strong> di{' '}
+              <strong className="text-white">{activeCourse?.name || 'Course ini'}</strong> dan menghapus nama tim dari daftar{' '}
+              <strong>Start, Monitoring, & Leaderboard</strong> (tidak dicatat sebagai DNF).
+            </p>
+
+            {!isEffectivelyOnline && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-200 leading-relaxed">
+                Perangkat sedang <strong>offline</strong>. Status Siap Start di layar panitia mungkin masih terlihat hingga dihapus panitia di menu Mass Start.
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowSetupLogoutModal(false)}
+                disabled={isCancellingSetupLogout}
+                className="w-full rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-[0.98] py-3 px-4 text-xs font-bold text-slate-200 transition cursor-pointer disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmSetupLogout()}
+                disabled={isCancellingSetupLogout}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-[0.98] py-3 px-4 text-xs font-extrabold text-white transition cursor-pointer disabled:opacity-60"
+              >
+                {isCancellingSetupLogout ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Keluar...
+                  </>
+                ) : (
+                  <>
+                    <LogOut className="h-4 w-4" /> Ya, Keluar
                   </>
                 )}
               </button>
@@ -4477,101 +4786,366 @@ export default function ParticipantView({
                           Daftar Pos Checkpoint
                         </span>
                         <span className="text-[11px] text-slate-400">
-                          Hijau = Sudah Tercatat
+                          {isBatchOnFinishMode
+                            ? 'Kirim saat Finish'
+                            : 'Hijau = Sudah Tercatat'}
                         </span>
                       </div>
-                      <div className="grid grid-cols-1 gap-2">
-                        {activeCourse.checkpoints.map((cp) => {
-                          const isServerValidated =
-                            activeSession.validatedCheckpointIds.includes(cp.id);
-                          const localCpReport = [...localReports]
-                            .reverse()
-                            .find(
-                              (r) =>
-                                r.reportType === 'CHECKPOINT' &&
-                                r.checkpointId === cp.id &&
-                                r.syncStatus !== SyncStatus.REJECTED_SERVER
-                            );
-                          const isDone =
-                            isServerValidated || Boolean(localCpReport);
+                      {(() => {
+                        const isStartFinishSame =
+                          typeof activeCourse.sameStartFinishLocation === 'boolean'
+                            ? activeCourse.sameStartFinishLocation
+                            : Boolean(
+                                activeCourse.startLocation &&
+                                  activeCourse.finishLocation &&
+                                  Math.abs(
+                                    activeCourse.startLocation.latitude -
+                                      activeCourse.finishLocation.latitude
+                                  ) < 0.00005 &&
+                                  Math.abs(
+                                    activeCourse.startLocation.longitude -
+                                      activeCourse.finishLocation.longitude
+                                  ) < 0.00005
+                              );
 
-                          return (
-                            <div
-                              key={cp.id}
-                              className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
-                                isDone
-                                  ? 'border-emerald-500/50 bg-emerald-950/35'
-                                  : 'border-slate-800 bg-slate-950/95'
-                              }`}
-                            >
-                              <div className="flex items-center gap-3">
-                                <Flag
-                                  className={`h-4 w-4 shrink-0 ${
-                                    isDone
-                                      ? 'text-emerald-400 fill-emerald-400'
-                                      : 'text-slate-300 fill-slate-300'
-                                  }`}
-                                />
-                                <span className="font-mono text-xs font-bold text-slate-400 w-7">
-                                  #{cp.orderIndex}
-                                </span>
-                                <div>
-                                  <span className="font-extrabold text-sm text-white">
-                                    {cp.code}
+                        const isStartServerValidated =
+                          Boolean(activeSession.startedAt) ||
+                          activeSession.status === SessionStatus.ACTIVE ||
+                          activeSession.status === SessionStatus.FINISHED;
+                        const localStartReport = [...localReports]
+                          .reverse()
+                          .find(
+                            (r) =>
+                              r.reportType === 'START' &&
+                              r.syncStatus !== SyncStatus.REJECTED_SERVER
+                          );
+                        const isStartDone =
+                          isStartServerValidated || Boolean(localStartReport);
+
+                        const isFinishServerValidated =
+                          activeSession.status === SessionStatus.FINISHED;
+                        const localFinishReport = [...localReports]
+                          .reverse()
+                          .find(
+                            (r) =>
+                              r.reportType === 'FINISH' &&
+                              r.syncStatus !== SyncStatus.REJECTED_SERVER
+                          );
+                        const isFinishDone =
+                          isFinishServerValidated || Boolean(localFinishReport);
+
+                        return (
+                          <div className="grid grid-cols-1 gap-2">
+                            {/* KARTU PERTAMA (SELALU TERATAS): START atau START/FINISH GABUNGAN */}
+                            {isStartFinishSame ? (
+                              <div
+                                className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
+                                  activeSession.isDnf
+                                    ? 'border-rose-500/50 bg-rose-950/30'
+                                    : isFinishDone || isStartDone
+                                    ? 'border-emerald-500/50 bg-emerald-950/35'
+                                    : 'border-slate-800 bg-slate-950/95'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <Flag
+                                    className={`h-4 w-4 shrink-0 ${
+                                      activeSession.isDnf
+                                        ? 'text-rose-400'
+                                        : isFinishDone || isStartDone
+                                        ? 'text-emerald-400 fill-emerald-400'
+                                        : 'text-emerald-300/80'
+                                    }`}
+                                  />
+                                  <span className="font-mono text-[11px] font-bold text-emerald-400 w-7">
+                                    S/F
                                   </span>
-                                  {cp.name ? (
-                                    <>
+                                  <div>
+                                    <span className="font-extrabold text-sm text-white">
+                                      START / FINISH
+                                    </span>
+                                    <span className="text-slate-300">
                                       {' '}
                                       —{' '}
-                                      <span className="text-slate-300">
-                                        {cp.name}
+                                      {activeCourse.startLocation?.name ||
+                                        activeCourse.finishLocation?.name ||
+                                        'Garis Start / Finish'}
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5 font-mono">
+                                      <span>
+                                        {effectiveStartIso
+                                          ? `Start: ${formatStartDateTimeLabel(effectiveStartIso)}`
+                                          : 'Lokasi Start & Finish Sama'}
                                       </span>
-                                    </>
-                                  ) : null}
-                                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5">
-                                    <span>{cp.points} Poin</span>
-                                    {participantSplitSummary.byCheckpointId.has(
-                                      cp.id
-                                    ) && (
-                                      <span className="inline-flex items-center gap-1 rounded bg-slate-900/90 border border-emerald-500/30 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
-                                        <span>
-                                          +
-                                          {formatStopwatchSeconds(
-                                            participantSplitSummary.byCheckpointId.get(
-                                              cp.id
-                                            )!.legSplitSeconds
-                                          )}
-                                        </span>
-                                        <span className="text-slate-500">•</span>
-                                        <span className="text-amber-300">
-                                          {formatStopwatchSeconds(
-                                            participantSplitSummary.byCheckpointId.get(
-                                              cp.id
-                                            )!.cumulativeSeconds
-                                          )}
-                                        </span>
+                                      {participantSplitSummary.finishSplitSeconds !==
+                                        undefined &&
+                                        participantSplitSummary.finishCumulativeSeconds !==
+                                          undefined && (
+                                          <span className="inline-flex items-center gap-1 rounded bg-slate-900/90 border border-sky-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                                            <span>
+                                              +
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.finishSplitSeconds
+                                              )}
+                                            </span>
+                                            <span className="text-slate-500">•</span>
+                                            <span className="text-amber-300">
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.finishCumulativeSeconds
+                                              )}
+                                            </span>
+                                          </span>
+                                        )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div>
+                                  {activeSession.isDnf ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-300">
+                                      DNF
+                                    </span>
+                                  ) : isFinishServerValidated ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                      <ShieldCheck className="h-3.5 w-3.5" /> Finish
+                                    </span>
+                                  ) : localFinishReport ? (
+                                    <SyncBadge status={localFinishReport.syncStatus} />
+                                  ) : isStartServerValidated ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                      <ShieldCheck className="h-3.5 w-3.5" /> Start
+                                    </span>
+                                  ) : localStartReport ? (
+                                    <SyncBadge status={localStartReport.syncStatus} />
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">
+                                      ▸ Belum
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
+                                  isStartDone
+                                    ? 'border-emerald-500/50 bg-emerald-950/35'
+                                    : 'border-slate-800 bg-slate-950/95'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <Play
+                                    className={`h-4 w-4 shrink-0 ${
+                                      isStartDone
+                                        ? 'text-emerald-400 fill-emerald-400'
+                                        : 'text-emerald-300/80'
+                                    }`}
+                                  />
+                                  <span className="font-mono text-[11px] font-bold text-emerald-400 w-7">
+                                    STR
+                                  </span>
+                                  <div>
+                                    <span className="font-extrabold text-sm text-white">
+                                      START
+                                    </span>
+                                    <span className="text-slate-300">
+                                      {' '}
+                                      —{' '}
+                                      {activeCourse.startLocation?.name ||
+                                        'Garis Start'}
+                                    </span>
+                                    <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                                      {effectiveStartIso
+                                        ? formatStartDateTimeLabel(effectiveStartIso)
+                                        : 'Titik Awal'}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div>
+                                  {isStartServerValidated ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                      <ShieldCheck className="h-3.5 w-3.5" /> Sah
+                                    </span>
+                                  ) : localStartReport ? (
+                                    <SyncBadge status={localStartReport.syncStatus} />
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">
+                                      ▸ Belum
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {activeCourse.checkpoints.map((cp) => {
+                              const isServerValidated =
+                                activeSession.validatedCheckpointIds.includes(cp.id);
+                              const localCpReport = [...localReports]
+                                .reverse()
+                                .find(
+                                  (r) =>
+                                    r.reportType === 'CHECKPOINT' &&
+                                    r.checkpointId === cp.id &&
+                                    r.syncStatus !== SyncStatus.REJECTED_SERVER
+                                );
+                              const isDone =
+                                isServerValidated || Boolean(localCpReport);
+
+                              return (
+                                <div
+                                  key={cp.id}
+                                  className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
+                                    isDone
+                                      ? 'border-emerald-500/50 bg-emerald-950/35'
+                                      : 'border-slate-800 bg-slate-950/95'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-3">
+                                    <Flag
+                                      className={`h-4 w-4 shrink-0 ${
+                                        isDone
+                                          ? 'text-emerald-400 fill-emerald-400'
+                                          : 'text-slate-300 fill-slate-300'
+                                      }`}
+                                    />
+                                    <span className="font-mono text-xs font-bold text-slate-400 w-7">
+                                      #{cp.orderIndex}
+                                    </span>
+                                    <div>
+                                      <span className="font-extrabold text-sm text-white">
+                                        {cp.code}
+                                      </span>
+                                      {cp.name ? (
+                                        <>
+                                          {' '}
+                                          —{' '}
+                                          <span className="text-slate-300">
+                                            {cp.name}
+                                          </span>
+                                        </>
+                                      ) : null}
+                                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                        <span>{cp.points} Poin</span>
+                                        {participantSplitSummary.byCheckpointId.has(
+                                          cp.id
+                                        ) && (
+                                          <span className="inline-flex items-center gap-1 rounded bg-slate-900/90 border border-emerald-500/30 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                                            <span>
+                                              +
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.byCheckpointId.get(
+                                                  cp.id
+                                                )!.legSplitSeconds
+                                              )}
+                                            </span>
+                                            <span className="text-slate-500">•</span>
+                                            <span className="text-amber-300">
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.byCheckpointId.get(
+                                                  cp.id
+                                                )!.cumulativeSeconds
+                                              )}
+                                            </span>
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    {isServerValidated ? (
+                                      <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                        <ShieldCheck className="h-3.5 w-3.5" /> Sah
+                                      </span>
+                                    ) : localCpReport ? (
+                                      <SyncBadge status={localCpReport.syncStatus} />
+                                    ) : (
+                                      <span className="text-[11px] text-slate-500">
+                                        ▸ Belum
                                       </span>
                                     )}
                                   </div>
                                 </div>
-                              </div>
-                              <div>
-                                {isServerValidated ? (
-                                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
-                                    <ShieldCheck className="h-3.5 w-3.5" /> Sah
+                              );
+                            })}
+
+                            {/* KARTU TERAKHIR (Hanya tampil jika Start & Finish lokasi terpisah) */}
+                            {!isStartFinishSame && (
+                              <div
+                                className={`flex items-center justify-between rounded-xl border px-3.5 py-3 text-xs shadow-sm transition ${
+                                  activeSession.isDnf
+                                    ? 'border-rose-500/50 bg-rose-950/30'
+                                    : isFinishDone
+                                    ? 'border-emerald-500/50 bg-emerald-950/35'
+                                    : 'border-slate-800 bg-slate-950/95'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <Flag
+                                    className={`h-4 w-4 shrink-0 ${
+                                      activeSession.isDnf
+                                        ? 'text-rose-400'
+                                        : isFinishDone
+                                        ? 'text-emerald-400 fill-emerald-400'
+                                        : 'text-sky-400'
+                                    }`}
+                                  />
+                                  <span className="font-mono text-[11px] font-bold text-sky-400 w-7">
+                                    FIN
                                   </span>
-                                ) : localCpReport ? (
-                                  <SyncBadge status={localCpReport.syncStatus} />
-                                ) : (
-                                  <span className="text-[11px] text-slate-500">
-                                    ▸ Belum
-                                  </span>
-                                )}
+                                  <div>
+                                    <span className="font-extrabold text-sm text-white">
+                                      FINISH
+                                    </span>
+                                    <span className="text-slate-300">
+                                      {' '}
+                                      —{' '}
+                                      {activeCourse.finishLocation?.name ||
+                                        'Garis Finish'}
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                      <span>Titik Akhir</span>
+                                      {participantSplitSummary.finishSplitSeconds !==
+                                        undefined &&
+                                        participantSplitSummary.finishCumulativeSeconds !==
+                                          undefined && (
+                                          <span className="inline-flex items-center gap-1 rounded bg-slate-900/90 border border-sky-500/30 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                                            <span>
+                                              +
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.finishSplitSeconds
+                                              )}
+                                            </span>
+                                            <span className="text-slate-500">•</span>
+                                            <span className="text-amber-300">
+                                              {formatStopwatchSeconds(
+                                                participantSplitSummary.finishCumulativeSeconds
+                                              )}
+                                            </span>
+                                          </span>
+                                        )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div>
+                                  {activeSession.isDnf ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-300">
+                                      DNF
+                                    </span>
+                                  ) : isFinishServerValidated ? (
+                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                                      <ShieldCheck className="h-3.5 w-3.5" /> Sah
+                                    </span>
+                                  ) : localFinishReport ? (
+                                    <SyncBadge status={localFinishReport.syncStatus} />
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">
+                                      ▸ Belum
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -4675,6 +5249,13 @@ export default function ParticipantView({
                         </strong>
                         .
                       </>
+                    ) : activeSession?.status === SessionStatus.NOT_STARTED &&
+                      !sessionMarkedFinishedLocallyOrServer ? (
+                      <>
+                        Batalkan kesiapan di Course ini dan kembali ke layar{' '}
+                        <strong>Scan Setup QR</strong>? Nama tim Anda akan
+                        dihapus dari daftar Start, Monitoring, & Leaderboard.
+                      </>
                     ) : (
                       <>
                         Kembali ke layar <strong>Scan Setup QR</strong>? Data
@@ -4751,10 +5332,12 @@ export default function ParticipantView({
                 {activeSession && (
                   <button
                     type="button"
-                    onClick={() => triggerSyncQueue(false)}
+                    onClick={() =>
+                      triggerSyncQueue(false, undefined, { forceSyncAll: true })
+                    }
                     disabled={isSyncing}
                     className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-700 disabled:opacity-50 cursor-pointer"
-                    title="Sinkronisasi ke Server"
+                    title="Sinkronisasi manual semua data ke Server"
                   >
                     <RefreshCw
                       className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`}
