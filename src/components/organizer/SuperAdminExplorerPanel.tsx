@@ -19,6 +19,8 @@ import {
   Compass,
   FileText,
   Sparkles,
+  Copy,
+  Check,
 } from 'lucide-react';
 import {
   AllTimePlatformStats,
@@ -559,11 +561,13 @@ interface ParticipantDetailModalProps {
   isSuperAdminReadOnly: boolean;
   resetParticipantPasswordId: string | null;
   resetParticipantPasswordValue: string;
+  copiedParticipantWaId?: string | null;
   onClose: () => void;
   onSetResetParticipantPasswordId: (id: string | null) => void;
   onSetResetParticipantPasswordValue: (val: string) => void;
   onSaveResetParticipantPassword: (participantId: string) => void;
   onConfirmDeleteParticipant: (participant: ParticipantPublic) => void;
+  onCopyParticipantWa?: (participant: ParticipantPublic) => void;
 }
 
 export function ParticipantDetailModal({
@@ -577,11 +581,13 @@ export function ParticipantDetailModal({
   isSuperAdminReadOnly,
   resetParticipantPasswordId,
   resetParticipantPasswordValue,
+  copiedParticipantWaId,
   onClose,
   onSetResetParticipantPasswordId,
   onSetResetParticipantPasswordValue,
   onSaveResetParticipantPassword,
   onConfirmDeleteParticipant,
+  onCopyParticipantWa,
 }: ParticipantDetailModalProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     initialSessionId || participantRows[0]?.sessionId || null
@@ -746,6 +752,30 @@ export function ParticipantDetailModal({
                 Pengelolaan Akun Tim Peserta:
               </span>
               <div className="flex flex-wrap items-center gap-2">
+                {onCopyParticipantWa && (
+                  <button
+                    type="button"
+                    onClick={() => onCopyParticipantWa(participant)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition cursor-pointer ${
+                      copiedParticipantWaId === participant.id
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-bold'
+                        : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                    }`}
+                    title="Salin format akun peserta untuk dikirim ke WhatsApp"
+                  >
+                    {copiedParticipantWaId === participant.id ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Tersalin!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Salin Akun WA</span>
+                      </>
+                    )}
+                  </button>
+                )}
                 {resetParticipantPasswordId === participant.id ? (
                   <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-lg border border-slate-700">
                     <input

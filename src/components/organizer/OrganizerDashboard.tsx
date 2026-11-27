@@ -545,6 +545,136 @@ export default function OrganizerDashboard({
   const [resetParticipantPasswordId, setResetParticipantPasswordId] = useState<string | null>(null);
   const [resetParticipantPasswordValue, setResetParticipantPasswordValue] = useState<string>('');
 
+  // Memo Kredensial Lokal & State Salin WA (Untuk Kirim Akun Organizer & Peserta ke WhatsApp)
+  const [credentialMemo, setCredentialMemo] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem('baraka_credential_memo_v1');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [copiedAccountWaId, setCopiedAccountWaId] = useState<string | null>(null);
+  const [lastCreatedOrganizerCred, setLastCreatedOrganizerCred] = useState<{
+    organizer: OrganizerPublic;
+    password: string;
+  } | null>(null);
+  const [lastCreatedParticipantCred, setLastCreatedParticipantCred] = useState<{
+    participant: ParticipantPublic;
+    password: string;
+  } | null>(null);
+
+  const saveCredentialToMemo = useCallback((accountId: string, plainPassword: string) => {
+    if (!accountId || !plainPassword) return;
+    setCredentialMemo((prev) => {
+      const next = { ...prev, [accountId]: plainPassword };
+      try {
+        localStorage.setItem('baraka_credential_memo_v1', JSON.stringify(next));
+      } catch {
+        // Abaikan jika storage penuh
+      }
+      return next;
+    });
+  }, []);
+
+  const buildOrganizerWhatsAppText = useCallback(
+    (org: OrganizerPublic, explicitPassword?: string) => {
+      const savedPass = explicitPassword || credentialMemo[org.id];
+      const quotaLabel =
+        org.maxCourses === null || org.maxCourses === undefined
+          ? 'Tak Terbatas (Unlimited)'
+          : `${org.maxCourses} Course`;
+      const expLabel = formatExpirationStatus(org.expiresAt).label;
+      const appUrl = typeof window !== 'undefined' ? window.location.origin : '';
+      return [
+        `*INFORMASI AKUN ORGANIZER - ORIENTRA*`,
+        `Halo *${org.name}*, berikut detail akses akun Organizer Anda:`,
+        ``,
+        `• *Nama Organizer:* ${org.name}`,
+        `• *Kode Organizer:* ${org.code}`,
+        ...(org.organization ? [`• *Instansi/Klub:* ${org.organization}`] : []),
+        `• *Username Login:* ${org.username}`,
+        `• *Password Login:* ${savedPass || '(Sesuai password yang didaftarkan)'}`,
+        `• *Kuota Course:* ${quotaLabel}`,
+        `• *Masa Aktif:* ${expLabel}`,
+        ``,
+        `*Link Login Aplikasi:*`,
+        appUrl,
+        `_(Pilih menu *Organizer*, lalu masuk menggunakan Username & Password di atas)_`,
+      ].join('\n');
+    },
+    [credentialMemo]
+  );
+
+  const buildParticipantWhatsAppText = useCallback(
+    (p: ParticipantPublic, explicitPassword?: string) => {
+      const savedPass = explicitPassword || credentialMemo[p.id];
+      const appUrl = typeof window !== 'undefined' ? window.location.origin : '';
+      return [
+        `*INFORMASI AKUN PESERTA - ORIENTRA*`,
+        `Halo Tim *${p.teamName}*, berikut detail akses akun peserta lomba Anda:`,
+        ``,
+        `• *Nama Tim (Login):* ${p.teamName}`,
+        `• *Nama Pendaftar:* ${p.name}`,
+        `• *No. BIB:* #${p.bibNumber || '-'}`,
+        `• *Kategori:* ${p.gender || 'Other'} • ${p.ageGroup || 'Semua Umur'}`,
+        `• *Password Login:* ${savedPass || '(Sesuai password saat pendaftaran)'}`,
+        ``,
+        `*Link Login Aplikasi:*`,
+        appUrl,
+        `_(Pilih menu *Peserta* -> tab *Masuk*, masukkan *Nama Tim* & *Password* di atas, lalu *Scan Setup QR* dari panitia)_`,
+      ].join('\n');
+    },
+    [credentialMemo]
+  );
+
+  const copyTextToClipboardWithFeedback = useCallback(
+    async (text: string, feedbackId: string, successLabel: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedAccountWaId(feedbackId);
+      showTemporarySuccess(successLabel);
+      setTimeout(() => {
+        setCopiedAccountWaId((prev) => (prev === feedbackId ? null : prev));
+      }, 2500);
+    },
+    []
+  );
+
+  const handleCopyOrganizerWa = useCallback(
+    (org: OrganizerPublic, explicitPassword?: string) => {
+      const text = buildOrganizerWhatsAppText(org, explicitPassword);
+      void copyTextToClipboardWithFeedback(
+        text,
+        org.id,
+        `Format WA akun Organizer "${org.name}" berhasil disalin! Siap di-paste ke WhatsApp.`
+      );
+    },
+    [buildOrganizerWhatsAppText, copyTextToClipboardWithFeedback]
+  );
+
+  const handleCopyParticipantWa = useCallback(
+    (p: ParticipantPublic, explicitPassword?: string) => {
+      const text = buildParticipantWhatsAppText(p, explicitPassword);
+      void copyTextToClipboardWithFeedback(
+        text,
+        p.id,
+        `Format WA akun Peserta Tim "${p.teamName}" berhasil disalin! Siap di-paste ke WhatsApp.`
+      );
+    },
+    [buildParticipantWhatsAppText, copyTextToClipboardWithFeedback]
+  );
+
   // Live timer tick for active sessions (1s on live monitoring/results tabs, 5s on course/organizer config tabs to prevent input & map jitter)
   const [nowTick, setNowTick] = useState<number>(Date.now());
   const hasActiveSession = useMemo(
@@ -735,9 +865,22 @@ export default function OrganizerDashboard({
           participants: [data.participantBackup],
         });
       }
+      const newPlainPass = resetParticipantPasswordValue.trim();
+      saveCredentialToMemo(participantId, newPlainPass);
+      const updatedPart: ParticipantPublic | undefined =
+        data.participant ||
+        dashboard?.participants.find((item) => item.id === participantId);
       setResetParticipantPasswordId(null);
       setResetParticipantPasswordValue('');
-      showTemporarySuccess(data.message || 'Password peserta berhasil diperbarui.');
+      if (updatedPart) {
+        setLastCreatedParticipantCred({
+          participant: updatedPart,
+          password: newPlainPass,
+        });
+        handleCopyParticipantWa(updatedPart, newPlainPass);
+      } else {
+        showTemporarySuccess(data.message || 'Password peserta berhasil diperbarui.');
+      }
       await fetchDashboard();
     } catch {
       setErrorMsg('Kesalahan jaringan saat mereset password peserta.');
@@ -2456,6 +2599,14 @@ export default function OrganizerDashboard({
           participants: [data.participantBackup],
         });
       }
+      const createdPlainPassword = partPin.trim();
+      if (data.participant?.id) {
+        saveCredentialToMemo(data.participant.id, createdPlainPassword);
+        setLastCreatedParticipantCred({
+          participant: data.participant,
+          password: createdPlainPassword,
+        });
+      }
       setPartName('');
       setPartTeam('');
       setPartGender('Other');
@@ -2635,6 +2786,14 @@ export default function OrganizerDashboard({
           organizers: [data.organizerBackup],
         });
       }
+      const createdOrgPassword = orgPinInput.trim();
+      if (data.organizer?.id) {
+        saveCredentialToMemo(data.organizer.id, createdOrgPassword);
+        setLastCreatedOrganizerCred({
+          organizer: data.organizer,
+          password: createdOrgPassword,
+        });
+      }
       setOrgNameInput('');
       setOrgUsernameInput('');
       setOrgOrganizationInput('');
@@ -2712,9 +2871,21 @@ export default function OrganizerDashboard({
           organizers: [data.organizerBackup],
         });
       }
+      const newOrgPlainPass = resetPinValue.trim();
+      saveCredentialToMemo(orgId, newOrgPlainPass);
+      const updatedOrg: OrganizerPublic | undefined =
+        data.organizer || dashboard?.organizers?.find((o) => o.id === orgId);
       setResetPinOrgId(null);
       setResetPinValue('');
-      showTemporarySuccess('Password Organizer berhasil diperbarui.');
+      if (updatedOrg) {
+        setLastCreatedOrganizerCred({
+          organizer: updatedOrg,
+          password: newOrgPlainPass,
+        });
+        handleCopyOrganizerWa(updatedOrg, newOrgPlainPass);
+      } else {
+        showTemporarySuccess('Password Organizer berhasil diperbarui.');
+      }
       await fetchDashboard();
     } catch {
       setErrorMsg('Kesalahan jaringan saat mereset Password Organizer.');
@@ -3952,6 +4123,49 @@ export default function OrganizerDashboard({
                       {partStatusMsg}
                     </div>
                   )}
+                  {lastCreatedParticipantCred && (
+                    <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 space-y-2 text-[11px]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-emerald-300">
+                          Akun Siap Kirim WA: {lastCreatedParticipantCred.participant.teamName}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setLastCreatedParticipantCred(null)}
+                          className="text-slate-400 hover:text-white cursor-pointer"
+                          title="Tutup kartu"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="font-mono text-slate-300 text-[10px] bg-slate-950/80 p-2 rounded border border-slate-800">
+                        <div>Nama Tim: <strong className="text-white">{lastCreatedParticipantCred.participant.teamName}</strong></div>
+                        <div>Password: <strong className="text-amber-300">{lastCreatedParticipantCred.password}</strong></div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyParticipantWa(
+                            lastCreatedParticipantCred.participant,
+                            lastCreatedParticipantCred.password
+                          )
+                        }
+                        className="w-full py-1.5 px-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      >
+                        {copiedAccountWaId === lastCreatedParticipantCred.participant.id ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Tersalin ke Clipboard!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Salin Akun Peserta untuk WA</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
                   <button
                     type="submit"
                     className="w-full py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer"
@@ -4081,6 +4295,29 @@ export default function OrganizerDashboard({
                           </button>
 
                           <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleCopyParticipantWa(p)}
+                              className={`px-2 py-1 rounded-lg border text-[10px] font-bold flex items-center gap-1 transition cursor-pointer ${
+                                copiedAccountWaId === p.id
+                                  ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                                  : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30'
+                              }`}
+                              title={`Salin info login Tim "${p.teamName}" untuk dikirim ke WhatsApp`}
+                            >
+                              {copiedAccountWaId === p.id ? (
+                                <>
+                                  <Check className="w-3 h-3" />
+                                  <span>Tersalin</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>Salin WA</span>
+                                </>
+                              )}
+                            </button>
+
                             <button
                               type="button"
                               onClick={() => {
@@ -6879,6 +7116,51 @@ export default function OrganizerDashboard({
                   </div>
                 )}
 
+                {lastCreatedOrganizerCred && (
+                  <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/40 space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-emerald-300">
+                        Akun Organizer Siap Kirim WA
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setLastCreatedOrganizerCred(null)}
+                        className="text-slate-400 hover:text-white cursor-pointer"
+                        title="Tutup kartu"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="font-mono text-[11px] text-slate-300 bg-slate-950/80 p-2.5 rounded-lg border border-slate-800 space-y-0.5">
+                      <div>Organizer: <strong className="text-white">{lastCreatedOrganizerCred.organizer.name}</strong> ({lastCreatedOrganizerCred.organizer.code})</div>
+                      <div>Username: <strong className="text-sky-300">{lastCreatedOrganizerCred.organizer.username}</strong></div>
+                      <div>Password: <strong className="text-amber-300">{lastCreatedOrganizerCred.password}</strong></div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyOrganizerWa(
+                          lastCreatedOrganizerCred.organizer,
+                          lastCreatedOrganizerCred.password
+                        )
+                      }
+                      className="w-full py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      {copiedAccountWaId === lastCreatedOrganizerCred.organizer.id ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Tersalin ke Clipboard!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Salin Akun Organizer untuk WA</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
@@ -6973,6 +7255,29 @@ export default function OrganizerDashboard({
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyOrganizerWa(org)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer flex items-center gap-1.5 shadow ${
+                              copiedAccountWaId === org.id
+                                ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                                : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                            }`}
+                            title={`Salin format info akun Organizer "${org.name}" untuk dikirim ke WhatsApp`}
+                          >
+                            {copiedAccountWaId === org.id ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Tersalin!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                <span>Salin WA</span>
+                              </>
+                            )}
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => {
@@ -7691,6 +7996,7 @@ export default function OrganizerDashboard({
           isSuperAdminReadOnly={isSuperAdminReadOnly}
           resetParticipantPasswordId={resetParticipantPasswordId}
           resetParticipantPasswordValue={resetParticipantPasswordValue}
+          copiedParticipantWaId={copiedAccountWaId}
           onClose={() => {
             setDetailModalParticipant(null);
             setDetailModalSessionId(null);
@@ -7702,6 +8008,7 @@ export default function OrganizerDashboard({
             setDetailModalParticipant(null);
             setConfirmDeleteParticipant(p);
           }}
+          onCopyParticipantWa={(p) => handleCopyParticipantWa(p)}
         />
       )}
       {/* Modal Override Manual Estafet Panitia (Darurat Offline / Baterai Habis) */}
